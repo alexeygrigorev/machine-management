@@ -40,6 +40,17 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 | Local node | newest **7 days** (`LOCAL_KEEP_DAYS`), pruned by the script — protects the 250 GB NVMe |
 | In-script S3 prune | backstop only, default **OFF** (`S3_PRUNE_ENABLED=0`) |
 
+
+## IAM / bucket (MAIN, 2026-10-22)
+
+| Item | Value |
+|------|-------|
+| Bucket | `dtc-coolify-backups-387546586013` (`eu-west-1`) |
+| IAM user | `coolify-s3-backup-writer` (prefix `coolify/*` only) |
+| Keys | `~/tmp/secrets/coolify-s3-backup-writer-2026-10-22.env` on Tabo + Hetzner; Coolify storage `dtc-coolify-backups` |
+| Terraform | `DataTalksClub/aws-infra` → `main/coolify-backups/` (no access keys in TF) |
+| Coolify UI storage | name `dtc-coolify-backups`, uuid `f8qhiqm4oe0p70yrnld5up17` (validated) |
+
 ## Secrets (never in git)
 
 Real values live **only** in:

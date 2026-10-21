@@ -51,3 +51,8 @@ credentials doc and on operator machines under `~/tmp/secrets/` (not in git).
 - Contingency: [`contingency/replace-host.md`](../contingency/replace-host.md)
 - Thin SOP pointers (DataTalksClub knowledge only — no script copies):
   `DataTalksClub/dataops-knowledge` → Coolify Contabo hosts reference + Harden VPS SSH SOP
+
+## S3 backups (MAIN)
+
+- Bucket `dtc-coolify-backups-387546586013` / IAM `coolify-s3-backup-writer` — see `../backups/README.md` and aws-infra `main/coolify-backups/`.
+- Coolify storage name `dtc-coolify-backups` (primary UI). Keys only under `~/tmp/secrets/` + Drive doc.
