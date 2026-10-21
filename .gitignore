@@ -1,0 +1,10 @@
+# secrets never belong here
+*.pem
+*.key
+id_*
+!id_*.pub
+.env
+.env.*
+**/secrets/
+**/tmp/secrets/
+.vps-root-pw
