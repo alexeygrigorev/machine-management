@@ -1,0 +1,18 @@
+# Permanent continuous healthcheck — cron entry for the Coolify node(s).
+#
+# Cadence: EVERY 5 MINUTES (continuous), Europe/Berlin wall clock.
+# This is deliberately frequent: unlike backups/ (daily dumps), a dead DB or
+# app must page dev@ within minutes, not next day.
+#
+# Install (idempotent) with:  sudo ./monitors/install-coolify-healthcheck.sh <ssh-host>
+# which writes this file to /etc/cron.d/coolify-healthcheck on the target node.
+#
+# Alternative: run the same script as a Coolify "Scheduled Task" on the node
+# with schedule `*/5 * * * *` and command
+# `/usr/local/sbin/coolify-healthcheck.sh` (env file must exist on that host).
+#
+# Tune: change */5 to */1 or */2 for 1–2 min cadence once SMTP is proven
+# (watch alert + log volume first).
+
+TZ=Europe/Berlin
+*/5 * * * * root /usr/local/sbin/coolify-healthcheck.sh >> /var/log/coolify-healthcheck.log 2>&1

@@ -48,6 +48,7 @@ credentials doc and on operator machines under `~/tmp/secrets/` (not in git).
 
 - Bootstrap: [`scripts/bootstrap-vps-ssh.sh`](../scripts/bootstrap-vps-ssh.sh)
 - Daily DB backups: [`backups/`](../backups/) — `pg_dump` → S3, `30 2 * * *` Europe/Berlin (pg-shared + pg-relay, separate)
+- Continuous healthcheck: [`monitors/`](../monitors/) — pg-shared + pg-relay + HTTP apps, `*/5 * * * *` Europe/Berlin, alerts dev@dtcdev.click
 - Contingency: [`contingency/replace-host.md`](../contingency/replace-host.md)
 - Thin SOP pointers (DataTalksClub knowledge only — no script copies):
   `DataTalksClub/dataops-knowledge` → Coolify Contabo hosts reference + Harden VPS SSH SOP

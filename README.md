@@ -16,6 +16,7 @@ keeps **thin SOP / reference pages that link here** — no duplicate heavy scrip
 |------|---------|
 | [`scripts/bootstrap-vps-ssh.sh`](scripts/bootstrap-vps-ssh.sh) | Ubuntu 24.04 SSH bootstrap (keys, sudo user, sshd harden, fail2ban, ufw) |
 | [`backups/`](backups/) | Daily Coolify `pg_dump` → S3 job (pg-shared + pg-relay), cron, installer, S3 lifecycle example |
+| [`monitors/`](monitors/) | **Permanent continuous** healthcheck (pg-shared + pg-relay + HTTP apps, every 5 min, alerts dev@), cron, installer |
 | [`inventory/hosts.md`](inventory/hosts.md) | Contabo Coolify IPs, order refs, SSH aliases — **no secrets** |
 | [`contingency/replace-host.md`](contingency/replace-host.md) | Dead-host / replace stubs |
 
