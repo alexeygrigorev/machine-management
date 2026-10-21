@@ -1,0 +1,15 @@
+# Daily Coolify pg_dump -> S3 — cron entry for the data node (contabo-b).
+#
+# Cadence: ONCE PER DAY at 02:30 Europe/Berlin (matches today's SnapshotExport /
+# Hetzner daily-dump cadence: "backup every day like now").
+# TZ= pins the wall-clock time regardless of the host's system timezone.
+#
+# Install (idempotent) with:  sudo ./backups/install-coolify-pg-dump.sh
+# which writes this file to /etc/cron.d/coolify-pg-dump on the target node.
+#
+# Alternative: run the same script as a Coolify "Scheduled Task" on the data
+# node with schedule `30 2 * * *` and command
+# `/usr/local/sbin/coolify-pg-dump.sh` (env file must exist on that host).
+
+TZ=Europe/Berlin
+30 2 * * * root /usr/local/sbin/coolify-pg-dump.sh >> /var/log/coolify-pg-dump.log 2>&1

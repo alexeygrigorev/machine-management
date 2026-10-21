@@ -15,6 +15,7 @@ keeps **thin SOP / reference pages that link here** — no duplicate heavy scrip
 | Path | Purpose |
 |------|---------|
 | [`scripts/bootstrap-vps-ssh.sh`](scripts/bootstrap-vps-ssh.sh) | Ubuntu 24.04 SSH bootstrap (keys, sudo user, sshd harden, fail2ban, ufw) |
+| [`backups/`](backups/) | Daily Coolify `pg_dump` → S3 job (pg-shared + pg-relay), cron, installer, S3 lifecycle example |
 | [`inventory/hosts.md`](inventory/hosts.md) | Contabo Coolify IPs, order refs, SSH aliases — **no secrets** |
 | [`contingency/replace-host.md`](contingency/replace-host.md) | Dead-host / replace stubs |
 
@@ -61,6 +62,7 @@ In `DataTalksClub/dataops-knowledge`:
 
 - Reference: Coolify Contabo hosts (short pointer → this repo)
 - SOP: Harden VPS root access to SSH keys (procedure summary → script here)
+- SOP: Coolify Contabo contingency and database backups (schedule + S3 layout → [`backups/`](backups/) here)
 
 Upstream pattern: gist `alexeygrigorev/5c1135fdfce97d3938a24c0f3dcc0ab2`
 (`01-hetzner.md`, `02-ssh.md`).

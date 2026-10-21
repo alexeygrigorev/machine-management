@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "coolify-postgres-daily-30d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "coolify/postgres/" },
+      "Expiration": { "Days": 30 },
+      "AbortIncompleteMultipartUpload": { "AbortIncompleteMultipartUploadDaysAfterInitiation": 7 }
+    }
+  ]
+}
