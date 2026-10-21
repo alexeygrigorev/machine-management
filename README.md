@@ -66,3 +66,7 @@ In `DataTalksClub/dataops-knowledge`:
 
 Upstream pattern: gist `alexeygrigorev/5c1135fdfce97d3938a24c0f3dcc0ab2`
 (`01-hetzner.md`, `02-ssh.md`).
+
+## Observability
+
+Post-cutover LGTM design lives in DataTalksClub knowledge (SOP). Thin pointer: [`observability/README.md`](observability/README.md). During migration: healthchecks only — do not install the stack in the cutover window.
