@@ -1,0 +1,6 @@
+# Dead-man: alert if weekly fast PG raise has no success within ~8 days (t1119u).
+# Daily 09:00 Europe/Berlin on contabo-a (local VictoriaMetrics + msmtp→SES).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Berlin
+0 9 * * * root /usr/local/sbin/dr-raise-stale-check.sh >> /var/log/dr-raise-stale-check.log 2>&1
