@@ -39,14 +39,14 @@ LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-healthcheck.lock}"
 LOG_FILE="${LOG_FILE:-/var/log/coolify-healthcheck.log}"
 
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
-PGUSER_SHARED="${PGUSER_SHARED:-postgres}"
+PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"   # Coolify standalone PG superuser (POSTGRES_USER=pgadmin; no 'postgres' role)
 PG_SHARED_DB="${PG_SHARED_DB:-postgres}"   # db used for SELECT 1 on pg-shared
 PGHOST_SHARED="${PGHOST_SHARED:-127.0.0.1}"
 PGPORT_SHARED="${PGPORT_SHARED:-5433}"
 PGPASSWORD_SHARED="${PGPASSWORD_SHARED:-}"
 
 PG_RELAY_CONTAINER="${PG_RELAY_CONTAINER:-}"
-PGUSER_RELAY="${PGUSER_RELAY:-postgres}"
+PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"     # Coolify standalone PG superuser (no 'postgres' role)
 PG_RELAY_DB="${PG_RELAY_DB:-postgres}"     # db used for SELECT 1 on pg-relay
 PGHOST_RELAY="${PGHOST_RELAY:-127.0.0.1}"
 PGPORT_RELAY="${PGPORT_RELAY:-5434}"
