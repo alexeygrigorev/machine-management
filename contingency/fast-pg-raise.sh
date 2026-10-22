@@ -38,7 +38,9 @@ DBS="${DBS:-cmp aisl website relay}"
 log() { printf '[fast-pg-raise %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 if [ ! -f "$PGPW_FILE" ]; then
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 >"$PGPW_FILE"
+  # NOTE: `head -c` closes the pipe early → tr dies with SIGPIPE (141);
+  # `|| true` keeps `set -euo pipefail` from killing the raise here.
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 >"$PGPW_FILE" || true
   chmod 600 "$PGPW_FILE"
   log "generated PG password at $PGPW_FILE"
 fi
