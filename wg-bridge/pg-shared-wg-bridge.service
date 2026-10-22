@@ -1,0 +1,17 @@
+[Unit]
+Description=pg-shared WG bridge (10.100.0.2:5432 via socat)
+Documentation=https://github.com/alexeygrigorev/machine-management/tree/main/wg-bridge
+After=wg-quick@wg0.service docker.service network-online.target
+Wants=wg-quick@wg0.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/pg-shared-wg-bridge
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

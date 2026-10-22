@@ -1,0 +1,24 @@
+services:
+  pg-shared-wg-bridge:
+    # Pinned patch version — never :latest (matches the 2026-10-22 ad-hoc bridge).
+    image: alpine/socat:1.8.0.1
+    container_name: pg-shared-wg-bridge
+    # NOTE: the image ENTRYPOINT is already `socat` — command is just the 2 addresses.
+    command: ["TCP-LISTEN:5432,fork,reuseaddr", "TCP:ekm57uezdngrrscn0aqzidr8:5432"]
+    restart: unless-stopped
+    networks:
+      - coolify
+    # Bind ONLY the WireGuard IP. Requires net.ipv4.ip_nonlocal_bind=1
+    # (wg-bridge/99-wg-bind.conf) so the bind survives wg0 coming up late.
+    ports:
+      - "10.100.0.2:5432:5432"
+    logging:
+      driver: json-file
+      options:
+        max-file: "3"
+        max-size: 10m
+
+networks:
+  coolify:
+    external: true
+    name: coolify
