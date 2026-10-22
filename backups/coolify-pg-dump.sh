@@ -21,10 +21,12 @@
 # Exit code: 0 only if every configured database dumped AND uploaded.
 set -euo pipefail
 
-ENV_FILE="${COOLIFFY_ENV_FILE:-${COOLIFY_PGDUMP_ENV_FILE:-/etc/coolify-pg-dump.env}}"
+ENV_FILE="${COOLIFY_ENV_FILE:-${COOLIFY_PGDUMP_ENV_FILE:-/etc/coolify-pg-dump.env}}"
 if [[ -f "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  set -a; source "$ENV_FILE"; set +a
+  set -a
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+  set +a
 fi
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
@@ -58,10 +60,15 @@ S3_RETENTION_DAYS="${S3_RETENTION_DAYS:-30}"
 [[ -n "$S3_BUCKET" ]] || fail "S3_BUCKET is not set (see coolify-pg-dump.env.example)"
 [[ -n "$PG_SHARED_DBS" || -n "$PG_RELAY_DB" ]] || fail "no databases configured (PG_SHARED_DBS / PG_RELAY_DB)"
 
-for bin in pg_dump docker gzip aws; do
-  command -v "$bin" >/dev/null 2>&1 || fail "missing required binary: $bin"
+for bin in docker gzip aws flock; do
+  command -v "$bin" >/dev/null 2>&1 || fail "missing required binary on host: $bin"
 done
-command -v flock >/dev/null 2>&1 || fail "missing required binary: flock"
+
+# pg_dump is only required on host when dumping via TCP fallback (without container exec)
+if { [[ -n "$PG_SHARED_DBS" ]] && [[ -z "$PG_SHARED_CONTAINER" ]]; } || \
+   { [[ -n "$PG_RELAY_DB" ]] && [[ -z "$PG_RELAY_CONTAINER" ]]; }; then
+  command -v pg_dump >/dev/null 2>&1 || fail "missing required binary on host for TCP dumps: pg_dump (apt install postgresql-client)"
+fi
 
 mkdir -p "$DUMP_DIR"
 exec 9>"$LOCK_FILE"
