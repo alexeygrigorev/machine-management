@@ -74,7 +74,20 @@ PG_RELAY_CONTAINER="$(resolve_pg_container "$PG_RELAY_CONTAINER" "pg-relay")"
 
 # Space-separated name=url pairs, e.g.:
 #   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.example.com/healthz"
+# NOTE: these are STATUS-ONLY checks (2xx/3xx). They catch TCP/DNS outages
+# but NOT wrong-content incidents (proxy default page, error page with 200).
+# Pair every user-facing surface with a CONTENT_CHECKS entry below.
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
+
+# Space-separated name=url::marker triples for CONTENT-marker checks.
+# The URL must return 2xx/3xx AND its body must contain the marker.
+# Matching: body is lowercased + all whitespace stripped, then fixed-string
+# (grep -F) matched — so write markers LOWERCASE with NO whitespace.
+# Split is on the FIRST '=' (name|rest) then the FIRST '::' (url|marker):
+# names/URLs must not contain '::' (no IPv6 literals), markers must not
+# contain spaces or '::'. Example:
+#   CONTENT_CHECKS="courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\""
+CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 
 ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
@@ -237,6 +250,32 @@ check_http() {
   mark_ok "$name"
 }
 
+check_content() {
+  # $1=name $2=url $3=marker (lowercase, no whitespace — see CONTENT_CHECKS)
+  local name="content-${1}" url="$2" marker="$3" code rc body_file
+  body_file="$(mktemp)" || { log "FAIL check=${name}: mktemp failed"; FAILED=1; return; }
+  code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    log "FAIL check=${name}: curl ${url}: rc=${rc} detail='${code}'"
+    send_alert "$name" "FAIL" "Content check failed for '${1}' (${url}): curl rc=${rc}: ${code}"
+    FAILED=1; rm -f "$body_file"; return
+  fi
+  if [[ ! "$code" =~ ^[23] ]]; then
+    log "FAIL check=${name}: ${url} returned HTTP ${code} (want 2xx/3xx; marker not evaluated)"
+    send_alert "$name" "FAIL" "Content check for '${1}' (${url}) returned status ${code}; marker '${marker}' not evaluated."
+    FAILED=1; rm -f "$body_file"; return
+  fi
+  if tr '[:upper:]' '[:lower:]' < "$body_file" | tr -d '[:space:]' | grep -Fq -- "$marker"; then
+    log "OK check=${name}: ${url} -> ${code} marker='${marker}'"
+    mark_ok "$name"
+  else
+    log "FAIL check=${name}: ${url} -> ${code} but marker '${marker}' absent"
+    send_alert "$name" "FAIL" "Content check for '${1}' (${url}) returned HTTP ${code} but the body lacks marker '${marker}' — the app may be serving wrong content (proxy default page, error page with 200, or empty body)."
+    FAILED=1
+  fi
+  rm -f "$body_file"
+}
+
 # ---- run ----
 # Set SKIP_PG_SHARED=1 / SKIP_PG_RELAY=1 on hosts that cannot reach Postgres
 # (e.g. contabo-a when PG is docker-only on contabo-b).
@@ -263,6 +302,21 @@ if [[ -n "${APP_URLS:-}" ]]; then
   done
 else
   log "WARN: APP_URLS is empty — no HTTP checks configured (fill /etc/coolify-healthcheck.env)"
+fi
+
+if [[ -n "${CONTENT_CHECKS:-}" ]]; then
+  # shellcheck disable=SC2086
+  for entry in $CONTENT_CHECKS; do
+    app="${entry%%=*}"; rest="${entry#*=}"
+    url="${rest%%::*}"; marker="${rest#*::}"
+    if [[ -z "$app" || -z "$url" || -z "$marker" || "$url" == "$rest" || "$marker" == "$rest" ]]; then
+      log "WARN: skipping malformed CONTENT_CHECKS entry: ${entry} (want name=url::marker)"
+      continue
+    fi
+    check_content "$app" "$url" "$marker"
+  done
+else
+  log "WARN: CONTENT_CHECKS is empty — no content-marker checks configured (status-only APP_URLS miss wrong-content incidents)"
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then

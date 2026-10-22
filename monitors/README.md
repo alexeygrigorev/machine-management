@@ -21,6 +21,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | **pg-shared** | `pg_isready` + `psql SELECT 1` via `PG_SHARED_CONTAINER` (`docker exec`), or TCP `PGHOST_SHARED:PGPORT_SHARED` when the container var is empty |
 | **pg-relay** | same via `PG_RELAY_CONTAINER` / `PGHOST_RELAY:PGPORT_RELAY` (own instance, never shared) |
 | **HTTP apps** | `curl` expects 2xx/3xx for each `name=url` pair in `APP_URLS`: Coolify UI, Relay, CMP, AISHL, website |
+| **Content markers** | each `name=url::marker` triple in `CONTENT_CHECKS` must return 2xx/3xx **and** the body (lowercased, whitespace-stripped) must contain the marker verbatim — catches proxy-default-page / error-page-with-200 incidents that status-only checks miss |
 
 > Coolify `standalone-postgresql` uses `POSTGRES_USER=pgadmin` — there is no
 > `postgres` role. Always use `PGUSER_*=pgadmin` (script default); `psql -U

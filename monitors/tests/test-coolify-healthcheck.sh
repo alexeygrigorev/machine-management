@@ -123,5 +123,92 @@ else
   fail "T5 explicit env (rc=$rc) -- $out"
 fi
 
+# ---- T6-T9: content-marker checks (t1037u: not status-only) ----
+mkdir -p "$TMP/cbin"
+cat > "$TMP/cbin/curl" <<'EOF'
+#!/usr/bin/env bash
+# Fake curl for content checks: honors -o <file> and always prints the
+# canned HTTP code on stdout. Body selected by URL substring:
+#   *good*  -> 200 + body containing the marker (mixed case + whitespace)
+#   *wrong* -> 200 + proxy-default body WITHOUT the marker
+#   *empty* -> 200 + empty body
+#   *fivehundred* -> 500
+#   *down*  -> curl rc=7 (connect failed)
+out=""; url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -w) shift 2;;
+    --connect-timeout|--max-time) shift 2;;
+    -*) shift;;
+    *) url="$1"; shift;;
+  esac
+done
+case "$url" in
+  *good*) printf '  { "STATUS": "OK" }  ' > "$out"; echo "200"; exit 0;;
+  *wrong*) printf '<html>proxy default backend page</html>' > "$out"; echo "200"; exit 0;;
+  *empty*) : > "$out"; echo "200"; exit 0;;
+  *fivehundred*) printf 'error' > "$out"; echo "500"; exit 0;;
+  *down*) echo "curl: (7) Failed to connect" >&2; echo ""; exit 7;;
+  *) echo "stub curl: unknown url $url" >&2; exit 99;;
+esac
+EOF
+chmod +x "$TMP/cbin/curl"
+
+run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
+  local statedir
+  statedir="$(mktemp -d -p "$TMP")"
+  printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'ALERT_TO=test@example.com' > "$TMP/env-content-base"
+  COOLIFY_HEALTHCHECK_ENV_FILE="$TMP/env-content-base" \
+  STATE_DIR="$statedir" \
+  LOCK_FILE="$TMP/clock-$RANDOM" \
+  APP_URLS="" \
+  CONTENT_CHECKS="$1" \
+  PATH="$TMP/cbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+}
+
+# T6: marker present (case/whitespace-insensitive) -> green
+out=""; set +e; out="$(run_content 'svc=https://example.test/good::"status":"ok"')"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=content-svc'* ]]; then
+  pass "T6 content marker match green (rc=$rc)"
+else
+  fail "T6 content match (rc=$rc) -- $out"
+fi
+
+# T7: HTTP 200 but marker absent (proxy default page) -> FAIL
+out=""; set +e; out="$(run_content 'svc=https://example.test/wrong::"status":"ok"')"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *"marker"*"absent"* ]]; then
+  pass "T7 wrong-content 200 FAILs on missing marker (rc=$rc)"
+else
+  fail "T7 wrong-content (rc=$rc) -- $out"
+fi
+
+# T8: empty 200 body -> FAIL (catches empty-backend incidents)
+out=""; set +e; out="$(run_content 'svc=https://example.test/empty::"status":"ok"')"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=content-svc'* ]]; then
+  pass "T8 empty-body 200 FAILs (rc=$rc)"
+else
+  fail "T8 empty body (rc=$rc) -- $out"
+fi
+
+# T9: connect failure + HTTP 500 -> FAIL (marker stage never masks transport)
+out=""; set +e; out="$(run_content 'svc=https://example.test/down::"status":"ok"')"; rc=$?; set -e
+t9a=1; [[ $rc -ne 0 && "$out" == *'FAIL check=content-svc'* ]] || t9a=0
+out=""; set +e; out="$(run_content 'svc=https://example.test/fivehundred::"status":"ok"')"; rc=$?; set -e
+if [[ $t9a -eq 1 && $rc -ne 0 && "$out" == *'returned HTTP 500'* ]]; then
+  pass "T9 transport/500 FAILs before marker match"
+else
+  fail "T9 transport/500 -- $out"
+fi
+
+# T10: malformed CONTENT_CHECKS entry is skipped with WARN, others still run
+out=""; set +e; out="$(run_content 'bogus-no-delimiter svc=https://example.test/good::"status":"ok"')"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'skipping malformed CONTENT_CHECKS entry'* && "$out" == *'OK check=content-svc'* ]]; then
+  pass "T10 malformed entry skipped, good entry green"
+else
+  fail "T10 malformed entry (rc=$rc) -- $out"
+fi
+
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]
