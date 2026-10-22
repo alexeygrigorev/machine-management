@@ -61,11 +61,14 @@ Real values live **only** in:
 2. `/etc/coolify-pg-dump.env` on contabo-b (root-only `600`), plus operator
    hosts under `~/.secrets/` (`~/tmp/secrets` is a compat symlink).
 
-## Enable (once Postgres exists on Contabo)
+## Enable
 
-> Status today (2026-10-22): Postgres is **not yet** on Contabo — the
-> migration cutover is owned by parallel agents. Ship this job now; enable it
-> the day the data node has real databases. Do **not** invent running dumps.
+> Status 2026-10-22 (t1037u): Postgres **is** on Contabo (cutover done-ish):
+> `pg-shared` (`ekm57…`, PG16, DBs `cmp`/`aisl`/`website`) and `pg-relay`
+> (`mqime…`, PG16, DB `relay`) on contabo-b. Coolify scheduled dumps run
+> ~06:00 Berlin. Enable the cron-script path below so the canonical S3
+> layout is covered even if Coolify schedules change; enable basebackup + WAL
+> per the CDC section.
 
 1. From an operator box (Hetzner RMTHZ):
    `./backups/install-coolify-pg-dump.sh contabo-b`
@@ -104,6 +107,7 @@ production restore so the next dump matches the restored state.
 | `coolify-pg-dump.cron` | `30 2 * * *` Europe/Berlin entry |
 | `coolify-pg-dump.env.example` | placeholders for `/etc/coolify-pg-dump.env` |
 | `install-coolify-pg-dump.sh` | operator-box installer (scp + cron, never overwrites env) |
+<<<<<<< Updated upstream
 | `coolify-cp-backup.sh` | **control-plane** job: `coolify-db` dump + encrypted `.env`/SSH-keys bundle → S3 |
 | `coolify-cp-backup.cron` | `30 3 * * *` Europe/Berlin entry (one hour after app-DB dumps) |
 | `coolify-cp-backup.env.example` | placeholders for `/etc/coolify-cp-backup.env` (+ `/etc/coolify-cp-backup.pass`) |
@@ -139,3 +143,46 @@ gpg --batch --pinentry-mode loopback --passphrase-file ~/tmp/secrets/coolify-cp-
 
 Coolify auto-update is **OFF** on both CP hosts
 (`instance_settings.is_auto_update_enabled=false`); upgrades are manual.
+=======
+| `s3-lifecycle.example.json` | 30-day S3 retention rule for the `coolify/postgres/` prefix |
+| `coolify-pg-basebackup.sh` | weekly `pg_basebackup -Ft -z -X stream` → S3 `…/<stack>/base/…` (no restart needed) |
+| `coolify-pg-basebackup.cron` | `0 3 * * 0` Europe/Berlin entry (same env file as dumps) |
+| `coolify-wal-archive.sh` | `archive_command` helper: segment → gzip → S3 `…/<stack>/wal/…` |
+| `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
+| `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
+
+## CDC: backup base + replay (t1037u, post-cutover)
+
+Alexey's ask: if the database dies, take a backup and **replay everything**
+onto a fresh DB. Mechanism chosen (2026-10-22):
+
+| Option | Verdict | Reason |
+|--------|---------|--------|
+| Physical WAL shipping + weekly base + daily dump | **ADOPTED** | RPO minutes with zero app changes; DBs < 1 GB total; no new fleet |
+| Debezium / Kafka / logical-decoding pipeline | Rejected | No stream consumers exist; new stateful fleet on 250 GB NVMe boxes for <500 MB DBs |
+| RDS → Contabo logical replication | Rejected as forward path | Wrong direction post-cutover (Contabo is primary); was a pre-cutover dual-run tool only |
+| Dump-only (daily `pg_dump`) | Kept as tier-1 (RPO ≤ 24 h) | Already running via Coolify ~06:00 Berlin; table-level restore; replay script proves it |
+
+Resulting tiers:
+
+| Tier | RPO | Path |
+|------|-----|------|
+| Dump restore | ≤ 24 h | daily dump (`coolify-pg-dump.sh` or Coolify schedule) → `coolify-pg-replay.sh --mode dump` |
+| PITR to tip | minutes | weekly base (`coolify-pg-basebackup.sh`) + WAL archive (`coolify-wal-archive.sh`) → `coolify-pg-replay.sh --mode pitr` |
+
+WAL rollout order (each step is a Hub task; restart = operator window):
+
+1. Install helper + env on contabo-b (`coolify-wal-archive.sh` →
+   `/usr/local/sbin/`, `/etc/coolify-wal-archive.env` root 600).
+2. Run `coolify-wal-enable.sh --stack pg-shared --container <name>` (stages
+   config, prints restart command). Same for `pg-relay`.
+3. Maintenance window: `docker restart` per instance, verify `SHOW
+   archive_mode;` = `on`, `SELECT pg_switch_wal();`, confirm WAL objects land
+   in S3, then weekly basebackup cron.
+4. PITR drill on Hetzner throwaway via `coolify-pg-replay.sh --mode pitr`
+   before relying on it.
+
+CloudWatch dual-run: keep AWS CloudWatch while RDS still lives (default
+there, no action); LGTM on Contabo is authoritative for Contabo Postgres.
+Revisit at RDS decommission (human decision, separate Hub task).
+>>>>>>> Stashed changes

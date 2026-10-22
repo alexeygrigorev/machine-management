@@ -1,0 +1,4 @@
+# Weekly Coolify pg_basebackup -> S3 (base for dump+WAL replay).
+# Same env file as the daily dumps (/etc/coolify-pg-dump.env) — configure once.
+TZ=Europe/Berlin
+0 3 * * 0 root /usr/local/sbin/coolify-pg-basebackup.sh >> /var/log/coolify-pg-basebackup.log 2>&1
