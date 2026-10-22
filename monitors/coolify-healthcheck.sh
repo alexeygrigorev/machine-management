@@ -13,7 +13,7 @@
 #   3. HTTP/app endpoints:  configurable list (Coolify UI, Relay, CMP, AISHL,
 #      website) — curl must return 2xx/3xx within the timeout.
 #
-# Alerting: on failure, sends email to ALERT_TO (default dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click)
+# Alerting: on failure, sends email to ALERT_TO (default dev@dtcdev.click)
 # via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
 # while still failing; a RECOVERED notice goes out on transition back to OK.
@@ -56,7 +56,7 @@ PGPASSWORD_RELAY="${PGPASSWORD_RELAY:-}"
 #   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.example.com/healthz"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 
-ALERT_TO="${ALERT_TO:-dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 
@@ -90,7 +90,7 @@ send_alert() {
   fi
   local full_subject="[coolify-healthcheck] ${subject} (${name})"
   local sent="no"
-  # ALERT_TO may be comma-separated (e.g. dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click)
+  # ALERT_TO may be comma-separated; prod default is only dev@dtcdev.click
   local to_csv="${ALERT_TO// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()
