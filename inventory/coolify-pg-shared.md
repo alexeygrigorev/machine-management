@@ -16,6 +16,7 @@ live under `~/.secrets/` (chmod 600; `~/tmp/secrets` is a compat symlink) on the
 | Destination | `5daaeeunpkuxtyv6l8tw3yqs` (standalone, network `coolify`) |
 | Public | no (internal-only, no public port) |
 | Status at creation | `running:healthy` |
+| Applied 2026-10-22 (t1143u) | `shm_size: 2g` via Coolify `custom_docker_run_options=--shm-size=2g` + API restart; `HostConfig.ShmSize=2147483648`, `shared_buffers=1GB`, `wal_keep_size=1GB`, still `running:healthy`. Full conf + evidence: `~/tmp/agent-reports/dr-p1-pg-shm-apply-t1143u-2026-10-22.md` |
 | Superuser | `pgadmin` (pw: `~/.secrets/postgres-pg-shared-169.58.124.141.pw`) |
 
 ## Logical databases + owners (all unprivileged: NOSUPERUSER, NOCREATEDB, NOCREATEROLE)
@@ -42,5 +43,8 @@ verified for all three (`psql -h 127.0.0.1`).
 ## Explicitly NOT done (per brief)
 
 - PG17 `dtc-postgres` (`glbxtdxkfhdwetll38lfb87r`) untouched — new DBs NOT placed there.
-- `pg-relay` / Relay stack untouched (owned by `coolify-relay-prep` session).
+- `pg-relay` / Relay stack (owned by `coolify-relay-prep` session) — note: on 2026-10-22
+  (t1143u) pg-relay got the same `shm_size=2g` + `shared_buffers=1GB` treatment as pg-shared
+  (its staged 8 GB conf never ran and was scaled down to fit 2g shm); see
+  `~/tmp/agent-reports/dr-p1-pg-shm-apply-t1143u-2026-10-22.md`. No other Relay changes.
 - No DNS / CloudFront changes, no AWS RDS changes, no Coolify reinstall/session work.
