@@ -55,11 +55,13 @@ docker exec "$CONTAINER" psql -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c \
 docker exec "$CONTAINER" psql -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c \
   "ALTER SYSTEM SET max_wal_senders = '10';"
 docker exec "$CONTAINER" psql -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c \
+  "ALTER SYSTEM SET wal_keep_size = '1GB';"
+docker exec "$CONTAINER" psql -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c \
   "ALTER SYSTEM SET archive_timeout = '300';"
 
 echo "--- staged (pending restart) ---"
 docker exec "$CONTAINER" psql -U "$PGUSER" -d postgres -tAc \
-  "SELECT name, setting, pending_restart FROM pg_settings WHERE name IN ('wal_level','archive_mode','archive_command','max_wal_senders','archive_timeout') ORDER BY 1;"
+  "SELECT name, setting, pending_restart FROM pg_settings WHERE name IN ('wal_level','archive_mode','archive_command','max_wal_senders','wal_keep_size','archive_timeout') ORDER BY 1;"
 
 cat <<EOF
 

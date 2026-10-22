@@ -46,7 +46,9 @@ for bin in docker aws gzip flock find; do
 done
 
 # Stack -> container mapping. Same containers as /etc/coolify-pg-dump.env.
-STACKS="${WAL_STACKS:-pg-shared}"
+# Default covers BOTH stacks (pg-relay enabled 2026-10-22 t1143u); override
+# with WAL_STACKS="pg-shared" in /etc/coolify-wal-archive.env to narrow.
+STACKS="${WAL_STACKS:-pg-shared pg-relay}"
 declare -A CONTAINER_FOR=(
   [pg-shared]="${PG_SHARED_CONTAINER:-ekm57uezdngrrscn0aqzidr8}"
   [pg-relay]="${PG_RELAY_CONTAINER:-mqimefrti7ratmaliirnikov}"

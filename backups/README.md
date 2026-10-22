@@ -183,6 +183,17 @@ WAL rollout order (each step is a Hub task; restart = operator window):
 4. PITR drill on Hetzner throwaway via `coolify-pg-replay.sh --mode pitr`
    before relying on it.
 
+Status 2026-10-22 (t1143u): BOTH stacks live — `pg-shared` (`ekm57…`) and
+`pg-relay` (`mqime…`) spool via the same `archive_command`
+(`PGDATA/wal_spool`), and the per-minute shipper
+(`WAL_STACKS="pg-shared pg-relay"` in `/etc/coolify-wal-archive.env`)
+uploads to `s3://<bucket>/coolify/postgres/<stack>/wal/…` with S3
+read-back (`/var/lib/coolify-wal-shipper/last-success-<stack>`; healthcheck
+`WAL_STACKS` covers both). `pg-relay` was restarted once to activate
+`archive_mode=on` (+ `wal_keep_size='1GB'` backstop, same as pg-shared);
+`pg-shared` untouched. `coolify-wal-shipper.sh` now defaults to both
+stacks (skips stacks with no spool dir yet).
+
 CloudWatch dual-run: keep AWS CloudWatch while RDS still lives (default
 there, no action); LGTM on Contabo is authoritative for Contabo Postgres.
 Revisit at RDS decommission (human decision, separate Hub task).
