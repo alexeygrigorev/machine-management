@@ -22,6 +22,14 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | **pg-relay** | same via `PG_RELAY_CONTAINER` / `PGHOST_RELAY:PGPORT_RELAY` (own instance, never shared) |
 | **HTTP apps** | `curl` expects 2xx/3xx for each `name=url` pair in `APP_URLS`: Coolify UI, Relay, CMP, AISHL, website |
 
+> Coolify `standalone-postgresql` uses `POSTGRES_USER=pgadmin` — there is no
+> `postgres` role. Always use `PGUSER_*=pgadmin` (script default); `psql -U
+> postgres` fails with `FATAL: role "postgres" does not exist` (incident
+> 2026-10-22, pg-relay). When `PG_*_CONTAINER` is empty the script
+> auto-resolves the container via the stable Coolify label
+> (`coolify.resourceName=pg-shared|pg-relay`), so random uuid renames on
+> redeploy do not break the check. Explicit names still win when set.
+
 State (last status + last alert time per check) lives in `/var/lib/coolify-healthcheck/`
 so alerts dedupe across runs. Exit `0` = all green, `1` = something failed
 (cron output also lands in `/var/log/coolify-healthcheck.log`).

@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Regression test: 2026-10-22 pg-relay healthcheck FAIL
+#   SELECT 1 failed for relay via container mqimefrti7ratmaliirnikov (rc=2):
+#   psql: FATAL: role "postgres" does not exist
+#
+# Root cause: Coolify standalone-postgresql creates only POSTGRES_USER
+# (pgadmin) — no `postgres` role. The script used to default to
+# PGUSER_*=postgres / PG_RELAY_DB=postgres, so any run without the fixed
+# env failed exactly like the alert.
+#
+# Runs the real script with stub docker/curl on PATH (no DB needed).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+SCRIPT="$REPO/monitors/coolify-healthcheck.sh"
+DUMP="$REPO/backups/coolify-pg-dump.sh"
+
+PASS=0
+FAILN=0
+pass() { PASS=$((PASS+1)); echo "PASS: $1"; }
+fail() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
+
+# ---- T1: syntax ----
+if bash -n "$SCRIPT" && bash -n "$DUMP"; then pass "T1 bash -n (healthcheck + pg-dump)"; else fail "T1 bash -n"; fi
+
+# ---- T2: safe defaults in repo ----
+check_grep() { # $1=file $2=pattern $3=label
+  if grep -qF "$2" "$1"; then pass "$3"; else fail "$3 (missing: $2)"; fi
+}
+check_grep "$SCRIPT" 'PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"' "T2a relay user default is pgadmin"
+check_grep "$SCRIPT" 'PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"' "T2b shared user default is pgadmin"
+check_grep "$SCRIPT" 'PG_RELAY_DB="${PG_RELAY_DB:-relay}"' "T2c relay db default is relay"
+check_grep "$SCRIPT" 'coolify.resourceName' "T2d container auto-discovery via Coolify label"
+check_grep "$SCRIPT" 'does not exist' "T2e role-missing hint present"
+check_grep "$DUMP" 'PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"' "T2f pg-dump relay user default is pgadmin"
+
+# ---- stub binaries ----
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/stubbin" "$TMP/state"
+cat > "$TMP/stubbin/docker" <<'EOF'
+#!/usr/bin/env bash
+# Fake docker: pg_isready always accepting (mirrors incident: pg_isready was
+# green, SELECT 1 red); psql succeeds only for -U pgadmin, else the exact
+# 2026-10-22 error with rc=2.
+if [[ "${1:-}" == "ps" ]]; then
+  for a in "$@"; do
+    case "$a" in
+      *pg-relay*) echo "fake-relay-uuid"; exit 0;;
+      *pg-shared*) echo "fake-shared-uuid"; exit 0;;
+    esac
+  done
+  exit 0
+fi
+[[ "${1:-}" == "exec" ]] || { echo "stub docker: unsupported: $*" >&2; exit 99; }
+shift; _container="$1"; shift; _cmd="$1"; shift
+_user=""; _db=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -U) _user="$2"; shift 2;;
+    -d) _db="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [[ "$_cmd" == "pg_isready" ]]; then
+  echo "${_container}:5432 - accepting connections"
+  exit 0
+fi
+if [[ "$_cmd" == "psql" ]]; then
+  if [[ "$_user" != "pgadmin" ]]; then
+    echo "psql: error: connection to server on socket \"/var/run/postgresql/.s.PGSQL.5432\" failed: FATAL:  role \"${_user}\" does not exist" >&2
+    exit 2
+  fi
+  echo "1"
+  exit 0
+fi
+echo "stub docker: unsupported cmd: $_cmd" >&2; exit 99
+EOF
+cat > "$TMP/stubbin/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "200"; exit 0
+EOF
+chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/curl"
+
+run_check() { # $1=envfile -> prints output, returns script rc
+  local envf="$1" statedir
+  statedir="$(mktemp -d -p "$TMP")"
+  COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
+  STATE_DIR="$statedir" \
+  LOCK_FILE="$TMP/lock-$RANDOM" \
+  APP_URLS="" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+}
+
+# ---- T3: incident repro — stale PGUSER_RELAY=postgres must FAIL like the alert ----
+printf '%s\n' 'SKIP_PG_SHARED=1' 'PG_RELAY_CONTAINER=fake-relay-uuid' \
+  'PGUSER_RELAY=postgres' 'PG_RELAY_DB=postgres' 'ALERT_TO=test@example.com' > "$TMP/env-stale"
+out=""; set +e; out="$(run_check "$TMP/env-stale")"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'role "postgres" does not exist'* && "$out" == *'HINT'* ]]; then
+  pass "T3 stale postgres user FAILs with alert error + hint (rc=$rc)"
+else
+  fail "T3 incident repro (rc=$rc) -- $out"
+fi
+
+# ---- T4: fixed defaults + label auto-discovery — empty env must go green ----
+: > "$TMP/env-empty"
+out=""; set +e; out="$(run_check "$TMP/env-empty")"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'ALL_OK'* && "$out" == *'OK check=pg-relay'* ]]; then
+  pass "T4 empty env green via pgadmin defaults + auto-discovery"
+else
+  fail "T4 empty env (rc=$rc) -- $out"
+fi
+
+# ---- T5: explicit contabo-b-style env stays green ----
+printf '%s\n' 'PG_SHARED_CONTAINER=fake-shared-uuid' 'PGUSER_SHARED=pgadmin' 'PG_SHARED_DB=postgres' \
+  'PG_RELAY_CONTAINER=fake-relay-uuid' 'PGUSER_RELAY=pgadmin' 'PG_RELAY_DB=relay' > "$TMP/env-good"
+out=""; set +e; out="$(run_check "$TMP/env-good")"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'ALL_OK'* ]]; then
+  pass "T5 explicit pgadmin/relay env green"
+else
+  fail "T5 explicit env (rc=$rc) -- $out"
+fi
+
+echo "---- $PASS passed, $FAILN failed ----"
+[[ "$FAILN" -eq 0 ]]

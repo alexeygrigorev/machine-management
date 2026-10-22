@@ -39,18 +39,38 @@ LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-healthcheck.lock}"
 LOG_FILE="${LOG_FILE:-/var/log/coolify-healthcheck.log}"
 
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
-PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"   # Coolify standalone PG superuser (POSTGRES_USER=pgadmin; no 'postgres' role)
+# Coolify standalone-postgresql creates only the POSTGRES_USER role (pgadmin) —
+# there is NO `postgres` role (2026-10-22 pg-relay alert: FATAL: role "postgres" does not exist).
+PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"
 PG_SHARED_DB="${PG_SHARED_DB:-postgres}"   # db used for SELECT 1 on pg-shared
 PGHOST_SHARED="${PGHOST_SHARED:-127.0.0.1}"
 PGPORT_SHARED="${PGPORT_SHARED:-5433}"
 PGPASSWORD_SHARED="${PGPASSWORD_SHARED:-}"
 
 PG_RELAY_CONTAINER="${PG_RELAY_CONTAINER:-}"
-PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"     # Coolify standalone PG superuser (no 'postgres' role)
-PG_RELAY_DB="${PG_RELAY_DB:-postgres}"     # db used for SELECT 1 on pg-relay
+PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"
+PG_RELAY_DB="${PG_RELAY_DB:-relay}"        # db used for SELECT 1 on pg-relay (NOT postgres)
 PGHOST_RELAY="${PGHOST_RELAY:-127.0.0.1}"
 PGPORT_RELAY="${PGPORT_RELAY:-5434}"
 PGPASSWORD_RELAY="${PGPASSWORD_RELAY:-}"
+
+# Coolify gives Postgres containers random uuid names (e.g. mqimefrti7ratmaliirnikov)
+# that change on redeploy. When PG_*_CONTAINER is empty, resolve via the stable
+# Coolify label (coolify.resourceName=pg-shared|pg-relay) on the local docker.
+resolve_pg_container() {
+  # $1=current value $2=coolify.resourceName
+  local cur="$1" label="$2" found=""
+  if [[ -z "$cur" ]] && command -v docker >/dev/null 2>&1; then
+    found="$(docker ps --filter "label=coolify.resourceName=${label}" --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    if [[ -n "$found" ]]; then
+      echo "$found"
+      return 0
+    fi
+  fi
+  echo "$cur"
+}
+PG_SHARED_CONTAINER="$(resolve_pg_container "$PG_SHARED_CONTAINER" "pg-shared")"
+PG_RELAY_CONTAINER="$(resolve_pg_container "$PG_RELAY_CONTAINER" "pg-relay")"
 
 # Space-separated name=url pairs, e.g.:
 #   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.example.com/healthz"
@@ -163,6 +183,9 @@ check_postgres() {
     out="$(docker exec "$container" psql -U "$user" -d "$db" -tAc 'SELECT 1' 2>&1)" && rc=0 || rc=$?
     if [[ "$rc" -ne 0 || "$(echo "$out" | tr -d '[:space:]')" != "1" ]]; then
       log "FAIL check=${name}: SELECT 1 via ${container}: rc=${rc} out='${out}'"
+      if [[ "$out" == *'role "'*'" does not exist'* ]]; then
+        log "HINT check=${name}: Coolify Postgres has no 'postgres' role — set PGUSER_${stack^^} to the Coolify POSTGRES_USER (usually pgadmin) in ${ENV_FILE}"
+      fi
       send_alert "$name" "FAIL" "SELECT 1 failed for ${stack} via container ${container} (rc=${rc}): ${out}"
       FAILED=1; return
     fi
@@ -185,6 +208,9 @@ check_postgres() {
     out="$(PGPASSWORD="$password" PGHOST="$host" PGPORT="$port" PGUSER="$user" psql -d "$db" -tAc 'SELECT 1' 2>&1)" && rc=0 || rc=$?
     if [[ "$rc" -ne 0 || "$(echo "$out" | tr -d '[:space:]')" != "1" ]]; then
       log "FAIL check=${name}: SELECT 1 ${host}:${port}/${db}: rc=${rc} out='${out}'"
+      if [[ "$out" == *'role "'*'" does not exist'* ]]; then
+        log "HINT check=${name}: Coolify Postgres has no 'postgres' role — set PGUSER_${stack^^} to the Coolify POSTGRES_USER (usually pgadmin) in ${ENV_FILE}"
+      fi
       send_alert "$name" "FAIL" "SELECT 1 failed for ${stack} at ${host}:${port}/${db} (rc=${rc}): ${out}"
       FAILED=1; return
     fi

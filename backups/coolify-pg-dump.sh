@@ -43,8 +43,8 @@ PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
 PG_RELAY_CONTAINER="${PG_RELAY_CONTAINER:-}"
 PG_SHARED_DBS="${PG_SHARED_DBS:-}"     # space-separated, e.g. "cmp aishl website"
 PG_RELAY_DB="${PG_RELAY_DB:-}"         # single db name on pg-relay
-PGUSER_SHARED="${PGUSER_SHARED:-postgres}"
-PGUSER_RELAY="${PGUSER_RELAY:-postgres}"
+PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"
+PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"
 # TCP fallback (only used when *_CONTAINER is empty):
 PGHOST_SHARED="${PGHOST_SHARED:-127.0.0.1}"
 PGPORT_SHARED="${PGPORT_SHARED:-5433}"
