@@ -1,0 +1,25 @@
+# t1040u: expose Coolify API (PathPrefix /api only) via Traefik for GHA.
+# Keeps host :8000 closed by DOCKER-USER edge allowlist.
+# Install: sudo cp edge/traefik/coolify-api-gha.yml /data/coolify/proxy/dynamic/
+# COOLIFY_URL=https://coolify.169.58.119.163.sslip.io
+http:
+  routers:
+    coolify-api-http:
+      rule: "Host(`coolify.169.58.119.163.sslip.io`) && PathPrefix(`/api`)"
+      entryPoints:
+        - http
+      service: coolify-api-svc
+      priority: 200
+    coolify-api-https:
+      rule: "Host(`coolify.169.58.119.163.sslip.io`) && PathPrefix(`/api`)"
+      entryPoints:
+        - https
+      service: coolify-api-svc
+      priority: 200
+      tls:
+        certResolver: letsencrypt
+  services:
+    coolify-api-svc:
+      loadBalancer:
+        servers:
+          - url: "http://10.0.1.4:8080"

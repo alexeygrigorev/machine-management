@@ -42,3 +42,11 @@ No secrets in git: `origin-verify-canary.yml` (with the real header value) is
 rendered on the operator box from `$X_ORIGIN_VERIFY` and exists only on the
 Contabo hosts (`0600`). The repo holds only `origin-verify.yml.example` with
 a placeholder.
+
+## Coolify API for GHA (t1040u)
+
+DOCKER-USER keeps host `:8000` closed. GHA reaches Coolify via Traefik:
+
+- File: `edge/traefik/coolify-api-gha.yml` → `/data/coolify/proxy/dynamic/` on contabo-a
+- URL: `https://coolify.169.58.119.163.sslip.io` (LE cert; `/api` only)
+- GitHub env secret `COOLIFY_URL` for website / AISHL / CMP / relay `coolify-staging`
