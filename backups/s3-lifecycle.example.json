@@ -15,6 +15,14 @@
       "Expiration": { "Days": 14 },
       "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
       "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
+      "ID": "coolify-control-plane-30d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "coolify/control-plane/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     }
   ]
 }

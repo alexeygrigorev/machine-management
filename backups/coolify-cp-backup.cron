@@ -1,0 +1,15 @@
+# Nightly Coolify control-plane backup -> S3 — cron entry for EACH CP host.
+#
+# Cadence: ONCE PER DAY at 03:30 Europe/Berlin (one hour after the 02:30
+# app-DB dumps to avoid IO contention on shared NVMe).
+# TZ= pins the wall-clock time regardless of the host's system timezone.
+#
+# Install (idempotent) with:  sudo ./backups/install-coolify-cp-backup.sh <ssh-host>
+# which writes this file to /etc/cron.d/coolify-cp-backup on the target node.
+#
+# RPO: <= 24 h for coolify-db + .env/SSH-keys bundle.
+# Retention: S3 lifecycle 30 d on coolify/control-plane/ (see
+# s3-lifecycle-cp.example.json); local copies 7 d (LOCAL_KEEP_DAYS).
+
+TZ=Europe/Berlin
+30 3 * * * root /usr/local/sbin/coolify-cp-backup.sh >> /var/log/coolify-cp-backup.log 2>&1

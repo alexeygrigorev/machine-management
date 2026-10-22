@@ -104,4 +104,38 @@ production restore so the next dump matches the restored state.
 | `coolify-pg-dump.cron` | `30 2 * * *` Europe/Berlin entry |
 | `coolify-pg-dump.env.example` | placeholders for `/etc/coolify-pg-dump.env` |
 | `install-coolify-pg-dump.sh` | operator-box installer (scp + cron, never overwrites env) |
-| `s3-lifecycle.example.json` | 30-day S3 retention rule for the `coolify/postgres/` prefix |
+| `coolify-cp-backup.sh` | **control-plane** job: `coolify-db` dump + encrypted `.env`/SSH-keys bundle → S3 |
+| `coolify-cp-backup.cron` | `30 3 * * *` Europe/Berlin entry (one hour after app-DB dumps) |
+| `coolify-cp-backup.env.example` | placeholders for `/etc/coolify-cp-backup.env` (+ `/etc/coolify-cp-backup.pass`) |
+| `install-coolify-cp-backup.sh` | operator-box installer for the CP job (per CP host, never overwrites env) |
+| `s3-lifecycle.example.json` | 30-day S3 retention rules for `coolify/postgres/`, `coolify/obs/` (14d), `coolify/control-plane/` |
+
+## Control-plane backups (Coolify CP itself — live since 2026-10-22)
+
+Each CP host (`contabo-a` .163, `contabo-b` .141) runs
+`/usr/local/sbin/coolify-cp-backup.sh` nightly at `30 3 * * *`
+Europe/Berlin (`/etc/cron.d/coolify-cp-backup`):
+
+```
+s3://<BACKUP_BUCKET>/coolify/control-plane/<contabo-a-163|contabo-b-141>/YYYY/MM/DD/coolify-db-<host>-<STAMP>.dump.gz
+s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/YYYY/MM/DD/coolify-cp-bundle-<host>-<STAMP>.tar.gz.gpg
+```
+
+The bundle holds `coolify.env` (+ `.env.production`) and `ssh-keys/`
+from `/data/coolify/`, gpg-AES256-encrypted; the passphrase lives only in
+`/etc/coolify-cp-backup.pass` (600) on the node and
+`~/tmp/secrets/coolify-cp-backup.pass` on operator boxes. Second off-host
+copy: `~/storagebox/backups/coolify-cp/<host>/YYYY/MM/DD/`. S3 retention:
+30 d lifecycle (`coolify-control-plane-30d`); local copies 7 d.
+
+Restore pointers (operator box, secrets stay under `~/tmp/`):
+
+```bash
+aws s3 cp s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/<date>/coolify-db-<host>-<STAMP>.dump.gz /tmp/cp.dump.gz
+gunzip -c /tmp/cp.dump.gz | pg_restore --list | head   # verify, no data printed
+gpg --batch --pinentry-mode loopback --passphrase-file ~/tmp/secrets/coolify-cp-backup.pass \
+  -d coolify-cp-bundle-<host>-<STAMP>.tar.gz.gpg | tar tz   # filenames only
+```
+
+Coolify auto-update is **OFF** on both CP hosts
+(`instance_settings.is_auto_update_enabled=false`); upgrades are manual.
