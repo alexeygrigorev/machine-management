@@ -1,0 +1,36 @@
+global:
+  resolve_timeout: 5m
+  # SMTP: wire when Coolify/SES SMTP lands. Until then email route is defined but
+  # smtp_smarthost empty → Alertmanager logs send errors; webhook keeps testable path.
+route:
+  receiver: default
+  group_by: ['alertname', 'host']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: email-dev
+      continue: true
+    - matchers:
+        - severity = warning
+      receiver: email-dev
+receivers:
+  - name: default
+    webhook_configs:
+      - url: 'http://127.0.0.1:9/null'
+        send_resolved: false
+  - name: email-dev
+    email_configs:
+      - to: 'dev@datatalks.club'
+        from: 'alertmanager@datatalks.club'
+        smarthost: 'localhost:25'
+        require_tls: false
+        send_resolved: true
+        headers:
+          Subject: '[Contabo LGTM] {{ .Status | toUpper }} {{ .CommonLabels.alertname }}'
+inhibit_rules:
+  - source_matchers: [severity = critical]
+    target_matchers: [severity = warning]
+    equal: ['alertname', 'host']

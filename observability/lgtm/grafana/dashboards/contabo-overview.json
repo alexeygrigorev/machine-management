@@ -1,0 +1,58 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Hosts up (node)",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "count(up{job=\"node\"}==1)", "refId": "A"}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Postgres exporters up",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "count(up{job=\"postgres\"}==1)", "refId": "A"}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU (node)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{"expr": "100 - (avg by (host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{host}}", "refId": "A"}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk used %",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} * 100) / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"})", "legendFormat": "{{host}}", "refId": "A"}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "id": 4
+    },
+    {
+      "type": "logs",
+      "title": "Recent container logs (Loki)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+      "targets": [{"expr": "{job=\"docker\"}", "refId": "A"}],
+      "datasource": {"type": "loki", "uid": "loki"},
+      "id": 5
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["contabo", "lgtm"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "Europe/Berlin",
+  "title": "Contabo overview (Host / Postgres / Logs)",
+  "uid": "contabo-overview",
+  "version": 1
+}

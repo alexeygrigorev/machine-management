@@ -1,0 +1,45 @@
+# Node + cAdvisor + Promtail — run on each Contabo host
+# Loki push: http://10.100.0.1:3100/loki/api/v1/push
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=10.100.0.X:9100
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    mem_limit: 128m
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - '10.100.0.X:9101:8080'
+    mem_limit: 256m
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /data/lgtm/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - promtail-positions:/tmp
+    command: ['-config.file=/etc/promtail/config.yml']
+    mem_limit: 256m
+
+volumes:
+  promtail-positions:

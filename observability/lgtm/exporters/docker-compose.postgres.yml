@@ -1,0 +1,19 @@
+# Postgres exporters — contabo-b (.141) only
+services:
+  postgres-exporter-relay:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${DATA_SOURCE_NAME_RELAY}
+    ports:
+      - '10.100.0.2:9187:9187'
+    mem_limit: 128m
+
+  postgres-exporter-shared:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${DATA_SOURCE_NAME_SHARED}
+    ports:
+      - '10.100.0.2:9188:9187'
+    mem_limit: 128m

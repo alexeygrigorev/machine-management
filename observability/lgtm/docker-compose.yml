@@ -1,0 +1,110 @@
+# LGTM backend on contabo-a (.163) — SOP coolify-prod-observability-lgtm
+# Tempo deferred (phase 2). Secrets via Coolify env (GF_SECURITY_ADMIN_PASSWORD).
+# Loki/Prom ports bind WG only. Grafana via Coolify Traefik FQDN + admin password.
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=20GB
+      - --web.enable-lifecycle
+    volumes:
+      - /data/lgtm/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /data/lgtm/prometheus/rules:/etc/prometheus/rules:ro
+      - lgtm-prometheus-data:/prometheus
+    ports:
+      - '10.100.0.1:9090:9090'
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9090/-/healthy']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 2g
+    cpus: 1.0
+
+  loki:
+    image: grafana/loki:3.3.2
+    restart: unless-stopped
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    volumes:
+      - /data/lgtm/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - lgtm-loki-data:/loki
+    ports:
+      - '10.100.0.1:3100:3100'
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3100/ready']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    cpus: 1.0
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - /data/lgtm/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - lgtm-alertmanager-data:/alertmanager
+    ports:
+      - '10.100.0.1:9093:9093'
+    mem_limit: 256m
+    cpus: '0.25'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9093/-/healthy']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana-oss:11.3.1
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_SERVER_ROOT_URL: ${SERVICE_URL_GRAFANA}
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_LOG_LEVEL: info
+    volumes:
+      - lgtm-grafana-data:/var/lib/grafana
+      - /data/lgtm/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /data/lgtm/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    # Coolify assigns Traefik via SERVICE_URL; do not publish 3000 publicly
+    expose:
+      - '3000'
+    mem_limit: 512m
+    cpus: '0.5'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:3000/api/health']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  lgtm-prometheus-data:
+  lgtm-loki-data:
+  lgtm-alertmanager-data:
+  lgtm-grafana-data:

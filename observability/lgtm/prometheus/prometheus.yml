@@ -1,0 +1,42 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    fleet: contabo-coolify
+    env: production
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          host: contabo-a
+
+  - job_name: node
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+        labels: { host: contabo-a, role: apps }
+      - targets: ['10.100.0.2:9100']
+        labels: { host: contabo-b, role: postgres }
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['host.docker.internal:9101']
+        labels: { host: contabo-a }
+      - targets: ['10.100.0.2:9101']
+        labels: { host: contabo-b }
+
+  - job_name: postgres
+    static_configs:
+      - targets: ['10.100.0.2:9187']
+        labels: { host: contabo-b, instance_name: pg-relay }
+      - targets: ['10.100.0.2:9188']
+        labels: { host: contabo-b, instance_name: pg-shared }

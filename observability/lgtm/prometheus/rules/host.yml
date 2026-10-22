@@ -1,0 +1,24 @@
+groups:
+  - name: contabo-host
+    rules:
+      - alert: HostDiskAlmostFull
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk ≥75% used on {{ $labels.host }} ({{ $labels.mountpoint }})"
+      - alert: HostDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node_exporter down on {{ $labels.host }}"
+      - alert: PostgresExporterDown
+        expr: up{job="postgres"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "postgres_exporter down ({{ $labels.instance_name }})"
