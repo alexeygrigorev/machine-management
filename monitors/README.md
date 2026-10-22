@@ -1,7 +1,7 @@
 # Permanent continuous healthcheck (Postgres + services)
 
 Frequent cron job that keeps watch over Coolify Contabo Postgres and apps
-and emails **dev@dtcdev.click** on failure — with dedupe so one outage
+and emails **dtcdev+5xx@mail.grokbot.com** + **dev@dtcdev.click** on failure — with dedupe so one outage
 does not spam. This is the **continuous** monitor (every 5 min), unlike
 [`backups/`](../backups/) which dumps daily.
 
@@ -12,7 +12,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | Cron | `*/5 * * * *` with `TZ=Europe/Berlin` (see `coolify-healthcheck.cron`) |
 | Where | data node **contabo-b** (`169.58.124.141`); optionally also primary **contabo-a** for the Coolify-UI/app angle |
 | Alternative | Coolify Scheduled Task on the node, same `*/5 * * * *` |
-| Alert to | `dev@dtcdev.click` (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; recovery notice on green again) |
+| Alert to | `dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click` (comma-separated OK) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; recovery notice on green again) |
 
 ## What gets checked
 

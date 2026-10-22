@@ -13,7 +13,7 @@
 #   3. HTTP/app endpoints:  configurable list (Coolify UI, Relay, CMP, AISHL,
 #      website) — curl must return 2xx/3xx within the timeout.
 #
-# Alerting: on failure, sends email to ALERT_TO (default dev@dtcdev.click)
+# Alerting: on failure, sends email to ALERT_TO (default dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click)
 # via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
 # while still failing; a RECOVERED notice goes out on transition back to OK.
@@ -56,8 +56,8 @@ PGPASSWORD_RELAY="${PGPASSWORD_RELAY:-}"
 #   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.example.com/healthz"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 
-ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-coolify-healthcheck@contabo}"
+ALERT_TO="${ALERT_TO:-dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click}"
+ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
@@ -90,10 +90,15 @@ send_alert() {
   fi
   local full_subject="[coolify-healthcheck] ${subject} (${name})"
   local sent="no"
+  # ALERT_TO may be comma-separated (e.g. dtcdev+5xx@mail.grokbot.com,dev@dtcdev.click)
+  local to_csv="${ALERT_TO// /,}"
+  local to_header="${to_csv//,/, }"
+  local -a to_args=()
+  IFS=',' read -r -a to_args <<< "$to_csv"
   if command -v sendmail >/dev/null 2>&1; then
     if {
       echo "From: ${ALERT_FROM}"
-      echo "To: ${ALERT_TO}"
+      echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
@@ -105,11 +110,11 @@ send_alert() {
   elif command -v msmtp >/dev/null 2>&1; then
     if {
       echo "From: ${ALERT_FROM}"
-      echo "To: ${ALERT_TO}"
+      echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
-    } | msmtp "$ALERT_TO" 2>/dev/null; then
+    } | msmtp -- "${to_args[@]}" 2>/dev/null; then
       sent="msmtp"
     else
       log "WARN: msmtp failed for ${name}"
@@ -207,11 +212,21 @@ check_http() {
 }
 
 # ---- run ----
-check_postgres "shared" "$PG_SHARED_CONTAINER" "$PGUSER_SHARED" "$PG_SHARED_DB" \
-  "$PGHOST_SHARED" "$PGPORT_SHARED" "$PGPASSWORD_SHARED"
+# Set SKIP_PG_SHARED=1 / SKIP_PG_RELAY=1 on hosts that cannot reach Postgres
+# (e.g. contabo-a when PG is docker-only on contabo-b).
+if [[ "${SKIP_PG_SHARED:-0}" == "1" ]]; then
+  log "SKIP check=pg-shared (SKIP_PG_SHARED=1)"
+else
+  check_postgres "shared" "$PG_SHARED_CONTAINER" "$PGUSER_SHARED" "$PG_SHARED_DB" \
+    "$PGHOST_SHARED" "$PGPORT_SHARED" "$PGPASSWORD_SHARED"
+fi
 
-check_postgres "relay" "$PG_RELAY_CONTAINER" "$PGUSER_RELAY" "$PG_RELAY_DB" \
-  "$PGHOST_RELAY" "$PGPORT_RELAY" "$PGPASSWORD_RELAY"
+if [[ "${SKIP_PG_RELAY:-0}" == "1" ]]; then
+  log "SKIP check=pg-relay (SKIP_PG_RELAY=1)"
+else
+  check_postgres "relay" "$PG_RELAY_CONTAINER" "$PGUSER_RELAY" "$PG_RELAY_DB" \
+    "$PGHOST_RELAY" "$PGPORT_RELAY" "$PGPASSWORD_RELAY"
+fi
 
 if [[ -n "${APP_URLS:-}" ]]; then
   # shellcheck disable=SC2086
