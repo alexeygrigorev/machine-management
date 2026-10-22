@@ -1,0 +1,43 @@
+# Canary proof of the X-Origin-Verify enforcement pattern (t1037u).
+#
+# This is the exact pattern a future maintenance window would use on the real
+# `origin.*` hostnames (after origin TLS + CloudFront https-only flip, which
+# are OUT of scope here — no CF/DNS changes in this task). Proved here on a
+# hostname that can never resolve (`edge-verify-canary.invalid`), so prod
+# routers and prod traffic are untouched.
+#
+# Mechanics (Traefik v3.7, file provider; note v3 singular `Header()`):
+# - allow router (priority 100): Host + Header('X-Origin-Verify','<secret>')
+#   -> real app service. Only CloudFront (which attaches the header) matches.
+# - deny router (priority 10): Host only -> same service through an
+#   ipAllowList limited to 127.0.0.1, i.e. every external request gets 403.
+#
+# Test (no DNS needed):
+#   curl -H 'Host: edge-verify-canary.invalid' http://<contabo-ip>/  # -> 403
+#   curl -H 'Host: edge-verify-canary.invalid' \
+#        -H 'X-Origin-Verify: <secret>' http://<contabo-ip>/          # -> app
+#
+# The committed file is a TEMPLATE (placeholder secret). The installer renders
+# the real value from $X_ORIGIN_VERIFY on the operator box; the rendered file
+# exists only on the Contabo hosts (0600). Never commit the rendered file.
+http:
+  middlewares:
+    origin-verify-canary-deny:
+      ipAllowList:
+        sourceRange:
+          - "127.0.0.1/32"
+  routers:
+    origin-verify-canary-allow:
+      rule: "Host(`edge-verify-canary.invalid`) && Header(`X-Origin-Verify`, `__X_ORIGIN_VERIFY__`)"
+      service: "__CANARY_SERVICE__"
+      entryPoints:
+        - http
+      priority: 100
+    origin-verify-canary-deny:
+      rule: "Host(`edge-verify-canary.invalid`)"
+      service: "__CANARY_SERVICE__"
+      middlewares:
+        - origin-verify-canary-deny
+      entryPoints:
+        - http
+      priority: 10
