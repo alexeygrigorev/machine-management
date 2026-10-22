@@ -36,10 +36,10 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 
 | Location | Policy |
 |----------|--------|
-| S3 `coolify/postgres/` | **30 days** via bucket lifecycle (`s3-lifecycle.example.json`) |
+| S3 `coolify/postgres/` | **14 days** via bucket lifecycle (`s3-lifecycle.example.json`, obs-aligned t1146u) |
 | S3 `coolify/obs/` | **14 days** (VM/VL day archives — see coolify-observability `docs/retention-s3.md`) |
-| Local node (pg dumps) | newest **7 days** (`LOCAL_KEEP_DAYS`), pruned by the script |
-| Storagebox off-host copies | newest **30 days** (mirror of S3) via `prune-storagebox.sh` (dry-run default; `--apply` deletes) |
+| Local node (pg dumps) | newest **1–2 days** (`LOCAL_KEEP_DAYS=2` + `LOCAL_KEEP_COUNT`), pruned by the script |
+| Storagebox off-host copies | newest **14–30 days** (mirror of S3) via `prune-storagebox.sh` (dry-run default; `--apply` deletes) |
 | In-script S3 prune | backstop only, default **OFF** (`S3_PRUNE_ENABLED=0`) |
 
 
@@ -186,3 +186,14 @@ WAL rollout order (each step is a Hub task; restart = operator window):
 CloudWatch dual-run: keep AWS CloudWatch while RDS still lives (default
 there, no action); LGTM on Contabo is authoritative for Contabo Postgres.
 Revisit at RDS decommission (human decision, separate Hub task).
+
+## Backup freshness metrics (t1146u–t1153u)
+
+Nightly Contabo path is **`pg_dump` `.dump.gz` → S3** (not parquet/SQLite).
+
+| Piece | Role |
+|-------|------|
+| `monitors/coolify-backup-metrics.sh` | Every 5m on contabo-b: per-DB dump **export size bytes** + age, WAL last-success age, disk % → VictoriaMetrics `/api/v1/import/prometheus` |
+| `monitors/coolify-healthcheck.sh` | Alerts `dev@dtcdev.click` on missing/stale dump, stale WAL, or `/` disk ≥ `DISK_WARN_PERCENT` |
+
+Metric names: `coolify_backup_dump_size_bytes{db=…}`, `coolify_backup_dump_age_seconds`, `coolify_backup_wal_age_seconds`, `coolify_backup_disk_used_percent`.

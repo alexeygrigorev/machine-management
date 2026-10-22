@@ -1,0 +1,6 @@
+# Export-size + dump/WAL freshness → VictoriaMetrics (contabo-b).
+# Cadence: every 5 min. Contabo path is nightly pg_dump .dump.gz (no parquet).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TZ=Europe/Berlin
+*/5 * * * * root /usr/local/sbin/coolify-backup-metrics.sh >/dev/null 2>&1

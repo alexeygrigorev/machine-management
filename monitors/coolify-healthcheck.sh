@@ -38,6 +38,19 @@ STATE_DIR="${STATE_DIR:-/var/lib/coolify-healthcheck}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-healthcheck.lock}"
 LOG_FILE="${LOG_FILE:-/var/log/coolify-healthcheck.log}"
 
+# --- backup freshness / disk (t1146u–t1153u; Contabo .dump.gz path, not parquet) ---
+DUMP_DIR="${DUMP_DIR:-/var/backups/coolify-postgres}"
+EXPECT_DBS="${EXPECT_DBS:-cmp aisl website relay}"
+# Nightly dump at 02:30 Berlin → stale if newest artifact older than ~36h
+DUMP_STALE_SECONDS="${DUMP_STALE_SECONDS:-129600}"
+WAL_STATE_DIR="${WAL_SHIPPER_STATE_DIR:-/var/lib/coolify-wal-shipper}"
+WAL_STACKS="${WAL_STACKS:-pg-shared}"
+# archive_timeout=300 + shipper */1min → alert if last success > 20 min
+WAL_STALE_SECONDS="${WAL_STALE_SECONDS:-1200}"
+DISK_WARN_PERCENT="${DISK_WARN_PERCENT:-85}"
+SKIP_BACKUP_CHECKS="${SKIP_BACKUP_CHECKS:-0}"
+SKIP_DISK_CHECK="${SKIP_DISK_CHECK:-0}"
+
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
 # Coolify standalone-postgresql creates only the POSTGRES_USER role (pgadmin) —
 # there is NO `postgres` role (2026-10-22 pg-relay alert: FATAL: role "postgres" does not exist).
@@ -276,6 +289,76 @@ check_content() {
   rm -f "$body_file"
 }
 
+
+check_disk() {
+  local name="disk-root" used_pct
+  used_pct="$(df -BP / | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
+  if [[ -z "$used_pct" || ! "$used_pct" =~ ^[0-9]+$ ]]; then
+    log "FAIL check=${name}: could not parse df"
+    send_alert "$name" "FAIL" "Unable to parse root filesystem usage on $(hostname)."
+    FAILED=1; return
+  fi
+  if [[ "$used_pct" -ge "$DISK_WARN_PERCENT" ]]; then
+    log "FAIL check=${name}: / at ${used_pct}% (threshold ${DISK_WARN_PERCENT}%)"
+    send_alert "$name" "FAIL" "Root filesystem on $(hostname) is ${used_pct}% full (threshold ${DISK_WARN_PERCENT}%). Contabo-b dumps/WAL must stay off-host; free space or prune."
+    FAILED=1; return
+  fi
+  log "OK check=${name}: / at ${used_pct}% (<${DISK_WARN_PERCENT}%)"
+  mark_ok "$name"
+}
+
+check_dump_freshness() {
+  local db f mtime age name
+  local now; now="$(date +%s)"
+  for db in $EXPECT_DBS; do
+    name="dump-${db}"
+    f="$(ls -1t "$DUMP_DIR"/${db}-*.dump.gz 2>/dev/null | head -1 || true)"
+    if [[ -z "$f" || ! -f "$f" ]]; then
+      log "FAIL check=${name}: no local .dump.gz under ${DUMP_DIR}"
+      send_alert "$name" "FAIL" "No nightly pg_dump artifact for db=${db} under ${DUMP_DIR} on $(hostname). Contabo path is .dump.gz→S3 (not parquet)."
+      FAILED=1; continue
+    fi
+    mtime="$(stat -c%Y "$f")"
+    age=$(( now - mtime ))
+    if [[ "$age" -gt "$DUMP_STALE_SECONDS" ]]; then
+      log "FAIL check=${name}: age=${age}s > ${DUMP_STALE_SECONDS}s file=$(basename "$f")"
+      send_alert "$name" "FAIL" "Dump for db=${db} is stale: $(basename "$f") age ${age}s (threshold ${DUMP_STALE_SECONDS}s) size=$(stat -c%s "$f")B on $(hostname)."
+      FAILED=1; continue
+    fi
+    log "OK check=${name}: $(basename "$f") age=${age}s size=$(stat -c%s "$f")B"
+    mark_ok "$name"
+  done
+}
+
+check_wal_freshness() {
+  local stack sf ts_raw ts age name
+  local now; now="$(date +%s)"
+  for stack in $WAL_STACKS; do
+    name="wal-${stack}"
+    sf="${WAL_STATE_DIR}/last-success-${stack}"
+    if [[ ! -f "$sf" ]]; then
+      log "FAIL check=${name}: missing ${sf}"
+      send_alert "$name" "FAIL" "WAL shipper last-success missing for stack=${stack} (${sf}) on $(hostname)."
+      FAILED=1; continue
+    fi
+    ts_raw="$(tr -d '[:space:]' < "$sf")"
+    ts="$(date -u -d "$ts_raw" +%s 2>/dev/null || echo 0)"
+    if [[ "$ts" -le 0 ]]; then
+      log "FAIL check=${name}: unparseable timestamp '${ts_raw}'"
+      send_alert "$name" "FAIL" "WAL shipper last-success unparseable for stack=${stack}: '${ts_raw}'"
+      FAILED=1; continue
+    fi
+    age=$(( now - ts ))
+    if [[ "$age" -gt "$WAL_STALE_SECONDS" ]]; then
+      log "FAIL check=${name}: age=${age}s > ${WAL_STALE_SECONDS}s last=${ts_raw}"
+      send_alert "$name" "FAIL" "WAL archive stale for stack=${stack}: last success ${ts_raw} (age ${age}s, threshold ${WAL_STALE_SECONDS}s) on $(hostname)."
+      FAILED=1; continue
+    fi
+    log "OK check=${name}: last=${ts_raw} age=${age}s"
+    mark_ok "$name"
+  done
+}
+
 # ---- run ----
 # Set SKIP_PG_SHARED=1 / SKIP_PG_RELAY=1 on hosts that cannot reach Postgres
 # (e.g. contabo-a when PG is docker-only on contabo-b).
@@ -317,6 +400,20 @@ if [[ -n "${CONTENT_CHECKS:-}" ]]; then
   done
 else
   log "WARN: CONTENT_CHECKS is empty — no content-marker checks configured (status-only APP_URLS miss wrong-content incidents)"
+fi
+
+
+if [[ "${SKIP_DISK_CHECK:-0}" == "1" ]]; then
+  log "SKIP check=disk-root (SKIP_DISK_CHECK=1)"
+else
+  check_disk
+fi
+
+if [[ "${SKIP_BACKUP_CHECKS:-0}" == "1" ]]; then
+  log "SKIP backup dump/WAL freshness (SKIP_BACKUP_CHECKS=1)"
+else
+  check_dump_freshness
+  check_wal_freshness
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then

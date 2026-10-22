@@ -35,7 +35,7 @@ fail() { log "ERROR: $*"; exit 1; }
 # ---- config (overridable via env file) ----
 DUMP_DIR="${DUMP_DIR:-/var/backups/coolify-postgres}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-pg-dump.lock}"
-LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-7}"
+LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-2}"
 STAMP="$(TZ=Europe/Berlin date '+%Y%m%dT%H%M%z')"
 DAY_PATH="$(TZ=Europe/Berlin date '+%Y/%m/%d')"
 
@@ -118,8 +118,15 @@ if [[ -n "$PG_RELAY_DB" ]]; then
     "$PGHOST_RELAY" "$PGPORT_RELAY" "$PG_RELAY_DB" || FAILED=1
 fi
 
-# Local prune: keep newest LOCAL_KEEP_DAYS of local copies only.
+# Local prune (t1146u): hot 1–2d only; also keep newest LOCAL_KEEP_COUNT per DB stem.
+LOCAL_KEEP_COUNT="${LOCAL_KEEP_COUNT:-2}"
 find "$DUMP_DIR" -maxdepth 1 -name '*.dump.gz' -mtime "+${LOCAL_KEEP_DAYS}" -delete 2>/dev/null || true
+if [[ "${LOCAL_KEEP_COUNT}" =~ ^[0-9]+$ ]] && [[ "$LOCAL_KEEP_COUNT" -gt 0 ]]; then
+  for stem in $(find "$DUMP_DIR" -maxdepth 1 -name '*.dump.gz' -printf '%f\n' 2>/dev/null       | sed -E 's/-[0-9]{8}T[0-9]{4}[^.]*.dump.gz$//' | sort -u); do
+    # shellcheck disable=SC2012
+    ls -1t "$DUMP_DIR"/${stem}-*.dump.gz 2>/dev/null | tail -n +"$((LOCAL_KEEP_COUNT + 1))"       | while read -r oldf; do rm -f -- "$oldf"; done || true
+  done
+fi
 
 # Optional S3 prune (default OFF — lifecycle rule is the primary retention).
 if [[ "$S3_PRUNE_ENABLED" == "1" ]]; then
