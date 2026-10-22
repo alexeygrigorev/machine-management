@@ -41,7 +41,7 @@ DAY_PATH="$(TZ=Europe/Berlin date '+%Y/%m/%d')"
 
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
 PG_RELAY_CONTAINER="${PG_RELAY_CONTAINER:-}"
-PG_SHARED_DBS="${PG_SHARED_DBS:-}"     # space-separated, e.g. "cmp aishl website"
+PG_SHARED_DBS="${PG_SHARED_DBS:-}"     # space-separated, e.g. "cmp aisl website"
 PG_RELAY_DB="${PG_RELAY_DB:-}"         # single db name on pg-relay
 PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"
 PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"

@@ -18,7 +18,7 @@ panel Auto-Backup (out of scope for DR).
 
 | Stack | Databases | Container / port |
 |-------|-----------|------------------|
-| **pg-shared** | `cmp`, `aishl`, `website` (one instance, separate DB names) | `PG_SHARED_CONTAINER` (or TCP `PGHOST_SHARED:PGPORT_SHARED`) |
+| **pg-shared** | `cmp`, `aisl`, `website` (one instance, separate DB names) | `PG_SHARED_CONTAINER` (or TCP `PGHOST_SHARED:PGPORT_SHARED`) |
 | **pg-relay** | `relay` (own instance, never shared) | `PG_RELAY_CONTAINER` (or TCP `PGHOST_RELAY:PGPORT_RELAY`) |
 
 Exact DB/container names are set in `/etc/coolify-pg-dump.env` on the node —
@@ -107,12 +107,16 @@ production restore so the next dump matches the restored state.
 | `coolify-pg-dump.cron` | `30 2 * * *` Europe/Berlin entry |
 | `coolify-pg-dump.env.example` | placeholders for `/etc/coolify-pg-dump.env` |
 | `install-coolify-pg-dump.sh` | operator-box installer (scp + cron, never overwrites env) |
-<<<<<<< Updated upstream
 | `coolify-cp-backup.sh` | **control-plane** job: `coolify-db` dump + encrypted `.env`/SSH-keys bundle → S3 |
 | `coolify-cp-backup.cron` | `30 3 * * *` Europe/Berlin entry (one hour after app-DB dumps) |
 | `coolify-cp-backup.env.example` | placeholders for `/etc/coolify-cp-backup.env` (+ `/etc/coolify-cp-backup.pass`) |
 | `install-coolify-cp-backup.sh` | operator-box installer for the CP job (per CP host, never overwrites env) |
 | `s3-lifecycle.example.json` | 30-day S3 retention rules for `coolify/postgres/`, `coolify/obs/` (14d), `coolify/control-plane/` |
+| `coolify-pg-basebackup.sh` | weekly `pg_basebackup -Ft -z -X stream` → S3 `…/<stack>/base/…` (no restart needed) |
+| `coolify-pg-basebackup.cron` | `0 3 * * 0` Europe/Berlin entry (same env file as dumps) |
+| `coolify-wal-archive.sh` | `archive_command` helper: segment → gzip → S3 `…/<stack>/wal/…` |
+| `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
+| `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
 
 ## Control-plane backups (Coolify CP itself — live since 2026-10-22)
 
@@ -143,16 +147,8 @@ gpg --batch --pinentry-mode loopback --passphrase-file ~/tmp/secrets/coolify-cp-
 
 Coolify auto-update is **OFF** on both CP hosts
 (`instance_settings.is_auto_update_enabled=false`); upgrades are manual.
-=======
-| `s3-lifecycle.example.json` | 30-day S3 retention rule for the `coolify/postgres/` prefix |
-| `coolify-pg-basebackup.sh` | weekly `pg_basebackup -Ft -z -X stream` → S3 `…/<stack>/base/…` (no restart needed) |
-| `coolify-pg-basebackup.cron` | `0 3 * * 0` Europe/Berlin entry (same env file as dumps) |
-| `coolify-wal-archive.sh` | `archive_command` helper: segment → gzip → S3 `…/<stack>/wal/…` |
-| `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
-| `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
 
 ## CDC: backup base + replay (t1037u, post-cutover)
-
 Alexey's ask: if the database dies, take a backup and **replay everything**
 onto a fresh DB. Mechanism chosen (2026-10-22):
 
@@ -185,4 +181,3 @@ WAL rollout order (each step is a Hub task; restart = operator window):
 CloudWatch dual-run: keep AWS CloudWatch while RDS still lives (default
 there, no action); LGTM on Contabo is authoritative for Contabo Postgres.
 Revisit at RDS decommission (human decision, separate Hub task).
->>>>>>> Stashed changes
