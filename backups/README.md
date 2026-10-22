@@ -114,7 +114,9 @@ production restore so the next dump matches the restored state.
 | `s3-lifecycle.example.json` | 30-day S3 retention rules for `coolify/postgres/`, `coolify/obs/` (14d), `coolify/control-plane/` |
 | `coolify-pg-basebackup.sh` | weekly `pg_basebackup -Ft -z -X stream` → S3 `…/<stack>/base/…` (no restart needed) |
 | `coolify-pg-basebackup.cron` | `0 3 * * 0` Europe/Berlin entry (same env file as dumps) |
-| `coolify-wal-archive.sh` | `archive_command` helper: segment → gzip → S3 `…/<stack>/wal/…` |
+| `coolify-wal-shipper.sh` | per-minute host cron: spool → gzip → S3 `…/<stack>/wal/…` with read-back |
+| `coolify-wal-shipper.cron` | `* * * * *` Europe/Berlin entry for the shipper |
+| `coolify-wal-archive.sh` | SUPERSEDED by the shipper (kept for reference): direct-upload helper that cannot run inside the Coolify PG container (no aws binary, no mounts) |
 | `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
 | `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
 
@@ -164,12 +166,15 @@ Resulting tiers:
 | Tier | RPO | Path |
 |------|-----|------|
 | Dump restore | ≤ 24 h | daily dump (`coolify-pg-dump.sh` or Coolify schedule) → `coolify-pg-replay.sh --mode dump` |
-| PITR to tip | minutes | weekly base (`coolify-pg-basebackup.sh`) + WAL archive (`coolify-wal-archive.sh`) → `coolify-pg-replay.sh --mode pitr` |
+| PITR to tip | minutes | weekly base (`coolify-pg-basebackup.sh`) + WAL spool/shipper (`coolify-wal-shipper.sh`) → `coolify-pg-replay.sh --mode pitr` |
 
 WAL rollout order (each step is a Hub task; restart = operator window):
 
-1. Install helper + env on contabo-b (`coolify-wal-archive.sh` →
-   `/usr/local/sbin/`, `/etc/coolify-wal-archive.env` root 600).
+1. Install shipper + env on contabo-b (`coolify-wal-shipper.sh` →
+   `/usr/local/sbin/`, `/etc/coolify-wal-archive.env` root 600, `coolify-wal-shipper.cron` →
+   `/etc/cron.d/`). Rationale: the `postgres:16` container has no `aws` binary
+   and Coolify mounts no helpers into it, so `archive_command` spools to
+   `PGDATA/wal_spool` and the host shipper uploads to S3.
 2. Run `coolify-wal-enable.sh --stack pg-shared --container <name>` (stages
    config, prints restart command). Same for `pg-relay`.
 3. Maintenance window: `docker restart` per instance, verify `SHOW

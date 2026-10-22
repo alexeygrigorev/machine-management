@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# WAL segment archiver for Coolify Contabo Postgres -> S3.
+# SUPERSEDED by coolify-wal-shipper.sh (kept for reference only).
+# This direct-upload helper cannot run as Postgres `archive_command`: the
+# Coolify postgres:16 container has no `aws` binary and no host mounts.
+# Live mechanism: archive_command spools to PGDATA/wal_spool, host cron
+# coolify-wal-shipper.sh uploads to S3. Do NOT set this as archive_command.
+#
+# WAL segment archiver for Coolify Contabo Postgres -> S3 (ORIGINAL PLAN).
 #
 # Installed as the Postgres `archive_command` on the data node (contabo-b):
 #   archive_command = '/usr/local/sbin/coolify-wal-archive.sh pg-shared %p %f'

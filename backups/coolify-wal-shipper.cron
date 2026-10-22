@@ -1,0 +1,12 @@
+# Per-minute WAL spool shipper -> S3 (data node contabo-b).
+#
+# Ships segments spooled by Postgres `archive_command` (see
+# coolify-wal-enable.sh) to s3://<bucket>/coolify/postgres/<stack>/wal/...
+# Runs EVERY MINUTE so worst-case S3 lag after a local archive is ~1-2 min
+# (plus archive_timeout=5min bounds idle-gap segments).
+#
+# Install (idempotent): copy coolify-wal-shipper.sh to /usr/local/sbin/
+# (root, 755), ensure /etc/coolify-wal-archive.env exists (root 600),
+# drop this file in /etc/cron.d/ and check /var/log/coolify-wal-shipper.log.
+TZ=Europe/Berlin
+* * * * * root /usr/local/sbin/coolify-wal-shipper.sh >> /var/log/coolify-wal-shipper.log 2>&1
