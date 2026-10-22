@@ -1,11 +1,20 @@
 {
   "Rules": [
     {
-      "ID": "coolify-postgres-daily-30d",
+      "ID": "coolify-postgres-30d",
       "Status": "Enabled",
       "Filter": { "Prefix": "coolify/postgres/" },
       "Expiration": { "Days": 30 },
-      "AbortIncompleteMultipartUpload": { "AbortIncompleteMultipartUploadDaysAfterInitiation": 7 }
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
+      "ID": "coolify-obs-14d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "coolify/obs/" },
+      "Expiration": { "Days": 14 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     }
   ]
 }

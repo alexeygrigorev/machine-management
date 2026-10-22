@@ -70,4 +70,5 @@ Upstream pattern: gist `alexeygrigorev/5c1135fdfce97d3938a24c0f3dcc0ab2`
 
 ## Observability
 
-Post-cutover LGTM design lives in DataTalksClub knowledge (SOP). Thin pointer: [`observability/README.md`](observability/README.md). During migration: healthchecks only — do not install the stack in the cutover window.
+Live stack: VictoriaMetrics + VictoriaLogs + Vector — [`alexeygrigorev/coolify-observability`](https://github.com/alexeygrigorev/coolify-observability).  
+Thin pointer + retention/S3 notes: [`observability/README.md`](observability/README.md). Healthchecks: [`monitors/`](monitors/).

@@ -1,29 +1,31 @@
-# Observability (Contabo Coolify LGTM)
+# Observability (Contabo Coolify)
 
-Canonical **design / SOP**: `DataTalksClub/dataops-knowledge` →
-`content/10-engineering-and-automation/operate-production-systems/sops/coolify-prod-observability-lgtm.md`
+**Live stack (2026-10-22):** VictoriaMetrics + VictoriaLogs + Vector — canonical repo
+[`alexeygrigorev/coolify-observability`](https://github.com/alexeygrigorev/coolify-observability).
 
-## Phase rules
+| Piece | Host | Notes |
+|-------|------|-------|
+| VictoriaMetrics `:8428` + VictoriaLogs `:9428` | contabo-a `.163` | vmui; **no Grafana** |
+| Vector | `.163` + `.141` | Docker logs → VL; host_metrics → VM |
+| Exporters | `.141` | node + postgres×2 (+ cadvisor) |
+| coolify-healthcheck | both | [`../monitors/`](../monitors/) → `dev@dtcdev.click` |
 
-| Phase | Rule |
-|-------|------|
-| Migration / Tabo ~90 min cutover | **Healthchecks only**. **No** LGTM install. |
-| After cutover | Full LGTM (self-host on Contabo `.163`). Alerts → `dev@datatalks.club`. |
+## Retention + S3 (t1031u)
 
-## Installed (2026-10-22, t1005u)
+| Tier | Policy |
+|------|--------|
+| Hot local | VM/VL **`-retentionPeriod=2d`** on Contabo disk |
+| Daily archive | day-before-yesterday → `s3://dtc-coolify-backups-387546586013/coolify/obs/{metrics,logs}/YYYY/MM/DD/` |
+| S3 | **14 days** lifecycle on prefix `coolify/obs/` |
 
-Self-host on **contabo-a** `169.58.119.163` (Coolify service `lgtm`, uuid `5kwprwvtksvahhwerf5v2q8o`):
+Job + docs live in **coolify-observability** (`scripts/obs-day-archive.sh`, `docs/retention-s3.md`).  
+Bucket/IAM shared with Postgres dumps (`coolify-s3-backup-writer`, prefix `coolify/*`).  
+Lifecycle example (postgres 30d + obs 14d): [`../backups/s3-lifecycle.example.json`](../backups/s3-lifecycle.example.json).
 
-- Grafana + Loki + Prometheus + Alertmanager (Tempo **deferred** phase 2)
-- Exporters on `.163` / `.141`: node_exporter, cAdvisor, Promtail; postgres_exporter on `.141` for pg-relay + pg-shared
-- Configs live on hosts under `/data/lgtm/`; compose templates in [`lgtm/`](./lgtm/)
+## Legacy LGTM
 
-Grafana UI: `http://grafana.169.58.119.163.sslip.io` (admin password in Coolify env / operator secret store — **not** in git).
-
-Prom/Loki/AM listen on WG `10.100.0.1` only.
+LGTM compose under [`lgtm/`](./lgtm/) is **historical** (torn down). Do not reinstall as primary.
 
 ## Hosts
 
-See [`../inventory/hosts.md`](../inventory/hosts.md). Agents on Hetzner are **not** the primary telemetry backend.
-
-No secrets. No purchases from this repo.
+See [`../inventory/hosts.md`](../inventory/hosts.md). No secrets in this repo.
