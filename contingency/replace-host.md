@@ -3,13 +3,13 @@
 Stub runbook. Keep secrets out of this repo.
 
 1. Order a new Ubuntu 24.04 VPS in Contabo; note the **new IPv4** and one-time
-   root password (Drive / `~/tmp/secrets` only — never commit).
+   root password (Drive / `~/.secrets` only — never commit).
 2. From an operator box (e.g. Hetzner RMTHZ) run:
 
    ```bash
    export BOOTSTRAP_PUBKEYS="$HOME/.ssh/id_contabo.pub $HOME/.ssh/id_contabo_tabo.pub"
    export BOOTSTRAP_IDENTITY="$HOME/.ssh/id_contabo"
-   export BOOTSTRAP_ROOT_PASSWORD_FILE="$HOME/tmp/secrets/.vps-root-pw"
+   export BOOTSTRAP_ROOT_PASSWORD_FILE="$HOME/.secrets/.vps-root-pw"
    ./scripts/bootstrap-vps-ssh.sh <NEW_IP>
    ```
 

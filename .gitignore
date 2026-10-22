@@ -7,4 +7,5 @@ id_*
 .env.*
 **/secrets/
 **/tmp/secrets/
+**/.secrets/
 .vps-root-pw

@@ -39,6 +39,7 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 | S3 `coolify/postgres/` | **30 days** via bucket lifecycle (`s3-lifecycle.example.json`) |
 | S3 `coolify/obs/` | **14 days** (VM/VL day archives — see coolify-observability `docs/retention-s3.md`) |
 | Local node (pg dumps) | newest **7 days** (`LOCAL_KEEP_DAYS`), pruned by the script |
+| Storagebox off-host copies | newest **30 days** (mirror of S3) via `prune-storagebox.sh` (dry-run default; `--apply` deletes) |
 | In-script S3 prune | backstop only, default **OFF** (`S3_PRUNE_ENABLED=0`) |
 
 
@@ -48,7 +49,7 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 |------|-------|
 | Bucket | `dtc-coolify-backups-387546586013` (`eu-west-1`) |
 | IAM user | `coolify-s3-backup-writer` (prefix `coolify/*` only) |
-| Keys | `~/tmp/secrets/coolify-s3-backup-writer-2026-10-22.env` on Tabo + Hetzner; Coolify storage `dtc-coolify-backups` |
+| Keys | `~/.secrets/coolify-s3-backup-writer-2026-10-22.env` on Tabo + Hetzner; Coolify storage `dtc-coolify-backups` |
 | Terraform | `DataTalksClub/aws-infra` → `main/coolify-backups/` (no access keys in TF) |
 | Coolify UI storage | name `dtc-coolify-backups`, uuid `f8qhiqm4oe0p70yrnld5up17` (validated) |
 
@@ -58,7 +59,7 @@ Real values live **only** in:
 
 1. Private Drive doc *Contabo Coolify VPS — credentials 2026-10-22*, and
 2. `/etc/coolify-pg-dump.env` on contabo-b (root-only `600`), plus operator
-   hosts under `~/tmp/secrets/`.
+   hosts under `~/.secrets/` (`~/tmp/secrets` is a compat symlink).
 
 ## Enable (once Postgres exists on Contabo)
 
@@ -99,6 +100,7 @@ production restore so the next dump matches the restored state.
 | File | Purpose |
 |------|---------|
 | `coolify-pg-dump.sh` | the daily job (dump → gzip → S3 → prune) |
+| `prune-storagebox.sh` | 30d retention for Storagebox off-host copies (dry-run default, `--apply` deletes) |
 | `coolify-pg-dump.cron` | `30 2 * * *` Europe/Berlin entry |
 | `coolify-pg-dump.env.example` | placeholders for `/etc/coolify-pg-dump.env` |
 | `install-coolify-pg-dump.sh` | operator-box installer (scp + cron, never overwrites env) |

@@ -40,7 +40,7 @@ Real values live **only** in:
 
 1. Private Drive doc *Contabo Coolify VPS — credentials 2026-10-22*, and
 2. `/etc/coolify-healthcheck.env` on the node (root-only `600`), plus operator
-   hosts under `~/tmp/secrets/`.
+   hosts under `~/.secrets/` (`~/tmp/secrets` is a compat symlink).
 
 This repo keeps **placeholders only** (`coolify-healthcheck.env.example`).
 

@@ -29,7 +29,7 @@ cd machine-management
 export BOOTSTRAP_PUBKEYS="$HOME/.ssh/id_contabo.pub $HOME/.ssh/id_contabo_tabo.pub"
 export BOOTSTRAP_IDENTITY="$HOME/.ssh/id_contabo"
 # first contact only — prefer a file, never shell history:
-# export BOOTSTRAP_ROOT_PASSWORD_FILE="$HOME/tmp/secrets/.vps-root-pw"
+# export BOOTSTRAP_ROOT_PASSWORD_FILE="$HOME/.secrets/.vps-root-pw"
 ./scripts/bootstrap-vps-ssh.sh 169.58.119.163 169.58.124.141
 ```
 
@@ -55,7 +55,9 @@ Does **not** call any cloud provider API — needs only IP (or SSH alias) + root
 
 - **Never** commit private keys, root passwords, or panel passwords.
 - Secrets live in the private Google Drive credentials doc and on operator hosts
-  under `~/tmp/secrets/` (not in git).
+  under `~/.secrets/` (not in git; `~/tmp/secrets` is a compat symlink).
+  `~/.secrets` is `700`, secret files `600` (public keys `644`).
+  Tabo laptop: mirror the same `~/.secrets/` layout there.
 
 ## Knowledge pointers
 

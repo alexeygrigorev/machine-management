@@ -2,7 +2,7 @@
 
 Shared Postgres for `cmp`, `aisl`, `website`. Created 2026-10-22 via primary
 Coolify API (`http://169.58.119.163:8000`). **No secrets in this file** — values
-live under `~/tmp/secrets/` (chmod 600) on the operator host.
+live under `~/.secrets/` (chmod 600; `~/tmp/secrets` is a compat symlink) on the operator host.
 
 ## Coolify resource
 
@@ -16,11 +16,11 @@ live under `~/tmp/secrets/` (chmod 600) on the operator host.
 | Destination | `5daaeeunpkuxtyv6l8tw3yqs` (standalone, network `coolify`) |
 | Public | no (internal-only, no public port) |
 | Status at creation | `running:healthy` |
-| Superuser | `pgadmin` (pw: `~/tmp/secrets/postgres-pg-shared-169.58.124.141.pw`) |
+| Superuser | `pgadmin` (pw: `~/.secrets/postgres-pg-shared-169.58.124.141.pw`) |
 
 ## Logical databases + owners (all unprivileged: NOSUPERUSER, NOCREATEDB, NOCREATEROLE)
 
-| Database | Owner role | Owner pw file (`~/tmp/secrets/`) |
+| Database | Owner role | Owner pw file (`~/.secrets/`) |
 |----------|------------|----------------------------------|
 | `cmp` | `cmp_app` | `pg-shared-cmp-owner.pw` |
 | `aisl` | `aisl_app` | `pg-shared-aisl-owner.pw` |

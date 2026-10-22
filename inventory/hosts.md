@@ -2,7 +2,7 @@
 
 Canonical public inventory for Contabo Cloud VPS used with Coolify.
 **No passwords or private keys** — those stay in the private Google Drive
-credentials doc and on operator machines under `~/tmp/secrets/` (not in git).
+credentials doc and on operator machines under `~/.secrets/` (not in git).
 
 | Host | Instance | IPv4 | IPv6 | Role | SSH alias |
 |------|----------|------|------|------|-----------|
@@ -56,4 +56,4 @@ credentials doc and on operator machines under `~/tmp/secrets/` (not in git).
 ## S3 backups (MAIN)
 
 - Bucket `dtc-coolify-backups-387546586013` / IAM `coolify-s3-backup-writer` — see `../backups/README.md` and aws-infra `main/coolify-backups/`.
-- Coolify storage name `dtc-coolify-backups` (primary UI). Keys only under `~/tmp/secrets/` + Drive doc.
+- Coolify storage name `dtc-coolify-backups` (primary UI). Keys only under `~/.secrets/` + Drive doc.
