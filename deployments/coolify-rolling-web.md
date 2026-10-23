@@ -321,6 +321,44 @@ Verify the Coolify deployment messages `Rolling update started`,
 private source Service and verify public traffic remains on the native web.
 Check the normal `http-aishl` monitor result, not just container health.
 
+Use the checked-in acceptance runner for a fresh website replacement:
+
+```sh
+flock -n /home/alexey/.local/state/coolify-rolling-web.lock \
+  python3 deployments/verify-coolify-rolling.py --app website \
+  --url https://prod.datatalks.club/health/ready \
+  --output /home/alexey/tmp/rolling-acceptance-UNIQUE --deploy
+```
+
+Coordinate the live deployment slot with other operators first. The existing
+follower lock above serializes its cron with the measurement; it does not lock
+Coolify's UI or other operators. The output directory must be new. The runner checks the installed hook,
+versioned host assets, native eligibility, storage bindings and running helper
+hashes before requesting a normal native deployment. It refuses an active
+deployment or an unhealthy baseline. It samples public readiness approximately
+every 300 milliseconds, including ten seconds before deployment and sixty
+seconds after completion. It requires a different healthy replacement, Docker
+events proving start then healthy then old drain then old termination, and at
+least six seconds between drain and termination. Any non-200 response, timeout
+or missing lifecycle proof fails acceptance. Sanitized probes, events and a
+summary remain in the output directory even when the post-deploy check fails.
+Lifecycle events stream from before deployment: querying Docker history only
+after observation can lose early events to its bounded history buffer.
+It does not automatically roll back a completed deployment after a failed
+measurement. For CMP use `--app cmp --url
+https://courses.datatalks.club/api/health/`; for AISHL use `--app aishl --url
+https://aishippinglabs.com/ping`. Keep Relay on its slower measurement cadence.
+
+On 2026-10-23 the replacement intake `131c6dea` found the original rolling fix
+already landed at `6efd197`, with its final four-app acceptance at
+15:16–15:24 UTC, after the reported 14:40/14:55 UTC website gaps. The concurrent
+r3 recovery also found later readiness starvation from slow website pages and
+landed the threaded serving override described above at `e82fe3e`. Missing old
+Hub intakes or a stopped session are not evidence that the deployed fix is
+absent. Check actual application ownership, installed helper checksums and raw
+acceptance artifacts before reapplying configuration. The private dated
+`coolify-rolling-0dt-orch1802` report records the independent follow-up.
+
 Use cache-busting public probes for AISHL, CMP and the website origin. Relay
 has a request-rate WAF rule: use a public probe every five seconds to avoid
 turning the measurement into an intentional rate-limit block. High-frequency
