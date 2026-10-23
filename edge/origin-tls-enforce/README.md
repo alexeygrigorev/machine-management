@@ -72,6 +72,7 @@ operator's existing private files without copying or printing credentials.
 ```sh
 bash edge/origin-tls-enforce/tests/test-origin.sh
 python3 edge/origin-tls-enforce/verify-rollback.py
+python3 edge/origin-tls-enforce/verify_stability.py --rounds 60 --interval 5 --output /tmp/origin-stability-UNIQUE.json
 python3 -m unittest discover -s edge/origin-tls-enforce/tests -p 'test_*.py' -v
 ```
 
@@ -81,6 +82,18 @@ public health, IPv4/IPv6 administrative-port DROP rules, persistence and secret
 file permissions. Website-dev is explicitly reported as deferred only when its
 observed HTTP/HTTPS/public responses match the recorded isolation state. It
 cannot silently skip a healthy dev route that still needs an HTTPS cutover.
+
+The stability command samples the three active origins' public health,
+authenticated HTTPS health, missing/wrong-header denial, and the public Website
+homepage. Every request uses a unique query parameter. Relay public requests
+are spaced at least five seconds apart to respect the existing rate limit.
+A single nonmatching response or connection/certificate error fails the whole
+window; no retry erases a failed sample. The new JSON file retains sanitized
+timestamps/statuses, including partial evidence on interruption. Run the full
+live matrix before and after the window to check HTTP, forwarded viewer SNI,
+Website-dev's explicit deferred state, deployment state and firewall as well.
+Passing finite samples describe that observation window, not an availability
+guarantee or permission to remove the dev guard.
 
 The rollback command temporarily adds a priority-300 file-provider route on
 each node, matching only the real credential and a unique query parameter on
