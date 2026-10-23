@@ -10,7 +10,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | What | Value |
 |------|-------|
 | Cron | `*/5 * * * *` with `TZ=Europe/Berlin` (see `coolify-healthcheck.cron`) |
-| Where | data node **contabo-b** (`169.58.124.141`); optionally also primary **contabo-a** for the Coolify-UI/app angle |
+| Where | data node **contabo-b** (`169.58.124.141`) runs full checks incl. dump/WAL freshness; primary **contabo-a** (`169.58.119.163`) is CP/obs only — **must** set `SKIP_BACKUP_CHECKS=1` (and usually `SKIP_PG_*=1`) so dump/WAL paths that exist only on `.141` do not false-FAIL |
 | Alternative | Coolify Scheduled Task on the node, same `*/5 * * * *` |
 | Alert to | `alexey@datatalks.club,dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; recovery notice on green again) |
 
@@ -86,3 +86,13 @@ once SMTP + log volume look healthy.
 | `coolify-healthcheck.cron` | `*/5 * * * *` Europe/Berlin entry |
 | `coolify-healthcheck.env.example` | placeholders for `/etc/coolify-healthcheck.env` |
 | `install-coolify-healthcheck.sh` | operator-box installer (scp + cron, never overwrites env) |
+
+
+## Host roles (do not regress)
+
+| Host | Role | Required env skips |
+|------|------|--------------------|
+| **contabo-b** `.141` | data node: Postgres, nightly `.dump.gz`, WAL shipper | backup checks **ON** (`SKIP_BACKUP_CHECKS` unset/0); `WAL_STACKS="pg-shared pg-relay"` |
+| **contabo-a** `.163` | Coolify CP + obs (VictoriaMetrics/Logs) | **`SKIP_BACKUP_CHECKS=1`** mandatory — dumps/WAL markers are not local (t1146u checks + t1209u false-FAIL storm). Prefer `SKIP_PG_SHARED=1` / `SKIP_PG_RELAY=1` when PG is docker-only on `.141`. |
+
+`install-coolify-healthcheck.sh` never overwrites an existing `/etc/coolify-healthcheck.env`. After install on **contabo-a**, confirm `SKIP_BACKUP_CHECKS=1` is set before enabling mail alerts.

@@ -58,3 +58,5 @@ echo "NEXT: edit real values in /etc/coolify-healthcheck.env on ${HOST}, configu
 echo "for delivery to alexey@datatalks.club and dev@dtcdev.click, then run:"
 echo "  ssh ${HOST} 'sudo /usr/local/sbin/coolify-healthcheck.sh'"
 echo "expect ALL_OK (or CHECKS_FAILED with entries) in /var/log/coolify-healthcheck.log."
+echo "If HOST is contabo-a (CP): ensure SKIP_BACKUP_CHECKS=1 (and usually SKIP_PG_SHARED=1"
+echo "SKIP_PG_RELAY=1) in /etc/coolify-healthcheck.env — dumps/WAL exist only on contabo-b (t1209u)."
