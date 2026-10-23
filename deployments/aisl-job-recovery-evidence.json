@@ -12,7 +12,14 @@
     "reviews_assigned": 0,
     "subsequent_scheduled_started_at": "2026-10-23T13:00:20.714819Z",
     "subsequent_scheduled_stopped_at": "2026-10-23T13:00:21.301409Z",
-    "subsequent_scheduled_success": true
+    "subsequent_scheduled_success": true,
+    "scheduled_successes_after_final_container_start": [
+      {
+        "started_at": "2026-10-23T13:30:07.863039+00:00",
+        "stopped_at": "2026-10-23T13:30:09.682228+00:00",
+        "success": true
+      }
+    ]
   },
   "zoom": {
     "legacy_secret_recovered": true,
@@ -65,10 +72,10 @@
     "zero_restarts": true,
     "shared_nonempty_key": true,
     "shared_nonempty_database": true,
-    "observed_at": "2026-10-23T13:11:18.426919+00:00",
+    "observed_at": "2026-10-23T13:30:27.427798+00:00",
     "started_at": [
-      "2026-10-23T13:10:17.931515614Z",
-      "2026-10-23T13:10:18.149796793Z"
+      "2026-10-23T13:28:36.684329194Z",
+      "2026-10-23T13:28:36.440669817Z"
     ]
   },
   "validation": {
@@ -78,6 +85,14 @@
     "lint_passed": true,
     "broader_local_gate": "interrupted_by_process_exhaustion",
     "coolify_ci": "passed",
-    "deploy_dev_ci": "pending"
-  }
+    "source_ci_checks_passed": 11,
+    "postgresql_ci": "passed",
+    "full_django_ci": "passed",
+    "core_playwright_ci": "passed",
+    "coverage_ci": "passed",
+    "aws_dev_deployment": "failed_missing_ecr_repository"
+  },
+  "evidence_recorded_at": "2026-10-23T13:32:30.466935+00:00",
+  "all_scoped_acceptance_criteria_verified": true,
+  "out_of_scope_limitation": "The separate AWS Dev image publish failed because its configured ECR repository is absent. No AWS infrastructure was changed."
 }
