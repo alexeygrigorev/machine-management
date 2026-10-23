@@ -157,6 +157,12 @@ case "$url" in
 esac
 EOF
 chmod +x "$TMP/cbin/curl"
+cat > "$TMP/cbin/docker" <<'EOF'
+#!/usr/bin/env bash
+# No-op docker for content tests: no containers anywhere (Created check green).
+exit 0
+EOF
+chmod +x "$TMP/cbin/docker"
 
 run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
   local statedir
@@ -212,6 +218,119 @@ if [[ $rc -eq 0 && "$out" == *'skipping malformed CONTENT_CHECKS entry'* && "$ou
   pass "T10 malformed entry skipped, good entry green"
 else
   fail "T10 malformed entry (rc=$rc) -- $out"
+fi
+
+echo "---- $PASS passed, $FAILN failed ----"
+[[ "$FAILN" -eq 0 ]] && : # gate re-checked after ops tests below
+
+# ---- T11-T17: Created-container detection + AISHL django_q (t1143u) ----
+mkdir -p "$TMP/dbin"
+cat > "$TMP/dbin/docker" <<'EOF'
+#!/usr/bin/env bash
+# Stub docker for ops tests: state via $STUB2_* env.
+#   STUB2_NOPG=1          -> pg-shared label lookup returns empty
+#   STUB2_CREATED_IDS     -> ids for `ps -a --filter status=created`
+#   STUB2_CREATED_TS      -> Created timestamp for `inspect` (default: 2026-10-22 old)
+#   STUB2_AISL_FAIL       -> django_q 24h failure count (default 3)
+#   STUB2_AISL_PROG       -> seconds since last success (default 120)
+set -uo pipefail
+case "${1:-}" in
+  ps)
+    if [[ "$*" == *"status=created"* ]]; then
+      # shellcheck disable=SC2086
+      echo ${STUB2_CREATED_IDS:-}
+      exit 0
+    fi
+    if [[ "${STUB2_NOPG:-0}" == "1" ]]; then exit 0; fi
+    echo "fake-shared-uuid"; exit 0;;
+  inspect)
+    echo "${STUB2_CREATED_TS:-2026-10-22T15:36:18+02:00}"; exit 0;;
+  exec)
+    shift
+    while [[ $# -gt 0 && "$1" == -* ]]; do
+      case "$1" in -e) shift 2;; *) shift;; esac
+    done
+    _container="${1:-}"; shift || true
+    _cmd="${1:-}"; shift || true
+    if [[ "$_cmd" == "pg_isready" ]]; then echo "accepting connections"; exit 0; fi
+    if [[ "$_cmd" == "psql" ]]; then
+      if [[ "$*" == *"success=false"* ]]; then echo "${STUB2_AISL_FAIL:-3}"; exit 0; fi
+      if [[ "$*" == *"max(stopped)"* ]]; then echo "${STUB2_AISL_PROG:-120}"; exit 0; fi
+      echo "1"; exit 0
+    fi
+    echo "stub docker: unsupported cmd: $_cmd" >&2; exit 99;;
+esac
+echo "stub docker: unsupported: $*" >&2; exit 99
+EOF
+chmod +x "$TMP/dbin/docker"
+
+run_ops() { # uses $STUB2_* env; $1=CHECK_AISL_Q value
+  local statedir envf="$TMP/env-ops"
+  statedir="$(mktemp -d -p "$TMP")"
+  printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'SKIP_DISK_CHECK=1' \
+    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.com' "CHECK_AISL_Q=$1" > "$envf"
+  COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
+  STATE_DIR="$statedir" \
+  LOCK_FILE="$TMP/olock-$RANDOM" \
+  APP_URLS="" CONTENT_CHECKS="" \
+  PATH="$TMP/dbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+}
+
+# T11: no Created containers -> OK docker-created
+out=""; set +e; out="$(STUB2_CREATED_IDS="" run_ops 0)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=docker-created'* ]]; then
+  pass "T11 no Created containers green"
+else
+  fail "T11 created-empty (rc=$rc) -- $out"
+fi
+
+# T12: stale Created container -> FAIL with id
+out=""; set +e; out="$(STUB2_CREATED_IDS="edf37bcf137b" run_ops 0)"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=docker-created'* && "$out" == *'edf37bcf137b'* ]]; then
+  pass "T12 stale Created FAILs with id (rc=$rc)"
+else
+  fail "T12 stale created (rc=$rc) -- $out"
+fi
+
+# T13: fresh Created container (within grace) -> OK, no flap on deploys
+out=""; set +e; out="$(STUB2_CREATED_IDS="abc123" STUB2_CREATED_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" run_ops 0)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=docker-created'* ]]; then
+  pass "T13 fresh Created within grace green"
+else
+  fail "T13 fresh created (rc=$rc) -- $out"
+fi
+
+# T14: aisl-q green (failures under threshold, progress fresh)
+out=""; set +e; out="$(STUB2_CREATED_IDS="" STUB2_AISL_FAIL=3 STUB2_AISL_PROG=120 run_ops 1)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=aisl-q: failed_last_24h=3 success_age=120s'* ]]; then
+  pass "T14 aisl-q green with counts"
+else
+  fail "T14 aisl-q green (rc=$rc) -- $out"
+fi
+
+# T15: aisl-q red on recurring failures (live: 41/24h vs threshold 10)
+out=""; set +e; out="$(STUB2_CREATED_IDS="" STUB2_AISL_FAIL=41 STUB2_AISL_PROG=60 run_ops 1)"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=aisl-q'* && "$out" == *'failed_last_24h=41'* ]]; then
+  pass "T15 aisl-q recurring failures FAIL (rc=$rc)"
+else
+  fail "T15 aisl-q failures (rc=$rc) -- $out"
+fi
+
+# T16: aisl-q red on stale progress (no success > 3600s)
+out=""; set +e; out="$(STUB2_CREATED_IDS="" STUB2_AISL_FAIL=0 STUB2_AISL_PROG=9999 run_ops 1)"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=aisl-q'* && "$out" == *'9999s'* ]]; then
+  pass "T16 aisl-q stale progress FAILs (rc=$rc)"
+else
+  fail "T16 aisl-q progress (rc=$rc) -- $out"
+fi
+
+# T17: CHECK_AISL_Q=1 without local pg-shared -> loud misconfig FAIL
+out=""; set +e; out="$(STUB2_CREATED_IDS="" STUB2_NOPG=1 run_ops 1)"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=aisl-q'* && "$out" == *'no local pg-shared'* ]]; then
+  pass "T17 aisl-q without container FAILs loud"
+else
+  fail "T17 aisl-q misconfig (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

@@ -12,6 +12,10 @@
 #   2. Postgres pg-relay:  same, against the separate Relay instance.
 #   3. HTTP/app endpoints:  configurable list (Coolify UI, Relay, CMP, AISHL,
 #      website) — curl must return 2xx/3xx within the timeout.
+#   4. Content markers (CONTENT_CHECKS): 2xx/3xx plus a verbatim body marker.
+#   5. AISHL django_q (CHECK_AISL_Q=1, data host only): recurring task
+#      failures + worker progress. Dumps/WAL freshness, disk, and residual
+#      Created-container detection.
 #
 # Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click)
 # via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
@@ -445,6 +449,92 @@ check_cmp_callbacks() {
   mark_ok "$name"
 }
 
+# AISHL django_q failure + worker progress (t1143u: the
+# content.tasks.peer_reviews.form_self_paced_review_batches query fails
+# roughly every 15m; the sibling AISHL worker owns the SQL fix — this check
+# only pages while failures recur, and auto-recovers when fixed).
+# Enable ONLY on the host with the local pg-shared container (contabo-b):
+#   CHECK_AISL_Q=1
+# Read-only SQL (statement_timeout + default_transaction_read_only), same
+# pattern as check_cmp_callbacks; no passwords in git (node env only).
+check_aisl_q() {
+  local name="aisl-q" out rc fail24 prog_age now
+  AISL_Q_FAIL_MAX_24H="${AISL_Q_FAIL_MAX_24H:-10}"
+  AISL_Q_PROGRESS_MAX_AGE_SEC="${AISL_Q_PROGRESS_MAX_AGE_SEC:-3600}"
+  if [[ -z "$PG_SHARED_CONTAINER" ]]; then
+    log "FAIL check=${name}: CHECK_AISL_Q=1 but no local pg-shared container (enable only on contabo-b)"
+    send_alert "$name" "FAIL" "CHECK_AISL_Q=1 on $(hostname) but no local pg-shared container resolved — move this flag to the PG data host."
+    FAILED=1; return
+  fi
+  if ! command -v docker >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+    log "FAIL check=${name}: need docker + timeout binaries"
+    send_alert "$name" "FAIL" "docker/timeout missing on $(hostname); cannot probe aisl django_q."
+    FAILED=1; return
+  fi
+  out="$(timeout 20 docker exec -e PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' "$PG_SHARED_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$PGUSER_SHARED" -d aisl -tAc "SELECT count(*) FROM django_q_task WHERE success=false AND stopped > now() - interval '24 hours';" 2>/dev/null)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 || ! "$out" =~ ^[0-9]+$ ]]; then
+    log "FAIL check=${name}: django_q failure-count query failed (rc=${rc})"
+    send_alert "$name" "FAIL" "Cannot verify AISHL task failures: django_q_task count query failed (rc=${rc})."
+    FAILED=1; return
+  fi
+  fail24="$(echo "$out" | tr -d '[:space:]')"
+  out="$(timeout 20 docker exec -e PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' "$PG_SHARED_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$PGUSER_SHARED" -d aisl -tAc "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - max(stopped)))::int, -1) FROM django_q_task WHERE success=true;" 2>/dev/null)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 || ! "$out" =~ ^-?[0-9]+$ ]]; then
+    log "FAIL check=${name}: django_q progress query failed (rc=${rc})"
+    send_alert "$name" "FAIL" "Cannot verify AISHL worker progress: django_q_task progress query failed (rc=${rc})."
+    FAILED=1; return
+  fi
+  prog_age="$(echo "$out" | tr -d '[:space:]')"
+  if [[ "$fail24" -gt "$AISL_Q_FAIL_MAX_24H" ]]; then
+    log "FAIL check=${name}: failed_last_24h=${fail24} (> ${AISL_Q_FAIL_MAX_24H}) success_age=${prog_age}s"
+    send_alert "$name" "FAIL" "AISHL django_q_task failures recurring: failed_last_24h=${fail24} (threshold ${AISL_Q_FAIL_MAX_24H}). Known suspect: content.tasks.peer_reviews.form_self_paced_review_batches (FOR UPDATE on outer-join nullable side) — owned by the AISHL app worker, not monitoring."
+    FAILED=1; return
+  fi
+  if [[ "$prog_age" -lt 0 || "$prog_age" -gt "$AISL_Q_PROGRESS_MAX_AGE_SEC" ]]; then
+    log "FAIL check=${name}: no successful task for ${prog_age}s (> ${AISL_Q_PROGRESS_MAX_AGE_SEC}s) failed_last_24h=${fail24}"
+    send_alert "$name" "FAIL" "AISHL worker shows no successful django_q_task for ${prog_age}s (threshold ${AISL_Q_PROGRESS_MAX_AGE_SEC}s) — qcluster may be down."
+    FAILED=1; return
+  fi
+  log "OK check=${name}: failed_last_24h=${fail24} success_age=${prog_age}s"
+  mark_ok "$name"
+}
+
+# Residual Created-container detection (t1143u: a stale Created relay-dev web
+# container sat on contabo-b for 20h unnoticed; cmp-created-watchdog
+# self-heals only on contabo-a). FAILs on any Created container older than
+# CREATED_GRACE_SEC — fresh deploys pass through Created briefly, residuals
+# do not. Removal stays a manual `docker rm` after inspection.
+check_created_containers() {
+  local name="docker-created" ids
+  CREATED_GRACE_SEC="${CREATED_GRACE_SEC:-1800}"
+  if ! command -v docker >/dev/null 2>&1; then
+    log "WARN check=${name}: docker not found — skipping"
+    return
+  fi
+  # shellcheck disable=SC2086
+  ids="$(docker ps -a --filter status=created --format '{{.ID}}' 2>/dev/null || true)"
+  local stale="" id created epoch age now
+  now="$(date +%s)"
+  # shellcheck disable=SC2086
+  for id in $ids; do
+    created="$(docker inspect -f '{{.Created}}' "$id" 2>/dev/null || true)"
+    epoch="$(date -d "$created" +%s 2>/dev/null || echo 0)"
+    age=$(( now - epoch ))
+    if [[ "$epoch" -le 0 ]]; then
+      stale="$stale ${id}(age-unknown)"
+    elif [[ "$age" -gt "$CREATED_GRACE_SEC" ]]; then
+      stale="$stale ${id}(${age}s)"
+    fi
+  done
+  if [[ -n "${stale// /}" ]]; then
+    log "FAIL check=${name}: stale Created container(s):${stale} (grace ${CREATED_GRACE_SEC}s)"
+    send_alert "$name" "FAIL" "Stale Created container(s) on $(hostname):${stale} — a Coolify deploy created but never started them (cf. t658u). Inspect, then 'docker rm' the leftover or 'docker start' it."
+    FAILED=1; return
+  fi
+  log "OK check=${name}: no stale Created containers"
+  mark_ok "$name"
+}
+
 # ---- run ----
 # Set SKIP_PG_SHARED=1 / SKIP_PG_RELAY=1 on hosts that cannot reach Postgres
 # (e.g. contabo-a when PG is docker-only on contabo-b).
@@ -464,6 +554,11 @@ fi
 
 if [[ "${CHECK_CMP_CALLBACKS:-0}" == "1" ]]; then
   check_cmp_callbacks
+fi
+
+# AISHL django_q failure/progress — enable only on the PG data host.
+if [[ "${CHECK_AISL_Q:-0}" == "1" ]]; then
+  check_aisl_q
 fi
 
 if [[ -n "${APP_URLS:-}" ]]; then
@@ -498,6 +593,10 @@ if [[ "${SKIP_DISK_CHECK:-0}" == "1" ]]; then
 else
   check_disk
 fi
+
+# Residual Created-container detection runs on every node with docker
+# (self-heal stays with cmp-created-watchdog on contabo-a only).
+check_created_containers
 
 if [[ "${SKIP_BACKUP_CHECKS:-0}" == "1" ]]; then
   log "SKIP backup dump/WAL freshness (SKIP_BACKUP_CHECKS=1)"
