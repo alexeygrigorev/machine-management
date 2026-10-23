@@ -1,0 +1,7 @@
+# Relay PG DNS/IP churn watchdog — every 1 minute Europe/Berlin.
+# Install: sudo ./monitors/install-relay-pg-dns-watchdog.sh <ssh-host>
+# Pairs with coolify-healthcheck (*/5): this catches stale app→PG resolve
+# before SQS oldest-message age exceeds 300s (t1205u/t1207u).
+
+TZ=Europe/Berlin
+* * * * * root /usr/local/sbin/relay-pg-dns-watchdog.sh >> /var/log/relay-pg-dns-watchdog.log 2>&1

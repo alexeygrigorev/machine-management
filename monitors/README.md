@@ -96,3 +96,21 @@ once SMTP + log volume look healthy.
 | **contabo-a** `.163` | Coolify CP + obs (VictoriaMetrics/Logs) | **`SKIP_BACKUP_CHECKS=1`** mandatory — dumps/WAL markers are not local (t1146u checks + t1209u false-FAIL storm). Prefer `SKIP_PG_SHARED=1` / `SKIP_PG_RELAY=1` when PG is docker-only on `.141`. |
 
 `install-coolify-healthcheck.sh` never overwrites an existing `/etc/coolify-healthcheck.env`. After install on **contabo-a**, confirm `SKIP_BACKUP_CHECKS=1` is set before enabling mail alerts.
+
+
+## relay-pg-dns-watchdog (t1207u)
+
+Catches Coolify PG IP/DNS churn that leaves Relay workers with a stale resolve
+while PG itself is healthy (t1205u → SQS age/DLQ). Runs **every 1 minute** on
+contabo-b; auto-restarts dependents; alerts `alexey@datatalks.club,dev@dtcdev.click`.
+
+| File | Purpose |
+|------|---------|
+| `relay-pg-dns-watchdog.sh` | probe from inside app containers; autoheal |
+| `relay-pg-dns-watchdog.cron` | `* * * * *` Europe/Berlin |
+| `relay-pg-dns-watchdog.env.example` | `/etc/relay-pg-dns-watchdog.env` |
+| `install-relay-pg-dns-watchdog.sh` | scp + cron installer |
+
+SOP: `../contingency/relay-pg-dns-after-coolify-pg-redeploy.md`
+
+Install: `./monitors/install-relay-pg-dns-watchdog.sh contabo-b`
