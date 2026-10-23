@@ -2,6 +2,7 @@ import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import socket
 from pathlib import Path
 import tempfile
 import threading
@@ -35,11 +36,24 @@ class Application(BaseHTTPRequestHandler):
 
 
 class DrainTests(unittest.TestCase):
+    def test_synchronized_proxy_health_burst_fits_listen_queue(self):
+        # Seven AISHL load-balancer checks plus Docker health can arrive
+        # together while the accept loop is momentarily descheduled.
+        server = readiness.ReadinessServer(('127.0.0.1', 0), readiness.Handler)
+        connections = []
+        try:
+            for _ in range(12):
+                connections.append(socket.create_connection(server.server_address, timeout=.2))
+        finally:
+            for connection in connections:
+                connection.close()
+            server.server_close()
+
     def test_readiness_requires_app_and_draining_keeps_app_serving(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / 'drain'
             app = ThreadingHTTPServer(('127.0.0.1', 0), Application)
-            ready = ThreadingHTTPServer(('127.0.0.1', 0), readiness.Handler)
+            ready = readiness.ReadinessServer(('127.0.0.1', 0), readiness.Handler)
             for server in [app, ready]:
                 threading.Thread(target=server.serve_forever, daemon=True).start()
             app_url = 'http://127.0.0.1:' + str(app.server_port) + '/ping'

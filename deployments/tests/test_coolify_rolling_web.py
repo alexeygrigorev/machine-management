@@ -1,7 +1,9 @@
 import copy
 import base64
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -56,12 +58,100 @@ class RollingTests(unittest.TestCase):
         with patch.object(rolling.subprocess, 'check_output', return_value='expected  job.php\n'):
             rolling.verify_control_plane(config)
 
+    def test_helper_binding_requires_exact_versioned_host_file(self):
+        hashes = {name: 'a' * 64 for name in rolling.ASSET_TARGETS}
+        config = {**self.config, 'asset_hashes': hashes}
+        storages = [{'mount_path': target, 'fs_path': rolling.asset_path('native', name, hashes[name]),
+                     'is_host_file': True} for name, target in rolling.ASSET_TARGETS.items()]
+        call = lambda *args: {'file_storages': storages}
+        rolling.verify_asset_bindings(config, call, '/api/v1/applications/native')
+        for mutation in ({'fs_path': '/data/coolify/stale.py'}, {'is_host_file': False}):
+            with self.subTest(mutation=mutation):
+                original = storages[0].copy()
+                storages[0].update(mutation)
+                with self.assertRaises(ValueError):
+                    rolling.verify_asset_bindings(config, call, '/api/v1/applications/native')
+                storages[0] = original
+        storages.pop()
+        with self.assertRaises(ValueError):
+            rolling.verify_asset_bindings(config, call, '/api/v1/applications/native')
+
+    def test_host_helper_content_must_match_manifest(self):
+        config = {'applications': [{'ssh_host': 'node', 'app_uuid': 'native'}],
+                  'assets': {'rolling-readiness.py': 'a' * 64}}
+        path = rolling.asset_path('native', 'rolling-readiness.py', 'a' * 64)
+        with patch.object(rolling.subprocess, 'check_output', return_value='a' * 64 + '  ' + path + '\n'):
+            rolling.verify_host_assets(config)
+        with patch.object(rolling.subprocess, 'check_output', return_value='b' * 64 + '  ' + path + '\n'):
+            with self.assertRaises(ValueError):
+                rolling.verify_host_assets(config)
+
+    def test_stale_helper_binding_refuses_deployment(self):
+        config = {**self.config, 'asset_hashes': {name: 'a' * 64 for name in rolling.ASSET_TARGETS}}
+        def call(method, path, data=None):
+            if path.endswith('/storages'):
+                return {'file_storages': [{'mount_path': target, 'fs_path': '/old/file', 'is_host_file': True}
+                                         for target in rolling.ASSET_TARGETS.values()]}
+            return self.call(method, path, data)
+        with self.assertRaises(ValueError):
+            rolling.reconcile(config, call, self.state, True)
+        self.assertEqual(self.writes, [])
+
+    def test_versioned_helper_bindings_allow_same_release_noop(self):
+        config = {**self.config, 'asset_hashes': {name: 'a' * 64 for name in rolling.ASSET_TARGETS}}
+        def call(method, path, data=None):
+            if path.endswith('/storages'):
+                return {'file_storages': [{'mount_path': target, 'fs_path': rolling.asset_path('native', name, 'a' * 64), 'is_host_file': True}
+                                         for name, target in rolling.ASSET_TARGETS.items()]}
+            return self.call(method, path, data)
+        self.assertEqual(rolling.reconcile(config, call, self.state, True), 'in-sync')
+        self.assertEqual(self.writes, [])
+
+    def test_host_helper_hash_mismatch_refuses_reconciliation(self):
+        config = {'applications': [{'app_uuid': 'native', 'ssh_host': 'node'}],
+                  'assets': {name: 'a' * 64 for name in rolling.ASSET_TARGETS}}
+        output = '\n'.join('b' * 64 + '  ' + rolling.asset_path('native', name, 'a' * 64)
+                           for name in rolling.ASSET_TARGETS)
+        with patch.object(rolling.subprocess, 'check_output', return_value=output):
+            with self.assertRaises(ValueError):
+                rolling.verify_host_assets(config)
+
     def test_new_release_updates_then_deploys_native_only(self):
         def new(config):
             return 'ghcr.io/org/web:20261023-130000-123abcd', {'SECRET': 'private'}
         self.assertEqual(rolling.reconcile(self.config, self.call, new, True), 'deployed')
         self.assertEqual([w[:2] for w in self.writes], [
             ('PATCH', '/api/v1/applications/native'), ('POST', '/api/v1/deploy?uuid=native')])
+
+    def test_git_website_follows_only_the_healthy_source_commit(self):
+        config = {**self.config, 'image': 'dtc-website', 'rollout_mode': 'git-commit'}
+        self.app.update(build_pack='dockerfile', git_commit_sha='a' * 40)
+        state = lambda c: ('dtc-website:' + 'b' * 40, {'SECRET': 'private'})
+        self.assertEqual(rolling.reconcile(config, self.call, state, True), 'deployed')
+        self.assertEqual(self.writes[0][2], {'git_commit_sha': 'b' * 40})
+        self.writes.clear()
+        self.assertEqual(rolling.reconcile(config, self.call, state, True), 'in-sync')
+        self.assertEqual(self.writes, [])
+
+    def test_git_website_rejects_a_mutable_source_tag(self):
+        config = {**self.config, 'image': 'dtc-website', 'rollout_mode': 'git-commit'}
+        with self.assertRaises(ValueError):
+            rolling.reconcile(config, self.call, lambda c: ('dtc-website:latest', {}), True)
+        self.assertEqual(self.writes, [])
+
+    def test_timestamped_source_selects_latest_healthy_web(self):
+        def container(created, health, image):
+            return {'Created': created, 'State': {'Health': {'Status': health}},
+                    'Config': {'Image': image, 'Env': ['SECRET=private'],
+                               'Entrypoint': ['./entrypoint.sh'], 'Cmd': ['web']}}
+        containers = [container('1', 'healthy', 'dtc-website:' + 'a' * 40),
+                      container('2', 'starting', 'dtc-website:' + 'b' * 40)]
+        config = {'source_uuid': 'source', 'source_container_prefix': 'web-source-', 'ssh_host': 'node'}
+        with patch.object(rolling.subprocess, 'check_output', return_value='a' * 12 + '\n' + 'b' * 12), \
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(containers))):
+            image, env = rolling.source_state(config)
+        self.assertEqual(image, 'dtc-website:' + 'a' * 40)
+        self.assertEqual(json.loads(env['ROLLING_ORIGINAL_COMMAND']), ['web'])
 
     def test_failed_release_is_retried_instead_of_false_convergence(self):
         self.deployments = [{'status': 'failed'}]
@@ -107,6 +197,12 @@ class RollingTests(unittest.TestCase):
         self.assertEqual(self.writes[0][1], '/api/v1/applications/native/envs/bulk')
         self.assertTrue(self.writes[0][2]['data'][0]['is_literal'])
         self.assertFalse(any(w[0] == 'DELETE' for w in self.writes))
+
+    def test_environment_rotation_preserves_build_secret_flag(self):
+        self.env[0]['is_buildtime'] = True
+        state = lambda c: (self.state(c)[0], {'SECRET': 'rotated'})
+        rolling.reconcile(self.config, self.call, state, True)
+        self.assertTrue(self.writes[0][2]['data'][0]['is_buildtime'])
 
     def test_proxy_labels_keep_origin_guard_priority_and_healthgate(self):
         labels = rolling.labels_for_web([

@@ -21,7 +21,7 @@ without draining.
 | AISHL | `w3mxfr6wzjnpg3hqaw3y0obq` | `mekt9kz74fvbixla6olinuma` | contabo-b |
 | Relay production | `oascx5kjeimc0ivpttag9z3q` | `fjnzwomg8n42lztloo34just` | contabo-b |
 | CMP production | `9gqubsq4lxubaxm27v1mtq9u` | `avcfd5kwb7cj9r1tx4ygjs6v` | contabo-a |
-| DTC website | `wodajblzizrjunwme3ossav3` (existing Dockerfile Application) | none | contabo-a |
+| DTC website | `nax9srpks6z7w1jgpebiuwuo` (Dockerfile Application) | `wodajblzizrjunwme3ossav3` (Compose Application, web + worker) | contabo-a |
 
 The three private Services keep their existing `web` component name for
 release validation, migrations, CMP scheduled `docker exec` tasks, and
@@ -49,6 +49,15 @@ while moving public traffic onto native rolling replacement. The source
 Service's Recreate/Restart actions can now replace its private containers
 without stopping public web.
 
+The website source is a Compose Application rather than a Compose Service.
+A concurrent worker rollout converted its original Application to Compose,
+which would have removed native rolling support. Its new worker is preserved
+in that original resource, and public web has a separate native Application.
+The source Application's top-level and per-service domains are unset in
+Coolify metadata. Its checked-in Compose has no explicit proxy labels,
+so future source deployments have no public web router. Do not put production
+domains back on the release/worker resource.
+
 ## Release follower on Hetzner
 
 [`coolify-rolling-web.json`](coolify-rolling-web.json) records the non-secret
@@ -61,7 +70,9 @@ Each minute the follower:
 
 1. Inspects the source container over SSH. If it is absent/unhealthy, public
    web stays on its current release.
-2. Requires an immutable dated tag in that app's expected image repository.
+2. Requires an immutable dated tag in the first three apps' expected image
+   repository. For the website, require the healthy source's `dtc-website`
+   image tag to be a full Git commit and pin the native Dockerfile build to it.
 3. Verifies the control-plane drain-hook checksum and refuses native settings
    that prevent health-gated rolling replacement.
 4. Skips queued/running deployments and makes no writes when already in sync.
@@ -86,8 +97,11 @@ Failures produce only a name and exception class, never API bodies or values.
 The first three Applications use `Docker Image`, with the source container's
 immutable image and runtime environment. The launch helper preserves the
 source container's actual entrypoint/CMD in `ROLLING_ORIGINAL_ENTRYPOINT` and
-`ROLLING_ORIGINAL_COMMAND`. The website retains its existing Dockerfile
-deployment and its `./entrypoint.sh web` startup.
+`ROLLING_ORIGINAL_COMMAND`. The website uses a separate Dockerfile Application
+with the same Git source and `./entrypoint.sh web` startup. Its automatic Git
+deployment is disabled: the follower promotes only the commit already running
+healthy in the original private web/worker Application. Build-secret flags are
+preserved when mirroring changed environment values.
 
 | Setting | Value |
 | --- | --- |
@@ -116,6 +130,24 @@ for every replacement. All four images have Python;
 do not depend on `curl`/`wget` existing in every image. Docker Run Options do
 not support volume mounting in this Coolify version; use file storage.
 
+Install their contents with the versioned asset installer:
+
+```sh
+python3 deployments/install-coolify-web-assets.py
+python3 deployments/install-coolify-web-assets.py --apply
+```
+
+Each binding uses an exact host-file path under
+`/data/coolify/rolling-assets/<application>/<sha256>/<filename>` and mounts it
+at the corresponding `/opt` path. The installer preserves private rollback
+metadata and does not restart containers. Update the manifest hashes when
+changing helper code, install it, then deploy each native Application normally.
+Verify the replacement's mount sources and in-container checksums before
+acceptance. Coolify can retain an existing generated content file even after
+its database content changes; updating content metadata alone did not install
+the backlog fix in the running replicas. The follower checks host checksums
+and exact storage bindings before promotion.
+
 | App | Internal port | Health path |
 | --- | --- | --- |
 | AISHL | 8000 | `/ping` |
@@ -135,6 +167,12 @@ probe; after startup, three consecutive failures withdraw readiness. This
 avoids routing flaps from a single slow probe and prevents multiple Traefik
 routers from issuing a burst of nested application checks. `/ready` reads
 this cached state immediately; a drain marker overrides it immediately.
+The HTTP readiness listener uses backlog 128. The stdlib default of five was
+too small for AISHL's seven synchronized Traefik service checks plus Docker
+health. Live diagnostics showed Traefik marking the backend DOWN while both
+direct readiness and application probes returned 200; AISHL had 42 TCP listen
+queue overflows, versus zero on the other three apps. The burst regression
+test reproduces the default-backlog timeout and passes with backlog 128.
 Neither the
 application port nor the readiness port is published on the host. There is
 no HTTP drain operation: the actuator runs only through local Docker exec.
@@ -236,8 +274,9 @@ the new load balancer has passed its first active health check through
 Traefik, using a loopback-restricted temporary canary route. Docker health
 alone is insufficient for that one-time cutover: a new higher-priority router
 can otherwise become selectable before its first active check succeeds.
-This caused brief AISHL 503 samples during readiness-agent adoption; the
-final steady-state draining deployments were measured separately.
+Readiness-agent adoption included brief AISHL 503 samples while the previous
+synchronous probe was still serving. The final cached-readiness and draining
+deployments were measured separately.
 
 ## Install the follower
 
@@ -249,7 +288,7 @@ install -m 600 deployments/coolify-rolling-web.json /home/alexey/.config/coolify
 python3 /home/alexey/tmp/bin/coolify-rolling-web.py --config /home/alexey/.config/coolify-rolling-web.json
 ```
 
-Require all three entries to say `in-sync` before adding the single line in
+Require all four entries to say `in-sync` before adding the single line in
 [`coolify-rolling-web.cron`](coolify-rolling-web.cron). Keep its `flock` lock.
 The token and SSH key are read from the referenced private files; the script
 does not contain credentials. Preserve the existing source/promotion pollers.

@@ -48,6 +48,24 @@
       "label_namespace": "9gqubsq4lxubaxm27v1mtq9uv3",
       "domains": "https://courses.datatalks.club,http://cmp-staging.169.58.119.163.sslip.io",
       "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+    },
+    {
+      "name": "website",
+      "source_uuid": "wodajblzizrjunwme3ossav3",
+      "source_kind": "application",
+      "source_container_prefix": "web-wodajblzizrjunwme3ossav3-",
+      "ssh_host": "contabo-a",
+      "image": "dtc-website",
+      "rollout_mode": "git-commit",
+      "environment": {
+        "ROLLING_APP_URL": "http://127.0.0.1:8000/health/ready"
+      },
+      "path": "/health/ready",
+      "port": "8000",
+      "app_uuid": "nax9srpks6z7w1jgpebiuwuo",
+      "label_namespace": "nax9srpks6z7w1jgpebiuwuov3",
+      "domains": "http://origin.website.datatalks.club,http://prod.datatalks.club,http://wodajblzizrjunwme3ossav3.169.58.119.163.sslip.io",
+      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
     }
   ],
   "native_settings": {
@@ -65,21 +83,21 @@
     "is_container_label_readonly_enabled": false,
     "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
   },
-  "website": {
-    "app_uuid": "wodajblzizrjunwme3ossav3",
-    "ssh_host": "contabo-a",
-    "label_namespace": "wodajblzizrjunwme3ossav3v3",
-    "build_pack": "dockerfile",
-    "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready",
-    "environment": {
-      "ROLLING_ORIGINAL_ENTRYPOINT": "./entrypoint.sh",
-      "ROLLING_ORIGINAL_COMMAND": "[\"web\"]",
-      "ROLLING_APP_URL": "http://127.0.0.1:8000/health/ready"
-    }
-  },
   "control_plane": {
     "ssh_host": "contabo-a",
     "job_sha256": "5f0ec6723e21408c760c6d307e5d5afc56cd34e131010dc204c25eb3eca030a0",
     "coolify_version": "4.4.7"
+  },
+  "readiness": {
+    "listen_backlog": 128,
+    "probe_interval_seconds": 1,
+    "probe_timeout_seconds": 2,
+    "consecutive_failures": 3,
+    "old_backend_withdrawal_seconds": 6
+  },
+  "assets": {
+    "rolling-healthcheck.py": "bdf06431ba3a5fe0fd3c6ad467247c1d89045c836e3efb0ee1db5b40c86ea511",
+    "rolling-readiness.py": "c81e2adbaafc8054a547d430a423625e347917b84263575de7f80afdd7c4c302",
+    "rolling-launch.py": "bc41a8bfd5147a03b4492ecd85b1ef639ace1c4be1129877e0a3285b1f156b48"
   }
 }

@@ -12,6 +12,12 @@ MARKER = Path('/tmp/coolify-web-draining')
 PROBE = None
 
 
+class ReadinessServer(ThreadingHTTPServer):
+    # Multiple domain-specific Traefik services probe this same listener on
+    # the same tick. The stdlib backlog of five drops their synchronized burst.
+    request_queue_size = 128
+
+
 class Readiness:
     def __init__(self, url):
         self.url = url
@@ -58,6 +64,6 @@ if __name__ == '__main__':
     elif sys.argv[1] == 'serve':
         PROBE = Readiness(os.environ['ROLLING_APP_URL'])
         threading.Thread(target=PROBE.run, daemon=True).start()
-        ThreadingHTTPServer(('0.0.0.0', 8099), Handler).serve_forever()
+        ReadinessServer(('0.0.0.0', 8099), Handler).serve_forever()
     else:
         sys.exit(2)

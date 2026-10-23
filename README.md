@@ -14,6 +14,7 @@ keeps **thin SOP / reference pages that link here** — no duplicate heavy scrip
 
 | Path | Purpose |
 |------|---------|
+| [`deployments/coolify-rolling-web.md`](deployments/coolify-rolling-web.md) | Contabo public web rolling replacement, readiness assets, Traefik health checks and pre-stop drain |
 | [`deployments/aisl-qcluster.md`](deployments/aisl-qcluster.md) | AISHL Coolify worker deployment, heartbeat verification, and key decision |
 | [`deployments/aisl-auto-deploy.md`](deployments/aisl-auto-deploy.md) | AISHL pinned-image poller, idempotent web/worker rollout, and five-minute recreate fix |
 | [`deployments/relay-aux-ownership.md`](deployments/relay-aux-ownership.md) | Relay inbound disabled policy, scheduler pruning owner, and safe verification |
