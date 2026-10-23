@@ -238,7 +238,7 @@ else
           gzip -dc "$SRC" > "$WALCOPY/$BARE" \
             || fail "WAL segment decompress failed: $FN"
           STAGED=$((STAGED + 1))
-        elif [[ "$BARE" =~ ^[0-9A-F]{24}\.backup$ ]]; then
+        elif [[ "$BARE" =~ ^[0-9A-F]{24}(\.[0-9A-F]{8})?\.backup$ ]]; then
           gzip -t "$SRC" || fail "WAL .backup file is CORRUPT (gzip -t failed): $FN"
           gzip -dc "$SRC" > "$WALCOPY/$BARE" \
             || fail "WAL .backup decompress failed: $FN"
@@ -246,7 +246,7 @@ else
         else
           fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
         fi
-      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ || "$FN" =~ ^[0-9A-F]{24}\.backup$ ]]; then
+      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ || "$FN" =~ ^[0-9A-F]{24}(\.[0-9A-F]{8})?\.backup$ ]]; then
         cp "$SRC" "$WALCOPY/$FN" || fail "WAL stage copy failed: $FN"
         STAGED=$((STAGED + 1))
       else
