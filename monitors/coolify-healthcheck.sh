@@ -91,6 +91,13 @@ PG_RELAY_CONTAINER="$(resolve_pg_container "$PG_RELAY_CONTAINER" "pg-relay")"
 # but NOT wrong-content incidents (proxy default page, error page with 200).
 # Pair every user-facing surface with a CONTENT_CHECKS entry below.
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
+# Connect phase includes DNS. Contabo systemd-resolved occasionally stalls >5s
+# (t1228u: FAIL http-relay "Resolving timed out after 5001 milliseconds" then
+# RECOVERED next cron). Retry transient curl 28 / resolve-timeout only — never
+# soft-pass real HTTP 4xx/5xx.
+HTTP_CONNECT_TIMEOUT="${HTTP_CONNECT_TIMEOUT:-10}"
+HTTP_RETRIES="${HTTP_RETRIES:-2}"
+HTTP_RETRY_SLEEP_SEC="${HTTP_RETRY_SLEEP_SEC:-1}"
 
 # Space-separated name=url::marker triples for CONTENT-marker checks.
 # The URL must return 2xx/3xx AND its body must contain the marker.
@@ -245,10 +252,46 @@ check_postgres() {
   mark_ok "$name"
 }
 
+
+# Curl with bounded retries for transient DNS/connect timeouts (curl rc 28).
+# Prints http_code on stdout when successful; on final failure prints curl stderr
+# (and possibly a trailing http_code of 000) and returns curl's rc.
+curl_http_code() {
+  # $1=url  $2=extra curl args for body sink, e.g. empty or "-o /tmp/x"
+  # Uses global HTTP_* knobs. Echoes code to stdout; returns curl rc.
+  local url="$1"; shift
+  local attempt=1 max=$((HTTP_RETRIES + 1)) code rc err
+  while true; do
+    err="$(mktemp)"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout "$HTTP_CONNECT_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$@" "$url" 2>"$err")" && rc=0 || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      rm -f "$err"
+      printf '%s\n' "$code"
+      return 0
+    fi
+    # Transient: resolve/connect timeout (28). Retry up to HTTP_RETRIES times.
+    if [[ "$rc" -eq 28 && "$attempt" -lt "$max" ]]; then
+      log "WARN check=http-retry: attempt=${attempt}/${max} url=${url} rc=28 detail=$(tr -d '\n' <"$err"); sleeping ${HTTP_RETRY_SLEEP_SEC}s" >&2
+      rm -f "$err"
+      sleep "$HTTP_RETRY_SLEEP_SEC"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    # Final failure: surface curl stderr + code (often 000)
+    if [[ -s "$err" ]]; then
+      printf '%s %s\n' "$(tr -d '\n' <"$err")" "${code:-000}"
+    else
+      printf '%s\n' "${code:-000}"
+    fi
+    rm -f "$err"
+    return "$rc"
+  done
+}
+
 check_http() {
   # $1=name $2=url
   local name="http-${1}" url="$2" code rc
-  code="$(curl -fsS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+  code="$(curl_http_code "$url")" && rc=0 || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     log "FAIL check=${name}: curl ${url}: ${code}"
     send_alert "$name" "FAIL" "HTTP check failed for '${1}' (${url}): ${code}"
@@ -267,12 +310,30 @@ check_content() {
   # $1=name $2=url $3=marker (lowercase, no whitespace — see CONTENT_CHECKS)
   local name="content-${1}" url="$2" marker="$3" code rc body_file
   body_file="$(mktemp)" || { log "FAIL check=${name}: mktemp failed"; FAILED=1; return; }
-  code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    log "FAIL check=${name}: curl ${url}: rc=${rc} detail='${code}'"
-    send_alert "$name" "FAIL" "Content check failed for '${1}' (${url}): curl rc=${rc}: ${code}"
+  # Same transient DNS retry as check_http (t1228u).
+  local attempt=1 max=$((HTTP_RETRIES + 1)) err
+  while true; do
+    err="$(mktemp)"
+    code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout "$HTTP_CONNECT_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$url" 2>"$err")" && rc=0 || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      rm -f "$err"
+      break
+    fi
+    if [[ "$rc" -eq 28 && "$attempt" -lt "$max" ]]; then
+      log "WARN check=content-retry: attempt=${attempt}/${max} url=${url} rc=28 detail=$(tr -d '
+' <"$err"); sleeping ${HTTP_RETRY_SLEEP_SEC}s"
+      rm -f "$err"
+      sleep "$HTTP_RETRY_SLEEP_SEC"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    detail="$(tr -d '
+' <"$err") ${code:-000}"
+    rm -f "$err"
+    log "FAIL check=${name}: curl ${url}: rc=${rc} detail='${detail}'"
+    send_alert "$name" "FAIL" "Content check failed for '${1}' (${url}): curl rc=${rc}: ${detail}"
     FAILED=1; rm -f "$body_file"; return
-  fi
+  done
   if [[ ! "$code" =~ ^[23] ]]; then
     log "FAIL check=${name}: ${url} returned HTTP ${code} (want 2xx/3xx; marker not evaluated)"
     send_alert "$name" "FAIL" "Content check for '${1}' (${url}) returned status ${code}; marker '${marker}' not evaluated."

@@ -90,6 +90,9 @@ run_check() { # $1=envfile -> prints output, returns script rc
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/lock-$RANDOM" \
   APP_URLS="" \
+  SKIP_DISK_CHECK=1 \
+  SKIP_BACKUP_CHECKS=1 \
+  CHECK_CMP_CALLBACKS=0 \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
@@ -164,6 +167,7 @@ run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
   LOCK_FILE="$TMP/clock-$RANDOM" \
   APP_URLS="" \
   CONTENT_CHECKS="$1" \
+  SKIP_DISK_CHECK=1 SKIP_BACKUP_CHECKS=1 CHECK_CMP_CALLBACKS=0 \
   PATH="$TMP/cbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
