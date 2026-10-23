@@ -129,8 +129,13 @@ private release container completes migrations before promotion.
 
 `ROLLING_APP_URL` points to the loopback application URL in the table. The
 launch helper starts a small HTTP readiness process on internal port 8099,
-then executes the original startup. `/ready` returns success only when that
-application URL succeeds and no local drain marker exists. Neither the
+then executes the original startup. A background probe checks that application
+URL once per second with a two-second timeout. Startup requires a successful
+probe; after startup, three consecutive failures withdraw readiness. This
+avoids routing flaps from a single slow probe and prevents multiple Traefik
+routers from issuing a burst of nested application checks. `/ready` reads
+this cached state immediately; a drain marker overrides it immediately.
+Neither the
 application port nor the readiness port is published on the host. There is
 no HTTP drain operation: the actuator runs only through local Docker exec.
 
@@ -216,6 +221,8 @@ middleware on the normal Docker routers. Without it, an origin request can
 still fail against a stale address at old-container removal. Verification
 rules, deny rules and TLS settings are unchanged. Direct origin access
 remains denied. Never commit the origin file.
+The existing private `origin-verify-canary.yml` routes also reference the new
+Relay backend; their verification and deny rules remain unchanged.
 
 The current label namespace is `<native-application-uuid>v3`. When changing
 load-balancer settings, give the new configuration a new label namespace for

@@ -51,14 +51,24 @@ class DrainTests(unittest.TestCase):
                 except urllib.error.HTTPError as error:
                     return error.code
             try:
-                with patch.object(readiness, 'MARKER', marker), patch.dict(os.environ, {'ROLLING_APP_URL': app_url}):
+                probe = readiness.Readiness(app_url)
+                with patch.object(readiness, 'MARKER', marker), patch.object(readiness, 'PROBE', probe):
                     Application.status = 503
+                    probe.check_once()
                     self.assertEqual(status(ready_url), 503)
                     Application.status = 200
+                    probe.check_once()
                     self.assertEqual(status(ready_url), 200)
                     marker.touch()
                     self.assertEqual(status(ready_url), 503)
                     self.assertEqual(status(app_url), 200)
+                    marker.unlink()
+                    Application.status = 503
+                    probe.check_once()
+                    self.assertEqual(status(ready_url), 200)
+                    probe.check_once()
+                    probe.check_once()
+                    self.assertEqual(status(ready_url), 503)
             finally:
                 Application.status = 200
                 for server in [ready, app]:
