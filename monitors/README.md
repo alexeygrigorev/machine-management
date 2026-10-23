@@ -138,6 +138,18 @@ watchdog now verifies all three layers before logging `ALL_OK`:
      matching queue worker (`provider-events-worker-*` or `worker-*`) if
      `oldest_ready` exceeds `TASK_QUEUE_MAX_READY_AGE_SEC` (default `180`s).
 
+### Multi-label coverage (t1143u)
+
+`PG_LABELS` accepts several Coolify `resourceName` labels (e.g.
+`PG_LABELS="pg-relay pg-shared"`). Each label resolves its own container and
+dependent set. Because pg-shared has no `relay` database, the psql database
+is resolved per label via `PG_DB_<label>` (`PG_DB_pg_shared=postgres`),
+falling back to global `PG_DB`. Relay-only progress tables
+(`relay_scheduler_heartbeat`, `django_tasks_database_dbtaskresult`) are
+probed only where present (`to_regclass` guard), so the pg-shared branch
+gets TCP + socket-peer + worker-freshness protection without false SQL
+pages.
+
 ### Residual risk, owner & mitigation (no PG IP pin)
 
 - **Policy**: Static `ipv4_address` pinning on the `coolify` Docker bridge is

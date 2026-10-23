@@ -61,6 +61,10 @@ case "${1:-}" in
       echo "$PG_NAME"
       exit 0
     fi
+    if [[ "$*" == *"label=coolify.resourceName=pg-shared"* ]]; then
+      echo "fake-shared-pg"
+      exit 0
+    fi
     printf '%s\n' "$PG_NAME" $DEPS
     exit 0
     ;;
@@ -80,11 +84,9 @@ case "${1:-}" in
     done
     case "$fmt" in
       *'NetworkSettings.Networks'*'IPAddress'*)
-        if [[ "$target" == "$PG_NAME" ]]; then
-          echo "10.0.1.15 fd12:8ac:8b43::f"
-        else
-          echo "10.0.1.20 fd12:8ac:8b43::14"
-        fi
+        # All PG targets resolve to the live relay IPs in these tests, so
+        # synthetic healthy socket peers match for every label branch.
+        echo "10.0.1.15 fd12:8ac:8b43::f"
         ;;
       *'NetworkSettings.Networks'*)
         echo "coolify "
@@ -99,7 +101,9 @@ case "${1:-}" in
         echo "healthy"
         ;;
       *'.State.StartedAt'*)
-        if [[ "$target" == "$PG_NAME" ]]; then
+        if [[ "$target" == "fake-shared-pg" ]]; then
+          echo "2026-10-20T10:00:00Z"
+        elif [[ "$target" == "$PG_NAME" ]]; then
           echo "2026-10-22T15:13:26Z"
         elif [[ "$MODE" == "older_than_pg" && "$target" == "ses-ingress-fjnzwomg" ]] && ! was_restarted "$target"; then
           echo "2026-10-22T13:36:21Z"
@@ -160,6 +164,14 @@ case "${1:-}" in
     shift
     c="$1"; shift
     cmd="$1"; shift
+    # Record the psql/pg_isready database per container for T10 mapping proof.
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "-d" ]]; then
+        printf '%s %s\n' "$c" "$a" >> "${STUB_STATE_DIR}/seen-dbs"
+      fi
+      prev="$a"
+    done
     if [[ "$cmd" == "pg_isready" ]]; then
       [[ "$MODE" == "pg_down" ]] && { echo "no response"; exit 2; }
       echo "accepting connections"
@@ -206,6 +218,8 @@ case "${1:-}" in
         echo "1"; exit 0
       fi
       if [[ "$sql" == *"to_regclass"* ]]; then
+        # pg-shared has no relay progress tables -> probes must skip, not fail
+        if [[ "$c" == "fake-shared-pg" ]]; then echo ""; exit 0; fi
         echo "t"; exit 0
       fi
       if [[ "$sql" == *"FROM relay_scheduler_heartbeat"* ]]; then
@@ -321,6 +335,35 @@ if [[ $rc -eq 2 && "$out" == *"PG_STANDDOWN"* && "$out" != *"RESTART"* ]]; then
   pass "T9 PG self-check failure stands down cleanly (rc=2, 0 restarts)"
 else
   fail "T9 PG standdown (rc=$rc) -- $out"
+fi
+
+# ---- T10: multi-label pg-relay+pg-shared uses per-label DB, no STANDDOWN ----
+run_watchdog_multi() {
+  local sdir="$TMP/state-multi-$RANDOM"
+  mkdir -p "$sdir"
+  printf '%s' "healthy" > "$sdir/mode"
+  STUB_STATE_DIR="$sdir" \
+  RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" \
+  RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="test@example.com" \
+  PG_LABELS="pg-relay pg-shared" \
+  PG_DB_pg_shared="postgres" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+  printf 'SEEN-DBS:\n'; cat "$sdir/seen-dbs" 2>/dev/null
+}
+out=""; set +e; out="$(run_watchdog_multi)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *"ALL_OK"* \
+  && "$out" == *"OK pg=pg-relay container="* \
+  && "$out" == *"OK pg=pg-shared container=fake-shared-pg"* \
+  && "$out" != *"STANDDOWN"* \
+  && "$out" == *"fake-shared-pg postgres"* \
+  && "$out" == *"mqimefrti7ratmaliirnikov relay"* ]]; then
+  pass "T10 pg-shared branch uses PG_DB_pg_shared=postgres, relay keeps PG_DB, ALL_OK"
+else
+  fail "T10 multi-label per-label DB (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

@@ -184,18 +184,36 @@ resolve_pg_container() {
   docker ps --filter "label=coolify.resourceName=$1" --format '{{.Names}}' 2>/dev/null | head -n 1
 }
 
+pg_db_for_label() {
+  # $1=label — echoes the psql database for this label. Per-label override
+  # via PG_DB_<label> (non-alnum chars become _), else global PG_DB.
+  # pg-shared needs PG_DB_pg_shared=postgres (there is no `relay` db there).
+  local label="$1" var db
+  var="PG_DB_$(printf '%s' "$label" | tr -c 'a-zA-Z0-9_' '_')"
+  db="${!var:-}"
+  if [[ -n "$db" ]]; then
+    printf '%s' "$db"
+  else
+    printf '%s' "$PG_DB"
+  fi
+}
+
 pg_container_networks() {
   docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$1" 2>/dev/null
 }
 
 pg_selfcheck_ok() {
-  # $1=pg container — 0 (ok) only if running + (health green if defined) + pg_isready
-  local pg="$1" state health out rc
+  # $1=pg container $2=label — 0 (ok) only if running + (health green if
+  # defined) + pg_isready. Database comes from the per-label mapping
+  # (pg_db_for_label): pg-shared has no `relay` db, so a global PG_DB
+  # would STANDDOWN the pg-shared branch on every run.
+  local pg="$1" label="${2:-}" db state health out rc
+  db="$(pg_db_for_label "$label")"
   state="$(docker inspect -f '{{.State.Running}}' "$pg" 2>/dev/null || echo missing)"
   [[ "$state" == "true" ]] || return 1
   health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$pg" 2>/dev/null || echo none)"
   [[ "$health" == "none" || "$health" == "healthy" ]] || return 1
-  out="$(docker exec "$pg" pg_isready -U "$PGUSER" -d "$PG_DB" 2>&1)" && rc=0 || rc=$?
+  out="$(docker exec "$pg" pg_isready -U "$PGUSER" -d "$db" 2>&1)" && rc=0 || rc=$?
   [[ "$rc" -eq 0 ]] || { log "PG_SELFCHECK pg=${pg} pg_isready rc=${rc}: ${out}"; return 1; }
   return 0
 }
@@ -501,18 +519,19 @@ probe_worker_progress() {
 check_pg_worker_progress() {
   # $1=label $2=pg_container $3=space-separated dependent containers
   [[ "$PROGRESS_SQL_CHECKS" == "1" ]] || return 0
-  local label="$1" pg="$2" deps="$3"
-  docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT 1" >/dev/null 2>&1 || return 0
+  local label="$1" pg="$2" deps="$3" db
+  db="$(pg_db_for_label "$label")"
+  docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT 1" >/dev/null 2>&1 || return 0
 
   # 1) Relay scheduler heartbeat freshness
   local has_hb
-  has_hb="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT to_regclass('public.relay_scheduler_heartbeat') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  has_hb="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT to_regclass('public.relay_scheduler_heartbeat') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   if [[ "$has_hb" == "t" ]]; then
     local sched_c="" d hb_age hb_check="progress-scheduler-heartbeat"
     for d in $deps; do
       [[ "$d" == scheduler-* ]] && { sched_c="$d"; break; }
     done
-    hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
+    hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
     if [[ "$hb_age" =~ ^-?[0-9]+$ ]]; then
       (( hb_age < 0 )) && hb_age=0
       if (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
@@ -523,7 +542,7 @@ check_pg_worker_progress() {
         log "FAIL check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
         if [[ -n "$sched_c" ]] && restart_dependent "$sched_c"; then
           sleep "$RESTART_VERIFY_WAIT"
-          hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
+          hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
           if [[ "$hb_age" =~ ^-?[0-9]+$ ]] && (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
             log "HEALED check=${hb_check} scheduler=${sched_c} age=${hb_age}s after restart"
             send_alert "$hb_check" "AUTOHEALED" \
@@ -544,16 +563,16 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
 
   # 2) django_tasks_database_dbtaskresult ready-backlog freshness
   local has_tasks
-  has_tasks="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  has_tasks="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   if [[ "$has_tasks" == "t" ]]; then
     local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0
-    q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+    q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
       SELECT queue_name || '|' || COUNT(*) || '|' || COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
       FROM django_tasks_database_dbtaskresult
       WHERE status = 'READY' AND run_after <= NOW()
       GROUP BY queue_name;
     " 2>/dev/null || true)"
-    last_pe_ok="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+    last_pe_ok="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
       SELECT COALESCE(TO_CHAR(MAX(finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), 'none')
       FROM django_tasks_database_dbtaskresult
       WHERE status = 'SUCCESSFUL' AND queue_name = 'provider-events';
@@ -575,7 +594,7 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
         if [[ -n "$qworker" ]] && restart_dependent "$qworker"; then
           sleep "$RESTART_VERIFY_WAIT"
           local new_age
-          new_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+          new_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
             SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
             FROM django_tasks_database_dbtaskresult
             WHERE status = 'READY' AND run_after <= NOW() AND queue_name = '${qname//\'/}';
@@ -638,7 +657,7 @@ watch_pg() {
     return
   fi
   pgname="$(docker inspect -f '{{.Name}}' "$pg" 2>/dev/null | sed 's#^/##')"
-  if ! pg_selfcheck_ok "$pg"; then
+  if ! pg_selfcheck_ok "$pg" "$label"; then
     # Real PG outage — healthcheck owns the page; restarting apps would only churn.
     log "STANDDOWN pg=${pg} (${label}): Postgres self-check failed — no dependent restarts this run (coolify-healthcheck pages for PG outages)"
     EXIT_CODE=2
