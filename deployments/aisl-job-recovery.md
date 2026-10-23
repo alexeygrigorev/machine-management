@@ -65,3 +65,21 @@ of the reader's `invalid_stored_value` error.
 
 The sanitized finish report under the operator's `tmp/agent-reports` directory
 owns timestamps, classification totals, deployment revisions and final outcome.
+
+## Verified terminal-intent classification, 2026-10-23
+
+Authenticated summary and follow-up read reconciled all 63 dead intents:
+
+| Handler | Count | Disposition |
+|---|---:|---|
+| `cb_mail.deliver` | 1 | Retain dead; confirm current message relevance and prior provider acceptance before any single retry |
+| `email_app.relay_sync.request_contact_verification` | 7 | Retain old verification requests; issue fresh verification only on a current request after prerequisites are repaired |
+| `email_app.relay_sync.sync_contact` | 19 | Retain historical snapshots; reconcile current state and consent before any individually justified sync |
+| `email_app.relay_sync.unsubscribe_contact` | 36 | Retain historical work; check current consent and provider state before an individual retry to avoid applying stale state |
+
+All four groups carry generic `handler_error`. This category alone cannot prove
+missing Relay configuration or whether a provider accepted an operation. The
+summary spans creation dates from 2026-09-17 through 2026-10-22. No attempt count,
+status, payload, consent state or schedule was reset by recovery. The follow-up
+read still reported 63 terminal dead intents. The existing compiled producer
+gates remain unchanged.
