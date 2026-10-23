@@ -130,6 +130,18 @@ if run_replay --base "$BASE5" --base-wal "$PGW5" --wal-dir "$D5/emptywal" | grep
   pass "T6c empty wal-dir fails loudly"
 else fail "T6c empty wal-dir fails loudly"; fi
 
+# ---- T7: .backup label artifacts accepted, unknowns still rejected ----
+D7="$TMP/t7"; read -r BASE7 PGW7 <<< "$(mkbase "$D7")"
+mkdir -p "$D7/wal"; mkwal "$D7/wal" 00000026 00000027
+printf 'label' | gzip -c > "$D7/wal/000000010000000000000026.backup.gz"
+OUT7="$(run_replay --base "$BASE7" --base-wal "$PGW7" --wal-dir "$D7/wal" || true)"
+if printf '%s' "$OUT7" | grep -q 'staged 3 WAL file(s)'; then
+  pass "T7a .backup.gz staged, not skipped"
+else fail "T7a .backup.gz staged, not skipped"; fi
+if printf '%s' "$OUT7" | grep -q 'WAL chain continuous: 000000010000000000000026 .. 000000010000000000000027'; then
+  pass "T7b chain check ignores .backup file"
+else fail "T7b chain check ignores .backup file"; fi
+
 echo "----"
 echo "PASS=$PASS FAIL=$FAILN"
 [[ "$FAILN" -eq 0 ]]

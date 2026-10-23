@@ -17,7 +17,8 @@
 # --wal-dir holds archived segments after it (--base-wal end). Segments may be
 # bare (`0000000100000000000000AB`) or gzipped (`...AB.gz`, as produced by
 # coolify-wal-shipper.sh S3 layout); .gz files are integrity-checked
-# (gzip -t) and decompressed — never silently skipped. Any other file, a
+# (gzip -t) and decompressed — never silently skipped. Known pg_basebackup
+# artifacts (`<seg>.backup[gz]`) are staged, not replayed. Any other file, a
 # corrupt archive, or a gap in the segment sequence FAILS LOUDLY.
 # --recovery-target pins the replay end: 'YYYY-MM-DD HH:MM:SS+TZ' (validated
 # via date -d), '0/1A2B3C' LSN, numeric XID, or 'latest' (replay to tip).
@@ -232,13 +233,20 @@ else
       FN="$(basename "$SRC")"
       if [[ "$FN" == *.gz ]]; then
         BARE="${FN%.gz}"
-        [[ "$BARE" =~ ^[0-9A-F]{24}$ ]] \
-          || fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
-        gzip -t "$SRC" || fail "WAL segment is CORRUPT (gzip -t failed): $FN"
-        gzip -dc "$SRC" > "$WALCOPY/$BARE" \
-          || fail "WAL segment decompress failed: $FN"
-        STAGED=$((STAGED + 1))
-      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ ]]; then
+        if [[ "$BARE" =~ ^[0-9A-F]{24}$ ]]; then
+          gzip -t "$SRC" || fail "WAL segment is CORRUPT (gzip -t failed): $FN"
+          gzip -dc "$SRC" > "$WALCOPY/$BARE" \
+            || fail "WAL segment decompress failed: $FN"
+          STAGED=$((STAGED + 1))
+        elif [[ "$BARE" =~ ^[0-9A-F]{24}\.backup$ ]]; then
+          gzip -t "$SRC" || fail "WAL .backup file is CORRUPT (gzip -t failed): $FN"
+          gzip -dc "$SRC" > "$WALCOPY/$BARE" \
+            || fail "WAL .backup decompress failed: $FN"
+          STAGED=$((STAGED + 1))
+        else
+          fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
+        fi
+      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ || "$FN" =~ ^[0-9A-F]{24}\.backup$ ]]; then
         cp "$SRC" "$WALCOPY/$FN" || fail "WAL stage copy failed: $FN"
         STAGED=$((STAGED + 1))
       else
