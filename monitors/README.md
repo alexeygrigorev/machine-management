@@ -98,18 +98,78 @@ once SMTP + log volume look healthy.
 `install-coolify-healthcheck.sh` never overwrites an existing `/etc/coolify-healthcheck.env`. After install on **contabo-a**, confirm `SKIP_BACKUP_CHECKS=1` is set before enabling mail alerts.
 
 
-## relay-pg-dns-watchdog (t1207u)
+## relay-pg-dns-watchdog (t1207u / t1218u)
 
-Catches Coolify PG IP/DNS churn that leaves Relay workers with a stale resolve
-while PG itself is healthy (t1205u → SQS age/DLQ). Runs **every 1 minute** on
-contabo-b; auto-restarts dependents; alerts `alexey@datatalks.club,dev@dtcdev.click`.
+Catches Coolify PG IP/DNS churn and stuck long-lived worker pools that leave
+Relay workers with a stale resolve or broken DB session while PG itself is
+healthy (t1205u → SQS age/DLQ). Runs **every 1 minute** on contabo-b;
+auto-restarts dependents (cooldown-gated); alerts `alexey@datatalks.club,dev@dtcdev.click`.
+
+### Three-layer verification (stronger than fresh TCP-only, t1218u)
+
+Because a `docker exec` sibling TCP probe (`probe_from_container`) spawns a
+new process that queries Docker DNS (`127.0.0.11`) afresh, `ALL_OK` on TCP
+alone could previously coexist with a stuck long-lived PID 1 worker holding a
+stale socket/pool or a crashed `db_worker` thread under `StatReloader`. The
+watchdog now verifies all three layers before logging `ALL_OK`:
+
+1. **Fresh DNS + TCP probe (`probe_from_container`)**: resolves `DATABASE_URL` /
+   `POSTGRES_HOST` inside each dependent and opens a TCP connection to `:5432`.
+2. **In-container running-worker progress probe (`probe_worker_progress`)**:
+   - **Active socket peer match**: inspects `/proc/1/net/tcp{,6}` inside the
+     container and verifies every `ESTABLISHED` / `SYN_SENT` `:5432` socket
+     points to the live Postgres container's current IPv4/IPv6 addresses.
+   - **Post-PG-recreate worker freshness**: ensures background workers
+     (non-`web-*`) do not pre-date a Postgres container recreation
+     (`dep.StartedAt < pg.StartedAt`).
+   - **SES ingress batch progress**: checks `ses-ingress` current-lifecycle
+     logs and fails if the latest `received=R deleted=D failed=F` batch had
+     `deleted=0 failed>0`.
+   - **Uncaught DB exception check**: checks background workers (`db_worker`,
+     `scheduler`, callbacks, imports) for `OperationalError` / `InterfaceError`
+     after their latest `Starting ...` banner (catches `StatReloader` keeping
+     PID 1 alive after the worker loop dies).
+3. **SQL task & heartbeat freshness (`check_pg_worker_progress`)**:
+   - **`progress-scheduler-heartbeat`**: queries `relay_scheduler_heartbeat.ticked_at`
+     (expected every 15s; fails and auto-restarts `scheduler-*` if age >
+     `SCHEDULER_MAX_AGE_SEC`, default `180`s).
+   - **`progress-task-queues`**: queries `django_tasks_database_dbtaskresult`
+     for due `READY` tasks (`run_after <= NOW()`) and fails/auto-restarts the
+     matching queue worker (`provider-events-worker-*` or `worker-*`) if
+     `oldest_ready` exceeds `TASK_QUEUE_MAX_READY_AGE_SEC` (default `180`s).
+
+### Residual risk, owner & mitigation (no PG IP pin)
+
+- **Policy**: Static `ipv4_address` pinning on the `coolify` Docker bridge is
+  **rejected** (t1210u cancelled / t1211u synthesis): Coolify overwrites
+  standalone PG compose on config changes, and unreserved bridge IPAM risks
+  hard Postgres startup failure (`Address already in use`) if another container
+  claims the IP during PG recreate.
+- **Residual risks & mitigations**:
+  1. *Idle workers with no active traffic or open socket* (e.g. `ses-ingress`
+     between webhook bursts when no socket is open yet): mitigated by
+     `RESTART_WORKERS_OLDER_THAN_PG=1` (proactively restarts background workers
+     whenever `pg.StartedAt` is newer than `worker.StartedAt`) plus AWS
+     CloudWatch alarms (`relay-production-ses-webhooks-oldest-message` and DLQ).
+     **Owner**: DataOps / Relay ops (`machine-management`).
+  2. *Coolify changes the PG container UUID hostname on full resource recreate*:
+     restarts cannot rewrite `DATABASE_URL`; watchdog detects `STALE-NAME`,
+     skips pointless restarts, and pages `alexey@` + `dev@` with the exact
+     redeploy instruction. **Owner**: Relay / Coolify operator.
+  3. *In-app Django DB connection management (`conn_max_age=600` without
+     `close_old_connections()` in management command loops, and `db_worker`
+     running without `--noreload`)*: ops watchdog auto-heals via container
+     restart within ~1–2 min; app-level `close_old_connections()` / `--noreload`
+     is tracked for the Relay repository as defense-in-depth. **Owner**: Relay
+     app maintainer.
 
 | File | Purpose |
 |------|---------|
-| `relay-pg-dns-watchdog.sh` | probe from inside app containers; autoheal |
+| `relay-pg-dns-watchdog.sh` | TCP + running-worker progress + SQL freshness probe; autoheal |
 | `relay-pg-dns-watchdog.cron` | `* * * * *` Europe/Berlin |
 | `relay-pg-dns-watchdog.env.example` | `/etc/relay-pg-dns-watchdog.env` |
 | `install-relay-pg-dns-watchdog.sh` | scp + cron installer |
+| `tests/test-relay-pg-dns-watchdog.sh` | regression test suite (TCP + stale pool + SQL progress) |
 
 SOP: `../contingency/relay-pg-dns-after-coolify-pg-redeploy.md`
 

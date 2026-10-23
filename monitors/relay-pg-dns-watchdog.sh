@@ -17,15 +17,33 @@
 #      monitors/coolify-healthcheck.sh already pages for real PG outages.
 #   3. Discovers dependent app containers: running containers on the same
 #      docker network(s) whose env has DATABASE_URL or POSTGRES_HOST.
-#   4. From INSIDE each dependent, resolves + TCP-connects to the DB host
-#      exactly like the app would (python3 socket first, bash /dev/tcp
-#      fallback).
-#   5. On failure of a healthy-Postgres-dependent:
+#   4. From INSIDE each dependent, verifies BOTH:
+#        a) Fresh DNS + TCP connect to DB host:port (probe_from_container), AND
+#        b) Running-worker progress/state (probe_worker_progress, t1218u):
+#           - Active :5432 TCP sockets in /proc/1/net/tcp{,6} match the live
+#             Postgres container's current IPv4/IPv6 addresses (catches in-process
+#             cached stale IPs even when fresh `docker exec` DNS resolves the new IP).
+#           - Long-lived background workers (non-web) do not pre-date a Postgres
+#             container recreation (StartedAt < PG StartedAt).
+#           - `ses-ingress` latest batch did not fail 100% (`deleted=0 failed>0`).
+#           - Background workers (`db_worker`, `scheduler`, callbacks, imports)
+#             have no uncaught `OperationalError` / `InterfaceError` after their
+#             latest startup banner (catches `StatReloader` keeping PID 1 alive
+#             after the worker thread dies).
+#   5. Queries Postgres directly (check_pg_worker_progress, t1218u) to verify:
+#        a) `relay_scheduler_heartbeat.ticked_at` freshness (<= SCHEDULER_MAX_AGE_SEC),
+#        b) `django_tasks_database_dbtaskresult` has no due `READY` tasks stuck
+#           longer than TASK_QUEUE_MAX_READY_AGE_SEC (`provider-events` / `default`).
+#   6. On failure of a healthy-Postgres-dependent (TCP or progress check):
 #        - referenced name no longer known to docker DNS and != current PG
 #          name -> STALE-NAME (PG redeployed): restart can NOT fix -> alert
 #          with the fix (redeploy app / update env). No restart.
 #        - else -> `docker restart <dep>` (per-container cooldown gated),
-#          re-probe; alert AUTOHEALED or STILL-FAILING (deduped).
+#          re-probe TCP + worker progress; alert AUTOHEALED or STILL-FAILING.
+#
+# Policy (t1210u/t1211u/t1218u): NO static Postgres IP pin on the `coolify`
+# network (Coolify overwrites compose on recreate and unreserved bridge IPAM
+# risks hard PG start failure if another container claims the pinned IP).
 #
 # Guard rails: never prints env VALUES (no DATABASE_URL secrets in logs —
 # only variable names, host:port and resolved addresses); only restarts
@@ -69,6 +87,14 @@ RESTART_COOLDOWN_SEC="${RESTART_COOLDOWN_SEC:-900}"  # per container
 DRY_RUN="${DRY_RUN:-0}"
 # Never-restart container-name regex (extra safety net on top of the env gate).
 DEPENDENT_EXCLUDE="${DEPENDENT_EXCLUDE:-^coolify-proxy$|^coolify-realtime$|^watchtower$}"
+
+# Worker-progress / stale-pool checks beyond fresh sibling TCP (t1218u):
+PROGRESS_CHECKS="${PROGRESS_CHECKS:-1}"
+PROGRESS_SQL_CHECKS="${PROGRESS_SQL_CHECKS:-1}"
+RESTART_WORKERS_OLDER_THAN_PG="${RESTART_WORKERS_OLDER_THAN_PG:-1}"
+PG_RECREATE_GRACE_SEC="${PG_RECREATE_GRACE_SEC:-15}"
+SCHEDULER_MAX_AGE_SEC="${SCHEDULER_MAX_AGE_SEC:-180}"
+TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
@@ -302,6 +328,281 @@ sys.exit(1)
   return 3
 }
 
+pg_container_ips() {
+  # $1=pg container -> space-separated current IPv4 and IPv6 addresses
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}} {{$v.GlobalIPv6Address}} {{end}}' "$1" 2>/dev/null | xargs
+}
+
+container_started_iso() {
+  docker inspect -f '{{.State.StartedAt}}' "$1" 2>/dev/null
+}
+
+container_started_epoch() {
+  local iso="$1"
+  [[ -z "$iso" || "$iso" == "0001-01-01"* ]] && { echo 0; return; }
+  date -d "$iso" +%s 2>/dev/null || echo 0
+}
+
+is_web_container() {
+  # $1=container name — 0 if HTTP server (web-* / gunicorn / uvicorn), 1 if worker
+  [[ "$1" == web-* ]] && return 0
+  local cmd
+  cmd="$(docker inspect -f '{{join .Config.Cmd " "}}' "$1" 2>/dev/null || true)"
+  [[ "$cmd" == *gunicorn* || "$cmd" == *uvicorn* || "$cmd" == *daphne* ]] && return 0
+  return 1
+}
+
+resolve_target_pg_container() {
+  # $1=host from DATABASE_URL $2=default pg container $3=default pg name
+  local host="$1" pg="$2" pgname="$3" state
+  [[ "$host" == "$pg" || "$host" == "$pgname" ]] && { printf '%s' "$pg"; return; }
+  state="$(docker inspect -f '{{.State.Running}}' "$host" 2>/dev/null || echo missing)"
+  if [[ "$state" == "true" ]]; then
+    printf '%s' "$host"
+  else
+    printf '%s' "$pg"
+  fi
+}
+
+check_active_socket_peers() {
+  # $1=dep_container $2=port $3=space-separated allowed PG IPs
+  # Echoes "peers=<N>" on rc=0; echoes "stale_socket_peer=<bad_ip>(expected:<allowed>)" on rc=1
+  local c="$1" port="$2" allowed="$3" out rc
+  [[ -z "${allowed// /}" ]] && { printf 'peers=skip'; return 0; }
+  if ! docker exec "$c" sh -c 'command -v python3 >/dev/null 2>&1'; then
+    printf 'peers=no-py3'
+    return 0
+  fi
+  out="$(docker exec "$c" python3 -c '
+import ipaddress, socket, struct, sys
+target_port = int(sys.argv[1])
+allowed = set()
+for raw in sys.argv[2].split():
+    try:
+        allowed.add(ipaddress.ip_address(raw))
+    except ValueError:
+        pass
+for lb in ("127.0.0.1", "::1"):
+    allowed.add(ipaddress.ip_address(lb))
+seen = set()
+bad = set()
+def scan(path, family):
+    try:
+        with open(path) as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                rem_hex, state = parts[2], parts[3]
+                # 01 = TCP_ESTABLISHED, 02 = TCP_SYN_SENT
+                if state not in ("01", "02"):
+                    continue
+                ip_hex, port_hex = rem_hex.split(":")
+                if int(port_hex, 16) != target_port:
+                    continue
+                if family == socket.AF_INET:
+                    raw_ip = socket.inet_ntop(socket.AF_INET, struct.pack("<I", int(ip_hex, 16)))
+                else:
+                    b = bytes.fromhex(ip_hex)
+                    b_be = b"".join(struct.pack("<I", struct.unpack(">I", b[i:i+4])[0]) for i in range(0, 16, 4))
+                    raw_ip = socket.inet_ntop(socket.AF_INET6, b_be)
+                ip_obj = ipaddress.ip_address(raw_ip)
+                if getattr(ip_obj, "ipv4_mapped", None) is not None:
+                    ip_obj = ip_obj.ipv4_mapped
+                seen.add(str(ip_obj))
+                if ip_obj not in allowed:
+                    bad.add(str(ip_obj))
+    except Exception:
+        pass
+scan("/proc/1/net/tcp", socket.AF_INET)
+scan("/proc/1/net/tcp6", socket.AF_INET6)
+if bad:
+    exp = ",".join(sorted(str(x) for x in allowed if not x.is_loopback))
+    print("stale_socket_peer=%s(expected:%s)" % (",".join(sorted(bad)), exp))
+    sys.exit(1)
+print("peers=%d" % len(seen))
+sys.exit(0)
+' "$port" "$allowed" 2>/dev/null)" && rc=0 || rc=$?
+  printf '%s' "${out:-peers=0}"
+  return "$rc"
+}
+
+probe_worker_progress() {
+  # $1=dep_container $2=target_pg_container $3=port
+  # Verifies running-worker health beyond fresh sibling TCP (t1218u):
+  #   a) active :5432 TCP sockets in /proc/1/net/tcp{,6} match live PG IPs
+  #   b) background workers do not pre-date a PG container recreate
+  #   c) ses-ingress latest batch did not fail 100% (deleted=0 failed>0)
+  #   d) background workers have no uncaught DB OperationalError/InterfaceError
+  #      after their latest startup banner
+  # Echoes summary string; returns 0 if healthy, 4 if stale/stuck.
+  [[ "$PROGRESS_CHECKS" == "1" ]] || { printf 'progress=disabled'; return 0; }
+  local c="$1" target_pg="$2" port="$3"
+  local pg_ips peer_out dep_iso pg_iso dep_epoch pg_epoch logs last_batch
+  pg_ips="$(pg_container_ips "$target_pg")"
+  if ! peer_out="$(check_active_socket_peers "$c" "$port" "$pg_ips")"; then
+    printf 'progress=FAIL(%s)' "$peer_out"
+    return 4
+  fi
+
+  if is_web_container "$c"; then
+    printf 'progress=ok(%s,role=web)' "$peer_out"
+    return 0
+  fi
+
+  dep_iso="$(container_started_iso "$c")"
+  pg_iso="$(container_started_iso "$target_pg")"
+  dep_epoch="$(container_started_epoch "$dep_iso")"
+  pg_epoch="$(container_started_epoch "$pg_iso")"
+
+  if [[ "$RESTART_WORKERS_OLDER_THAN_PG" == "1" ]] && (( dep_epoch > 0 && pg_epoch > 0 )) && (( pg_epoch - dep_epoch > PG_RECREATE_GRACE_SEC )); then
+    printf 'progress=FAIL(worker_older_than_pg:dep_started=%s<pg_started=%s)' "$dep_iso" "$pg_iso"
+    return 4
+  fi
+
+  if [[ -n "$dep_iso" && "$dep_iso" != "0001-01-01"* ]]; then
+    logs="$(docker logs --since "$dep_iso" --tail 200 "$c" 2>&1 || true)"
+  else
+    logs="$(docker logs --tail 200 "$c" 2>&1 || true)"
+  fi
+
+  if [[ "$c" == ses-ingress* ]]; then
+    last_batch="$(printf '%s\n' "$logs" | grep -oE 'received=[0-9]+ deleted=[0-9]+ failed=[0-9]+' | tail -n 1 || true)"
+    if [[ -n "$last_batch" ]]; then
+      if [[ "$last_batch" =~ deleted=0[[:space:]]+failed=[1-9] ]]; then
+        printf 'progress=FAIL(ses_ingress_batch_failed:%s)' "${last_batch// /,}"
+        return 4
+      fi
+      printf 'progress=ok(%s,ses_last=%s)' "$peer_out" "${last_batch// /,}"
+      return 0
+    fi
+  fi
+
+  local tail_after_start="$logs"
+  if printf '%s\n' "$logs" | grep -qE 'Starting (worker|.*ingress drain|recipient-list import worker|.*callback dispatcher)'; then
+    tail_after_start="$(printf '%s\n' "$logs" | awk '
+      /Starting (worker|.*ingress drain|recipient-list import worker|.*callback dispatcher)/ { buf=""; next }
+      { buf = buf $0 "\n" }
+      END { printf "%s", buf }
+    ')"
+  fi
+  if printf '%s\n' "$tail_after_start" | grep -qE '(psycopg2|django\.db\.utils)\.(OperationalError|InterfaceError)'; then
+    local err_line
+    err_line="$(printf '%s\n' "$tail_after_start" | grep -E '(psycopg2|django\.db\.utils)\.(OperationalError|InterfaceError)' | tail -n 1 | tr -s '[:space:]' '_' | cut -c1-80)"
+    printf 'progress=FAIL(worker_db_error_since_start:%s)' "$err_line"
+    return 4
+  fi
+
+  printf 'progress=ok(%s,logs=clean)' "$peer_out"
+  return 0
+}
+
+check_pg_worker_progress() {
+  # $1=label $2=pg_container $3=space-separated dependent containers
+  [[ "$PROGRESS_SQL_CHECKS" == "1" ]] || return 0
+  local label="$1" pg="$2" deps="$3"
+  docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT 1" >/dev/null 2>&1 || return 0
+
+  # 1) Relay scheduler heartbeat freshness
+  local has_hb
+  has_hb="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT to_regclass('public.relay_scheduler_heartbeat') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$has_hb" == "t" ]]; then
+    local sched_c="" d hb_age hb_check="progress-scheduler-heartbeat"
+    for d in $deps; do
+      [[ "$d" == scheduler-* ]] && { sched_c="$d"; break; }
+    done
+    hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$hb_age" =~ ^-?[0-9]+$ ]]; then
+      (( hb_age < 0 )) && hb_age=0
+      if (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
+        log "OK check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
+        mark_ok "$hb_check"
+      else
+        FAILED=1
+        log "FAIL check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
+        if [[ -n "$sched_c" ]] && restart_dependent "$sched_c"; then
+          sleep "$RESTART_VERIFY_WAIT"
+          hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
+          if [[ "$hb_age" =~ ^-?[0-9]+$ ]] && (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
+            log "HEALED check=${hb_check} scheduler=${sched_c} age=${hb_age}s after restart"
+            send_alert "$hb_check" "AUTOHEALED" \
+              "Relay scheduler heartbeat (relay_scheduler_heartbeat.ticked_at) on $(hostname) was stale (> ${SCHEDULER_MAX_AGE_SEC}s) while fresh TCP probe was green.
+Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
+          else
+            log "STILLFAIL check=${hb_check} scheduler=${sched_c} age=${hb_age:-unknown}s after restart"
+            send_alert "$hb_check" "FAIL" \
+              "Relay scheduler heartbeat on $(hostname) remains stale (age=${hb_age:-unknown}s > ${SCHEDULER_MAX_AGE_SEC}s) after restarting ${sched_c}."
+          fi
+        else
+          send_alert "$hb_check" "FAIL" \
+            "Relay scheduler heartbeat on $(hostname) is stale (age=${hb_age}s > ${SCHEDULER_MAX_AGE_SEC}s); scheduler=${sched_c:-not-found} restart skipped (cooldown or DRY_RUN)."
+        fi
+      fi
+    fi
+  fi
+
+  # 2) django_tasks_database_dbtaskresult ready-backlog freshness
+  local has_tasks
+  has_tasks="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$has_tasks" == "t" ]]; then
+    local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0
+    q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+      SELECT queue_name || '|' || COUNT(*) || '|' || COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
+      FROM django_tasks_database_dbtaskresult
+      WHERE status = 'READY' AND run_after <= NOW()
+      GROUP BY queue_name;
+    " 2>/dev/null || true)"
+    last_pe_ok="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+      SELECT COALESCE(TO_CHAR(MAX(finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), 'none')
+      FROM django_tasks_database_dbtaskresult
+      WHERE status = 'SUCCESSFUL' AND queue_name = 'provider-events';
+    " 2>/dev/null | tr -d '[:space:]')"
+    local line qname qcnt qage qworker d
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      IFS='|' read -r qname qcnt qage <<< "$line"
+      [[ "$qage" =~ ^-?[0-9]+$ ]] || continue
+      if (( qage > TASK_QUEUE_MAX_READY_AGE_SEC )); then
+        q_failed=1
+        FAILED=1
+        qworker=""
+        for d in $deps; do
+          if [[ "$qname" == "provider-events" && "$d" == provider-events-worker-* ]]; then qworker="$d"; break; fi
+          if [[ "$qname" == "default" && "$d" == worker-* ]]; then qworker="$d"; break; fi
+        done
+        log "FAIL check=${q_check} pg=${label} queue=${qname} ready=${qcnt} oldest_ready=${qage}s max=${TASK_QUEUE_MAX_READY_AGE_SEC}s worker=${qworker:-none}"
+        if [[ -n "$qworker" ]] && restart_dependent "$qworker"; then
+          sleep "$RESTART_VERIFY_WAIT"
+          local new_age
+          new_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$PG_DB" -tAqc "
+            SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
+            FROM django_tasks_database_dbtaskresult
+            WHERE status = 'READY' AND run_after <= NOW() AND queue_name = '${qname//\'/}';
+          " 2>/dev/null | tr -d '[:space:]')"
+          if [[ "$new_age" =~ ^-?[0-9]+$ ]] && (( new_age <= TASK_QUEUE_MAX_READY_AGE_SEC )); then
+            log "HEALED check=${q_check} queue=${qname} worker=${qworker} oldest_ready=${new_age}s after restart"
+            send_alert "$q_check" "AUTOHEALED" \
+              "Relay task queue '${qname}' on $(hostname) had ${qcnt} due READY task(s) stuck for ${qage}s (> ${TASK_QUEUE_MAX_READY_AGE_SEC}s) while fresh TCP probe was green.
+Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
+          else
+            log "STILLFAIL check=${q_check} queue=${qname} worker=${qworker} oldest_ready=${new_age:-unknown}s after restart"
+            send_alert "$q_check" "FAIL" \
+              "Relay task queue '${qname}' on $(hostname) still has due READY task(s) stuck (oldest_ready=${new_age:-unknown}s > ${TASK_QUEUE_MAX_READY_AGE_SEC}s) after restarting ${qworker}."
+          fi
+        else
+          send_alert "$q_check" "FAIL" \
+            "Relay task queue '${qname}' on $(hostname) has ${qcnt} due READY task(s) stuck for ${qage}s (> ${TASK_QUEUE_MAX_READY_AGE_SEC}s); worker=${qworker:-not-found} restart skipped (cooldown or DRY_RUN)."
+        fi
+      fi
+    done <<< "$q_rows"
+    if (( q_failed == 0 )); then
+      log "OK check=${q_check} pg=${label} stuck_ready=0 max_age=${TASK_QUEUE_MAX_READY_AGE_SEC}s last_provider_event_ok=${last_pe_ok:-none}"
+      mark_ok "$q_check"
+    fi
+  fi
+}
+
 restart_dependent() {
   # $1=container — cooldown-gated docker restart; 0 if a restart happened now
   local c="$1" stamp="${STATE_DIR}/restart-$(safe_name "$1").stamp" last=0
@@ -315,7 +616,7 @@ restart_dependent() {
     log "RESTART dep=${c}: DRY_RUN=1 — would restart"
     return 1
   fi
-  log "RESTART dep=${c}: restarting (stale DNS/conn state remedy, t1205u)"
+  log "RESTART dep=${c}: restarting (stale DNS/conn/worker-progress remedy, t1205u/t1218u)"
   if ! docker restart "$c" >/dev/null 2>&1; then
     log "RESTART dep=${c}: docker restart FAILED"
     return 1
@@ -327,7 +628,7 @@ restart_dependent() {
 watch_pg() {
   # $1=coolify.resourceName label
   local label="$1" pg pgname deps c dep_nets n nets pg_nets target host port rc
-  local dep_check
+  local dep_check target_pg prog_out
   pg="$(resolve_pg_container "$label")"
   if [[ -z "$pg" ]]; then
     log "FAIL pg=${label}: no container with label coolify.resourceName=${label}"
@@ -373,17 +674,28 @@ watch_pg() {
       log "WARN dep=${c}: DB env present but no host parseable — skipping"
       continue
     fi
+    target_pg="$(resolve_target_pg_container "$host" "$pg" "$pgname")"
+    prog_out="progress=n/a"
     probe_from_container "$c" "$host" "$port"; rc=$?
     if [[ "$rc" -eq 0 ]]; then
-      log "OK check=${dep_check} dep=${c} host=${host}:${port} $(resolved_addrs "$c" "$host")"
-      mark_ok "$dep_check"
-      continue
+      if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
+        log "OK check=${dep_check} dep=${c} host=${host}:${port} $(resolved_addrs "$c" "$host") ${prog_out}"
+        mark_ok "$dep_check"
+        continue
+      else
+        rc=4
+      fi
     fi
     if [[ "$rc" -eq 3 ]]; then
       continue  # no tooling in image — logged, no false page
     fi
+    if [[ "$target_pg" != "$pg" ]] && ! docker exec "$target_pg" pg_isready -U "$PGUSER" >/dev/null 2>&1; then
+      log "STANDDOWN dep=${c}: target pg=${target_pg} self-check failed — skipping dependent restart"
+      EXIT_CODE=2
+      continue
+    fi
     FAILED=1
-    log "FAIL check=${dep_check} dep=${c} host=${host}:${port} rc=${rc} $(resolved_addrs "$c" "$host")"
+    log "FAIL check=${dep_check} dep=${c} host=${host}:${port} rc=${rc} $(resolved_addrs "$c" "$host") ${prog_out}"
     if [[ "$host" != "$pgname" && "$host" != "$pg" ]] && ! name_known_to_docker "$host" "$pg"; then
       # Stale NAME (PG redeployed under a new uuid) — restart cannot fix.
       send_alert "$dep_check" "FAIL" \
@@ -397,23 +709,32 @@ No restart attempted (would not help)."
       sleep "$RESTART_VERIFY_WAIT"
       probe_from_container "$c" "$host" "$port" && rc=0 || rc=$?
       if [[ "$rc" -eq 0 ]]; then
-        log "HEALED check=${dep_check} dep=${c}: connect OK after restart"
+        if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
+          rc=0
+        else
+          rc=4
+        fi
+      fi
+      if [[ "$rc" -eq 0 ]]; then
+        log "HEALED check=${dep_check} dep=${c}: connect+progress OK after restart (${prog_out})"
         send_alert "$dep_check" "AUTOHEALED" \
-          "${c} on $(hostname) could not reach Postgres ${host}:${port} (stale DNS/conn state, cf. t1205u).
-Auto-restarted the container; connectivity verified OK after restart.
+          "${c} on $(hostname) had stale Postgres ${host}:${port} connectivity or worker-progress state (${prog_out}, cf. t1205u/t1218u).
+Auto-restarted the container; TCP connectivity and running-worker progress verified OK after restart.
 SES/SQS impact window: <1 min (watchdog cadence 1 min)."
       else
-        log "STILLFAIL check=${dep_check} dep=${c}: rc=${rc} after restart"
+        log "STILLFAIL check=${dep_check} dep=${c}: rc=${rc} after restart (${prog_out})"
         send_alert "$dep_check" "FAIL" \
-          "${c} on $(hostname) could not reach Postgres ${host}:${port} and STILL fails after an auto-restart (probe rc=${rc}).
+          "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check and STILL fails after an auto-restart (probe rc=${rc}, ${prog_out}).
 PG '${pg}' itself is healthy (pg_isready ok). Check docker network / iptables / app logs."
       fi
     else
       send_alert "$dep_check" "FAIL" \
-        "${c} on $(hostname) cannot reach Postgres ${host}:${port} (probe rc=${rc}); restart skipped (cooldown or DRY_RUN).
+        "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check (probe rc=${rc}, ${prog_out}); restart skipped (cooldown or DRY_RUN).
 PG '${pg}' itself is healthy (pg_isready ok). If this repeats every cooldown, investigate manually."
     fi
   done
+
+  check_pg_worker_progress "$label" "$pg" "$deps"
 }
 
 for label in $PG_LABELS; do
