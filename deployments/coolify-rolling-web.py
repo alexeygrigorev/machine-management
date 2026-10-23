@@ -15,7 +15,7 @@ import sys
 import urllib.request
 
 
-def labels_for_web(source_labels, source_uuid, app_uuid, path):
+def labels_for_web(source_labels, source_uuid, app_uuid, path, health_port=None, application_uuid=None, priority=100):
     """Independent router identities; preserve HTTPS and origin allow/deny priority."""
     labels = {}
     for line in source_labels:
@@ -23,18 +23,22 @@ def labels_for_web(source_labels, source_uuid, app_uuid, path):
         if key.startswith('traefik.'):
             labels[key.replace(source_uuid, app_uuid)] = value.replace(source_uuid, app_uuid)
     labels['traefik.docker.network'] = 'coolify'
+    if application_uuid:
+        labels['dtc.rolling-web.application'] = application_uuid
     labels['traefik.http.middlewares.rolling-retry.retry.attempts'] = '3'
     labels['traefik.http.middlewares.rolling-retry.retry.initialinterval'] = '100ms'
     for key in list(labels):
         if key.startswith('traefik.http.routers.') and key.endswith('.rule'):
             prefix = key.removesuffix('.rule')
-            labels[prefix + '.priority'] = '100'
+            labels[prefix + '.priority'] = str(priority)
             middlewares = labels.get(prefix + '.middlewares', '')
             if 'redirect-to-https' not in middlewares:
                 labels[prefix + '.middlewares'] = ','.join(filter(None, [middlewares, 'rolling-retry']))
         if key.endswith('.loadbalancer.server.port'):
             prefix = key.removesuffix('.server.port')
             labels[prefix + '.healthcheck.path'] = path
+            if health_port:
+                labels[prefix + '.healthcheck.port'] = str(health_port)
             labels[prefix + '.healthcheck.hostname'] = 'localhost'
             labels[prefix + '.healthcheck.interval'] = '2s'
             labels[prefix + '.healthcheck.timeout'] = '1s'
@@ -50,7 +54,11 @@ def rolling_guard(app):
             or settings.get('custom_internal_name')
             or re.search(r'--(?:ip6?|name|publish)(?:[=\s]|$)|(?:^|\s)-p(?:\s|$)', app.get('custom_docker_run_options') or '')
             or not app.get('health_check_enabled')
-            or '.loadbalancer.healthcheck.path=' not in labels):
+            or '.loadbalancer.healthcheck.path=/ready' not in labels
+            or '.loadbalancer.healthcheck.port=8099' not in labels
+            or 'dtc.rolling-web.application=' not in labels
+            or '8099/ready' not in (app.get('health_check_command') or '')
+            or '/opt/rolling-launch.py' not in (app.get('custom_docker_run_options') or '')):
         raise ValueError('Native application is not eligible for health-gated rolling updates')
 
 
@@ -69,6 +77,8 @@ def source_state(config):
     env = dict(item.split('=', 1) for item in container['Config']['Env'])
     # Deployment metadata belongs to the new application, not the source stack.
     env = {k: v for k, v in env.items() if not k.startswith(('COOLIFY_', 'SERVICE_'))}
+    env['ROLLING_ORIGINAL_ENTRYPOINT'] = shlex.join(container['Config'].get('Entrypoint') or [])
+    env['ROLLING_ORIGINAL_COMMAND'] = json.dumps(container['Config'].get('Cmd') or [])
     env.update(config.get('environment', {}))
     return container['Config']['Image'], env
 
@@ -84,7 +94,9 @@ def reconcile(config, call, state=source_state, apply=False):
     deployments = queues.get('deployments', []) if isinstance(queues, dict) else queues
     if any(d.get('status') in ('queued', 'in_progress') for d in deployments):
         return 'busy'
-    current_env = {e['key']: e.get('value', '') for e in call('GET', app_path + '/envs')
+    # Coolify serializes an empty literal as null on readback. Normalize that
+    # roundtrip so images without an entrypoint do not redeploy every minute.
+    current_env = {e['key']: e.get('value') or '' for e in call('GET', app_path + '/envs')
                    if not e.get('is_preview')}
     changed_env = {k: v for k, v in env.items() if current_env.get(k) != v}
     tag = image.rsplit(':', 1)[1]
@@ -123,12 +135,23 @@ class API:
             return json.loads(data) if data else {}
 
 
+def verify_control_plane(config):
+    expected = config['control_plane']
+    output = subprocess.check_output(['ssh', '-F', '/home/alexey/.ssh/config',
+        '-i', '/home/alexey/.ssh/id_contabo', '-o', 'BatchMode=yes', expected['ssh_host'],
+        'sudo docker exec coolify sha256sum app/Jobs/ApplicationDeploymentJob.php'],
+        text=True, stderr=subprocess.DEVNULL, timeout=30)
+    if output.split()[0] != expected['job_sha256']:
+        raise ValueError('Control-plane drain hook is missing or changed; keep current public release')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
+    verify_control_plane(config)
     api = API(config['base'], Path(config['token_file']).read_text().strip())
     failed = False
     for app in config['applications']:

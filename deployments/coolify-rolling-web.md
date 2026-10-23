@@ -9,8 +9,10 @@ force-recreated Compose stack does not fix kill-before-start replacement.
 Public production web now runs as native Coolify Applications. These start a
 new container beside the current one, wait for health, and retain the current
 container when the replacement fails. Docker health filtering and Traefik
-active health checks gate traffic; retry plus a short connection timeout
-cover a stale backend address during old-container removal.
+active health checks gate traffic. An explicit pre-stop drain withdraws the
+old backend before Docker terminates it. Retry and a short connection timeout
+are additional protection; live tests demonstrated that they are insufficient
+without draining.
 
 ## Resource ownership
 
@@ -60,7 +62,8 @@ Each minute the follower:
 1. Inspects the source container over SSH. If it is absent/unhealthy, public
    web stays on its current release.
 2. Requires an immutable dated tag in that app's expected image repository.
-3. Refuses native settings that prevent health-gated rolling replacement.
+3. Verifies the control-plane drain-hook checksum and refuses native settings
+   that prevent health-gated rolling replacement.
 4. Skips queued/running deployments and makes no writes when already in sync.
 5. Copies runtime environment changes as literal values through the Coolify
    API, without printing them or deleting any secret.
@@ -81,8 +84,10 @@ Failures produce only a name and exception class, never API bodies or values.
 ## Native Application settings
 
 The first three Applications use `Docker Image`, with the source container's
-immutable image and runtime environment. They preserve each image's default
-entrypoint/CMD. The website retains its existing Dockerfile deployment.
+immutable image and runtime environment. The launch helper preserves the
+source container's actual entrypoint/CMD in `ROLLING_ORIGINAL_ENTRYPOINT` and
+`ROLLING_ORIGINAL_COMMAND`. The website retains its existing Dockerfile
+deployment and its `./entrypoint.sh web` startup.
 
 | Setting | Value |
 | --- | --- |
@@ -90,7 +95,8 @@ entrypoint/CMD. The website retains its existing Dockerfile deployment.
 | Consistent/custom container name | disabled/empty |
 | Fixed `--ip` / `--ip6` | absent |
 | Health check | enabled, command type |
-| Health command | `python /opt/coolify-healthcheck.py http://127.0.0.1:<port><path>` |
+| Health command | `python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready` |
+| Docker Run Options | `--entrypoint "python /opt/rolling-launch.py"` |
 | Interval / timeout / retries | 2 seconds / 3 seconds / 60 |
 | Start period | 45 seconds |
 | Stop grace period | 45 seconds |
@@ -102,9 +108,11 @@ can report healthy earlier, allowing proxy discovery while the old instance
 remains alive. The one-time routing migration used 180 seconds for this
 coexistence window, then restored 45 seconds.
 
-Create a Coolify file storage mounted at `/opt/coolify-healthcheck.py`, with
-the contents of [`rolling-healthcheck.py`](rolling-healthcheck.py). Coolify
-persists and mounts it for every replacement. All four images have Python;
+Create three Coolify file storages: `/opt/coolify-healthcheck.py` from
+[`rolling-healthcheck.py`](rolling-healthcheck.py), `/opt/rolling-readiness.py`
+from [`rolling-readiness.py`](rolling-readiness.py), and `/opt/rolling-launch.py`
+from [`rolling-launch.py`](rolling-launch.py). Coolify persists and mounts them
+for every replacement. All four images have Python;
 do not depend on `curl`/`wget` existing in every image. Docker Run Options do
 not support volume mounting in this Coolify version; use file storage.
 
@@ -118,6 +126,50 @@ not support volume mounting in this Coolify version; use file storage.
 AISHL `/ping` is a serving-process check, not a database readiness assertion.
 Its entrypoint finishes Django initialization before binding Gunicorn; the
 private release container completes migrations before promotion.
+
+`ROLLING_APP_URL` points to the loopback application URL in the table. The
+launch helper starts a small HTTP readiness process on internal port 8099,
+then executes the original startup. `/ready` returns success only when that
+application URL succeeds and no local drain marker exists. Neither the
+application port nor the readiness port is published on the host. There is
+no HTTP drain operation: the actuator runs only through local Docker exec.
+
+## Explicit pre-stop drain
+
+Native Coolify waits for the replacement's health before stopping the old
+container, but does not withdraw the old backend from Traefik first. This
+left measured termination races even with retries. The tested 4.4.7
+`ApplicationDeploymentJob` now invokes [`coolify-web-drain.py`](coolify-web-drain.py)
+on the application host before stopping an old managed web replica.
+
+The hook runs only after the replacement is healthy, and only for applications
+using the readiness agent. The host actuator requires another healthy
+container with the same `dtc.rolling-web.application` label. It waits three
+seconds for replacement discovery, creates the old replica's local drain
+marker, then waits six seconds (three active-health intervals). The old
+application keeps serving in-flight requests during this period. Traefik
+removes that backend after `/ready` returns 503. Only afterward does Coolify
+send TERM and apply the 45-second stop grace. If the prerequisite fails, the
+old container is retained.
+
+[`patch-coolify-drain.py`](patch-coolify-drain.py) checks the complete original
+job checksum and refuses an unreviewed source version. Install from Hetzner:
+
+```sh
+python3 deployments/install-coolify-drain.py
+python3 deployments/install-coolify-drain.py --apply
+```
+
+The installer lints in the current PHP runtime, saves private rollback copies,
+installs the actuator on both Contabo hosts and pins the control-plane image
+to the tested 4.4.7 release. It mounts
+`/data/coolify/custom/rolling/ApplicationDeploymentJob.php` read-only over
+`/var/www/html/app/Jobs/ApplicationDeploymentJob.php` through the persistent
+control-plane Compose override. It recreates only the control-plane container;
+public web, databases and Traefik remain running. Automatic Coolify updates
+were already disabled and remain disabled. Review/rebase the hook and rerun
+the tests before a control-plane upgrade; never silently drop this mount.
+The follower refuses deployments if the installed hook checksum changes.
 
 ## Traefik configuration
 
@@ -134,8 +186,10 @@ not the retired Compose component's identifier:
 ```text
 traefik.docker.network=coolify
 traefik.enable=true
+dtc.rolling-web.application=<native-application-uuid>
 traefik.http.services.<service>.loadbalancer.server.port=<port>
-traefik.http.services.<service>.loadbalancer.healthcheck.path=<path>
+traefik.http.services.<service>.loadbalancer.healthcheck.path=/ready
+traefik.http.services.<service>.loadbalancer.healthcheck.port=8099
 traefik.http.services.<service>.loadbalancer.healthcheck.hostname=localhost
 traefik.http.services.<service>.loadbalancer.healthcheck.interval=2s
 traefik.http.services.<service>.loadbalancer.healthcheck.timeout=1s
@@ -148,7 +202,7 @@ Use `localhost` for the probe Host header: CMP rejects arbitrary backend IPs
 through Django's host validation. HTTP health checks must succeed from the
 proxy as well as from inside the container.
 
-Native public routers have priority 100 and retain the existing domains,
+Native public routers have priority 110 and retain the existing domains,
 entrypoints, TLS and gzip settings. Serving routers add `rolling-retry` to
 their middleware list; HTTPS redirects keep their existing behavior.
 
@@ -163,13 +217,20 @@ still fail against a stale address at old-container removal. Verification
 rules, deny rules and TLS settings are unchanged. Direct origin access
 remains denied. Never commit the origin file.
 
-The current label namespace is `<native-application-uuid>v2`. When changing
+The current label namespace is `<native-application-uuid>v3`. When changing
 load-balancer settings, give the new configuration a new label namespace for
 the transition. Two containers advertising the same service name with
 different load-balancer configuration can make Traefik reject the service.
 Switch private origin-file references only once the new namespace is healthy,
 before Coolify retires the old container. Subsequent image-only rolling
 deployments reuse the stable namespace and identical service configuration.
+For a future namespace migration, hold traffic on the old namespace until
+the new load balancer has passed its first active health check through
+Traefik, using a loopback-restricted temporary canary route. Docker health
+alone is insufficient for that one-time cutover: a new higher-priority router
+can otherwise become selectable before its first active check succeeds.
+This caused brief AISHL 503 samples during readiness-agent adoption; the
+final steady-state draining deployments were measured separately.
 
 ## Install the follower
 
@@ -191,11 +252,14 @@ does not contain credentials. Preserve the existing source/promotion pollers.
 Run the focused behavior tests:
 
 ```sh
-python3 -m unittest discover -s deployments/tests -p 'test_coolify_rolling_web.py' -v
+python3 -m unittest discover -s deployments/tests -p 'test_*rolling*.py' -v
 ```
 
 For a controlled native redeploy, collect public probes and Docker lifecycle
-events. Verify replacement start, then healthy, then old-container stop.
+events. Verify replacement start, then healthy, then old readiness withdrawal,
+the propagation wait, and old-container stop. The deployment must log
+`Draining old web backend before termination.` For a live actuator check,
+observe old `/ready` fail while its application endpoint still succeeds.
 Verify the Coolify deployment messages `Rolling update started`,
 `New container is healthy`, and `Rolling update completed`. Also recreate the
 private source Service and verify public traffic remains on the native web.
