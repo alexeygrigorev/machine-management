@@ -76,8 +76,9 @@ re-signed or replayed.
 
 The first drain also exposed a failed
 `content.tasks.peer_reviews.form_self_paced_review_batches` task with
-`NotSupportedError`. That application-level failure is separate from worker
-availability; no task result payload is published. Successful recurring
+`NotSupportedError` (PostgreSQL rejects `FOR UPDATE` on the nullable side
+of an outer join). This recurred during observation and needs an application
+query fix. That failure is separate from worker availability; no task result payload is published. Successful recurring
 `run_due_jobs`, `sweep_jobs`, and campaign recovery runs demonstrate that the
 scheduler and consumer are active; successful task status alone does not
 prove external delivery or execution behind release gates.
