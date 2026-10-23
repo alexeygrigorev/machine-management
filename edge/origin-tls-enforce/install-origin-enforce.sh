@@ -14,8 +14,13 @@ set -euo pipefail
 
 HOST="${1:-}"
 [[ -n "$HOST" ]] || { echo "usage: V_*=... $0 <contabo-a|contabo-b>" >&2; exit 2; }
+[[ "$HOST" =~ ^contabo-[ab]$ ]] || { echo "unknown host" >&2; exit 2; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
+
+# Never replay the historical backend mapping over a working rolling setup.
+"${SSH[@]}" "$HOST" 'sudo test ! -f /data/coolify/proxy/dynamic/origin-enforce.yml' \
+  || { echo "refusing: enforcement already installed; preserve current rolling backends (see README.md)" >&2; exit 2; }
 
 valid() { [[ "$1" =~ ^[A-Za-z0-9_=-]{16,128}$ ]]; }
 
@@ -126,9 +131,9 @@ gate_check() { # prints PASS/FAIL lines; returns 0 iff gate holds
     IFS='|' read -r SLUG H SVC V1 V2 HP <<<"$E"
     local no_h no_h_s with_h with_h_s
     no_h="$(curl -sk -o /dev/null -w "%{http_code}" -m 8 -H "Host: $H" "http://${IP}/")"
-    no_h_s="$(curl -sk -o /dev/null -w "%{http_code}" -m 8 -H "Host: $H" "https://${IP}/")"
+    no_h_s="$(curl -s --resolve "$H:443:$IP" -o /dev/null -w "%{http_code}" -m 8 "https://${H}/")"
     with_h="$(curl -sk -o /dev/null -w "%{http_code}" -m 8 -H "Host: $H" -H "X-Origin-Verify: $V1" "http://${IP}${HP}")"
-    with_h_s="$(curl -sk -o /dev/null -w "%{http_code}" -m 8 -H "Host: $H" -H "X-Origin-Verify: $V1" "https://${IP}${HP}")"
+    with_h_s="$(curl -s --resolve "$H:443:$IP" -o /dev/null -w "%{http_code}" -m 8 -H "X-Origin-Verify: $V1" "https://${H}${HP}")"
     [[ "$no_h" == "403" ]] && echo "PASS: $H http no-header -> 403" || { echo "FAIL: $H http no-header -> $no_h"; fail=1; }
     [[ "$no_h_s" == "403" ]] && echo "PASS: $H https no-header -> 403" || { echo "FAIL: $H https no-header -> $no_h_s"; fail=1; }
     [[ "$with_h" =~ ^(200|301|302)$ ]] && echo "PASS: $H http+header -> $with_h" || { echo "FAIL: $H http+header -> $with_h"; fail=1; }

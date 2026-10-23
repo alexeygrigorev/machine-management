@@ -10,8 +10,14 @@ set -euo pipefail
 
 HOST="${1:-}"
 [[ -n "$HOST" ]] || { echo "usage: $0 <contabo-a|contabo-b>" >&2; exit 2; }
+[[ "$HOST" =~ ^contabo-[ab]$ ]] || { echo "unknown host" >&2; exit 2; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
+
+# Bootstrap only: rolling deployment owns the current backend references and
+# retry middleware. Replaying this historical renderer would undo that mapping.
+"${SSH[@]}" "$HOST" 'sudo test ! -f /data/coolify/proxy/dynamic/origin-enforce.yml' \
+  || { echo "refusing: enforcement already installed; preserve current rolling backends (see README.md)" >&2; exit 2; }
 
 # slug|hostname|docker-service per host (services are uuid-derived, stable).
 # Includes the VIEWER hostnames: CF allViewer policies forward viewer Host+SNI
@@ -73,13 +79,13 @@ for E in "${ENTRIES[@]}"; do
   IFS='|' read -r SLUG H SVC <<<"$E"
   OK=0
   for i in $(seq 1 30); do
-    SUBJ="$(echo | timeout 8 openssl s_client -connect "${IP}:443" -servername "$H" 2>/dev/null | openssl x509 -noout -subject -issuer 2>/dev/null || true)"
-    if echo "$SUBJ" | grep -q "CN *= *$H" && ! echo "$SUBJ" | grep -qi "TRAEFIK DEFAULT"; then
-      echo "OK: https://$H serves $SUBJ"
+    if curl --silent --noproxy '*' --max-time 8 --output /dev/null \
+        --resolve "${H}:443:${IP}" "https://${H}/"; then
+      echo "OK: $H certificate trust, validity and hostname verified"
       OK=1; break
     fi
     sleep 10
   done
-  [[ "$OK" == "1" ]] || { echo "FAIL: no valid cert for $H yet ($SUBJ)" >&2; FAIL=1; }
+  [[ "$OK" == "1" ]] || { echo "FAIL: no valid trusted cert for $H yet" >&2; FAIL=1; }
 done
 [[ "$FAIL" == "0" ]] && echo "PHASE1 GREEN on ${HOST}" || { echo "PHASE1 INCOMPLETE on ${HOST}" >&2; exit 1; }
