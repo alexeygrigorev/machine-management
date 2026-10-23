@@ -54,6 +54,8 @@ HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+# Drills (DEADMAN_FORCE_FAIL) page ops only — never Alexey (t1273u/t1274u).
+ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 
@@ -69,8 +71,10 @@ FAILED=0
 NOW="$(date +%s)"
 
 send_alert() {
-  # $1=check-name $2=subject-suffix $3=body (dedupe identical to healthcheck)
+  # $1=check-name $2=subject-suffix $3=body [$4=optional to-csv override]
+  # Drill path passes ALERT_OPS_TO so FORCE_FAIL never pages alexey@ (t1273u).
   local name="$1" subject="$2" body="$3"
+  local to_override="${4:-}"
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status=""
   if [[ -f "$state_file" ]]; then
@@ -88,7 +92,12 @@ send_alert() {
   fi
   local full_subject="[contabo-deadman] ${subject} (${name})"
   local sent="no"
-  local to_csv="${ALERT_TO// /,}"
+  local to_csv
+  if [[ -n "$to_override" ]]; then
+    to_csv="${to_override// /,}"
+  else
+    to_csv="${ALERT_TO// /,}"
+  fi
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
@@ -119,7 +128,7 @@ send_alert() {
   else
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp (see install-contabo-deadman.sh)"
   fi
-  log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   printf 'STATUS=%s\nLAST_ALERT=%s\n' "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
     "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" > "$state_file"
 }
@@ -136,6 +145,23 @@ mark_ok() {
   fi
   if [[ "$last_status" == "FAIL" ]]; then
     send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+  else
+    printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
+  fi
+}
+
+mark_ok_ops() {
+  # Like mark_ok but RECOVERED goes to ALERT_OPS_TO only (drills).
+  local name="$1"
+  local state_file="${STATE_DIR}/${name}.state"
+  local last_status=""
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    last_status="${STATUS:-}"
+  fi
+  if [[ "$last_status" == "FAIL" ]]; then
+    send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')." "$ALERT_OPS_TO"
   else
     printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
   fi
@@ -196,13 +222,13 @@ check_url() {
 
 # ---- run ----
 if [[ "$DEADMAN_FORCE_FAIL" == "1" ]]; then
-  log "FAIL check=drill-forced: DEADMAN_FORCE_FAIL=1 (safe mail-path drill, no production impact)"
-  send_alert "drill-forced" "FAIL" "Dead-man drill: forced failure to prove the Hetzner mail path. Re-run without DEADMAN_FORCE_FAIL=1 to restore green + RECOVERED notice."
+  log "FAIL check=drill-forced: DEADMAN_FORCE_FAIL=1 (safe mail-path drill, no production impact; ops-only recipients)"
+  send_alert "drill-forced" "FAIL" "Dead-man drill: forced failure to prove the Hetzner mail path. Re-run without DEADMAN_FORCE_FAIL=1 to restore green + RECOVERED notice. Recipients: ops-only (${ALERT_OPS_TO})." "$ALERT_OPS_TO"
   FAILED=1
 else
   # Close out a previous drill with a RECOVERED notice on the next green run
-  # (silent when no drill ever failed).
-  mark_ok "drill-forced"
+  # (silent when no drill ever failed). Ops-only — never alexey@.
+  mark_ok_ops "drill-forced"
 fi
 
 # shellcheck disable=SC2086

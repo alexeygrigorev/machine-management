@@ -67,6 +67,17 @@ case "$url" in
 esac
 EOF
 chmod +x "$TMP/stubbin/ssh" "$TMP/stubbin/curl"
+cat > "$TMP/stubbin/sendmail" <<'EOF'
+#!/usr/bin/env bash
+# Capture recipients from To: header for drill recipient assertions.
+mkdir -p "$STUB_DM_MAILDIR"
+msg="$(cat)"
+to="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^To:/{print $2; exit}')"
+subj="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^Subject:/{print $2; exit}')"
+printf '%s\t%s\n' "$to" "$subj" >> "$STUB_DM_MAILDIR/sent.tsv"
+exit 0
+EOF
+chmod +x "$TMP/stubbin/sendmail"
 
 run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
@@ -75,7 +86,9 @@ run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   DEADMAN_HOSTS="$1" \
   DEADMAN_URLS="$2" \
   DEADMAN_FORCE_FAIL="$4" \
-  ALERT_TO="test@example.com" \
+  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
+  ALERT_OPS_TO="dev@dtcdev.click" \
+  STUB_DM_MAILDIR="$3/mail" \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
@@ -124,6 +137,19 @@ if [[ $t5a -eq 1 && $rc -eq 0 && "$out" == *'RECOVERED'* ]]; then
   pass "D5 drill FAIL then RECOVERED on restore"
 else
   fail "D5 drill/recovery -- $out"
+fi
+
+# D7: drill mail recipients are ops-only (ALERT_OPS_TO), never alexey@ (t1273u/t1274u)
+SD7="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 1)"; rc=$?; set -e
+mailf="$SD7/mail/sent.tsv"
+if [[ $rc -ne 0 && -f "$mailf" ]] \
+  && grep -q $'dev@dtcdev.click\t.*drill-forced' "$mailf" \
+  && ! grep -q 'alexey@datatalks.club' "$mailf" \
+  && [[ "$out" == *'to=dev@dtcdev.click'* ]]; then
+  pass "D7 drill recipients ops-only (no alexey@)"
+else
+  fail "D7 ops-only drill -- out=$out mail=$(cat "$mailf" 2>/dev/null || echo missing)"
 fi
 
 # D6: malformed DEADMAN_URLS entry skipped, good entry still runs

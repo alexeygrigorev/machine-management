@@ -116,6 +116,15 @@ CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
+# Suppress RECOVERED mail when the FAIL lasted shorter than this many seconds
+# (t1273u/t1274u: cut rapid FAIL→RECOVERED pair spam for one-tick flakes).
+# FAIL itself still pages immediately — do NOT raise FAIL_STREAK for prod HTTP
+# (AISHL Coolify replace 503 must remain visible until zero-downtime is fixed).
+RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
+# When 1, skip APP_URLS + CONTENT_CHECKS that hit public hostnames (dedupe:
+# only one Contabo node should page for the same public URL). Keep local
+# checks (127.0.0.1 / 10.100.0.x). Set on contabo-a; leave 0 on contabo-b.
+SKIP_PUBLIC_HTTP_CHECKS="${SKIP_PUBLIC_HTTP_CHECKS:-0}"
 
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: missing required binary: flock"; exit 1; }
@@ -136,6 +145,7 @@ send_alert() {
     # shellcheck disable=SC1090
     source "$state_file" || true
     last_alert="${LAST_ALERT:-0}"; last_status="${STATUS:-}"
+    FAIL_SINCE="${FAIL_SINCE:-0}"
   fi
   local is_recovery=0
   [[ "$subject" == RECOVERED* ]] && is_recovery=1
@@ -180,25 +190,55 @@ send_alert() {
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
-  printf 'STATUS=%s\nLAST_ALERT=%s\n' "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
-    "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" > "$state_file"
+  if [[ "$is_recovery" -eq 1 ]]; then
+    printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
+  else
+    local fail_since="${FAIL_SINCE:-$NOW}"
+    if [[ "${last_status:-}" != "FAIL" || -z "${FAIL_SINCE:-}" || "${FAIL_SINCE:-0}" -eq 0 ]]; then
+      fail_since="$NOW"
+    fi
+    printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\n' "$NOW" "$fail_since" > "$state_file"
+  fi
 }
 
 mark_ok() {
-  # $1=check-name — sends RECOVERED if previous state was FAIL
+  # $1=check-name — sends RECOVERED if previous state was FAIL AND the outage
+  # lasted at least RECOVER_NOTIFY_MIN_SEC (t1273u: mute rapid recover spam).
+  # Short flaps still leave STATUS=OK silently; FAIL already paged if it fired.
   local name="$1"
   local state_file="${STATE_DIR}/${name}.state"
-  local last_status=""
+  local last_status="" fail_since=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
     last_status="${STATUS:-}"
+    fail_since="${FAIL_SINCE:-0}"
   fi
   if [[ "$last_status" == "FAIL" ]]; then
-    send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+    local dur=0
+    if [[ "$fail_since" =~ ^[0-9]+$ && "$fail_since" -gt 0 ]]; then
+      dur=$(( NOW - fail_since ))
+    fi
+    if [[ "$dur" -ge "$RECOVER_NOTIFY_MIN_SEC" ]]; then
+      send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ') (was FAIL for ${dur}s)."
+    else
+      log "OK check=${name}: recovered after ${dur}s (< RECOVER_NOTIFY_MIN_SEC=${RECOVER_NOTIFY_MIN_SEC}) — suppressing RECOVERED mail"
+      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
+    fi
   else
-    printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
+    printf 'STATUS=OK\nLAST_ALERT=%s\nFAIL_SINCE=0\n' "${LAST_ALERT:-0}" > "$state_file"
   fi
+}
+
+is_public_url() {
+  # $1=url — true (return 0) when the URL host is not loopback/WG-private.
+  local url="$1" host
+  host="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' | sed -E 's#[:/].*##')"
+  case "$host" in
+    127.0.0.1|localhost|::1) return 1 ;;
+    10.100.0.*|10.0.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 check_postgres() {
@@ -566,6 +606,10 @@ if [[ -n "${APP_URLS:-}" ]]; then
   for pair in $APP_URLS; do
     app="${pair%%=*}"; url="${pair#*=}"
     [[ -n "$app" && -n "$url" && "$url" != "$pair" ]] || { log "WARN: skipping malformed APP_URLS entry: ${pair}"; continue; }
+    if [[ "$SKIP_PUBLIC_HTTP_CHECKS" == "1" ]] && is_public_url "$url"; then
+      log "SKIP check=http-${app}: public URL (SKIP_PUBLIC_HTTP_CHECKS=1; contabo-b owns public pages)"
+      continue
+    fi
     check_http "$app" "$url"
   done
 else
@@ -579,6 +623,10 @@ if [[ -n "${CONTENT_CHECKS:-}" ]]; then
     url="${rest%%::*}"; marker="${rest#*::}"
     if [[ -z "$app" || -z "$url" || -z "$marker" || "$url" == "$rest" || "$marker" == "$rest" ]]; then
       log "WARN: skipping malformed CONTENT_CHECKS entry: ${entry} (want name=url::marker)"
+      continue
+    fi
+    if [[ "$SKIP_PUBLIC_HTTP_CHECKS" == "1" ]] && is_public_url "$url"; then
+      log "SKIP check=content-${app}: public URL (SKIP_PUBLIC_HTTP_CHECKS=1; contabo-b owns public pages)"
       continue
     fi
     check_content "$app" "$url" "$marker"
