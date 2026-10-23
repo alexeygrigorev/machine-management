@@ -15,6 +15,7 @@ keeps **thin SOP / reference pages that link here** — no duplicate heavy scrip
 | Path | Purpose |
 |------|---------|
 | [`deployments/aisl-qcluster.md`](deployments/aisl-qcluster.md) | AISHL Coolify worker deployment, heartbeat verification, and key decision |
+| [`deployments/aisl-auto-deploy.md`](deployments/aisl-auto-deploy.md) | AISHL pinned-image poller, idempotent web/worker rollout, and five-minute recreate fix |
 | [`scripts/bootstrap-vps-ssh.sh`](scripts/bootstrap-vps-ssh.sh) | Ubuntu 24.04 SSH bootstrap (keys, sudo user, sshd harden, fail2ban, ufw) |
 | [`backups/`](backups/) | Daily Coolify `pg_dump` → S3 job (pg-shared + pg-relay), cron, installer, S3 lifecycle example |
 | [`monitors/`](monitors/) | **Permanent continuous** healthcheck (pg-shared + pg-relay + HTTP apps, every 5 min, alerts dev@), cron, installer |

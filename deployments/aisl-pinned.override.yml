@@ -1,0 +1,10 @@
+# Merge into an existing AISHL Coolify compose; preserve its environment and healthchecks.
+# AISL_IMAGE must be the complete immutable GHCR release reference for both applications.
+# The poller writes the resolved reference to Coolify; this overlay is an operator template.
+services:
+  web:
+    image: ${AISL_IMAGE:?Set the immutable GHCR release reference}
+    pull_policy: missing
+  worker:
+    image: ${AISL_IMAGE:?Set the immutable GHCR release reference}
+    pull_policy: missing

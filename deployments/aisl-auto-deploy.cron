@@ -1,0 +1,2 @@
+# Hetzner user crontab; preserve all other entries when installing.
+*/5 * * * * flock -n /tmp/coolify-aisl-auto-deploy.lock ~/tmp/bin/coolify-aisl-auto-deploy.sh >> /tmp/opencode/aisl-auto-deploy.log 2>&1
