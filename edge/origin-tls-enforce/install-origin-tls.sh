@@ -14,12 +14,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
 
 # slug|hostname|docker-service per host (services are uuid-derived, stable).
+# Includes the VIEWER hostnames: CF allViewer policies forward viewer Host+SNI
+# to the origin, so origin TLS must cover them (verified live 23 Oct: CF sent
+# SNI=dev.relay.datatalks.club and got default-cert close/503 without it).
 if [[ "$HOST" == "contabo-a" ]]; then
-  ENTRIES=("website|origin.website.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker")
+  ENTRIES=("website|origin.website.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker"
+           "websiteprod|prod.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker"
+           "websitedev|dev.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker")
   IP="169.58.119.163"
 elif [[ "$HOST" == "contabo-b" ]]; then
   ENTRIES=("relay|origin.relay.datatalks.club|http-0-fjnzwomg8n42lztloo34just-web-2567@docker"
-           "relaydev|origin.dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker")
+           "relaypub|relay.datatalks.club|http-0-fjnzwomg8n42lztloo34just-web-2567@docker"
+           "relaydev|origin.dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker"
+           "relaydevpub|dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker")
   IP="169.58.124.141"
 else
   echo "unknown host $HOST" >&2; exit 2

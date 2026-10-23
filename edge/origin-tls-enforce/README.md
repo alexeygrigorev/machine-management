@@ -1,10 +1,15 @@
 # Origin TLS + verification enforcement (t1143u, child origin-security)
 #
 # Closes: plaintext CF->origin (http-only) + unauthenticated direct-origin
-# bypass for the 3 in-scope origin hostnames behind 4 CF distributions:
-#   origin.website.datatalks.club (.163, dists E1VNMGFFIXBOXX + E33FS79KPFSAOM)
-#   origin.relay.datatalks.club   (.141, dist E3L9KUTE15WFJF)
-#   origin.dev.relay.datatalks.club (.141, dist E35QPYDA1452SA)
+# bypass for the in-scope origin hostnames behind 4 CF distributions.
+# CF allViewer Origin Request Policies forward viewer Host+SNI to the origin,
+# so TLS+enforcement must cover viewer names as well as origin names:
+#   .163 (website svc): origin.website, prod.datatalks.club, dev.datatalks.club
+#     dists E1VNMGFFIXBOXX (prod) + E33FS79KPFSAOM (dev)
+#   .141 (relay svc):    origin.relay, relay.datatalks.club
+#     dist E3L9KUTE15WFJF (prod)
+#   .141 (relay-dev svc): origin.dev.relay, dev.relay.datatalks.club
+#     dist E35QPYDA1452SA (dev)
 #
 # Method: Traefik FILE provider only (like edge/traefik/coolify-api-gha.yml).
 # No Coolify saves, no container restarts, no DNS changes. Coolify docker

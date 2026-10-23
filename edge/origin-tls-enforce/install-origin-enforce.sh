@@ -19,19 +19,26 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
 
 valid() { [[ "$1" =~ ^[A-Za-z0-9_=-]{16,128}$ ]]; }
 
-# slug|hostname|service|value1|value2(empty ok)
+# slug|hostname|service|value1|value2(empty ok)|health
+# Hostnames include the VIEWER names CF forwards (allViewer Origin Request
+# Policies): viewer Host+SNI reaches the origin, so TLS+enforcement must cover
+# prod/dev.datatalks.club (.163) and relay/dev.relay.datatalks.club (.141).
 if [[ "$HOST" == "contabo-a" ]]; then
   : "${V_WEB_PROD:?set V_WEB_PROD}"; : "${V_WEB_DEV:?set V_WEB_DEV}"
   valid "$V_WEB_PROD" || { echo "bad V_WEB_PROD charset" >&2; exit 2; }
   valid "$V_WEB_DEV" || { echo "bad V_WEB_DEV charset" >&2; exit 2; }
-  ENTRIES=("website|origin.website.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker|$V_WEB_PROD|$V_WEB_DEV|/health/ready")
+  ENTRIES=("website|origin.website.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker|$V_WEB_PROD|$V_WEB_DEV|/health/ready"
+           "websiteprod|prod.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker|$V_WEB_PROD||/health/ready"
+           "websitedev|dev.datatalks.club|http-0-wodajblzizrjunwme3ossav3@docker|$V_WEB_DEV||/health/ready")
   IP="169.58.119.163"
 elif [[ "$HOST" == "contabo-b" ]]; then
   : "${V_RELAY_PROD:?set V_RELAY_PROD}"; : "${V_RELAY_DEV:?set V_RELAY_DEV}"
   valid "$V_RELAY_PROD" || { echo "bad V_RELAY_PROD charset" >&2; exit 2; }
   valid "$V_RELAY_DEV" || { echo "bad V_RELAY_DEV charset" >&2; exit 2; }
   ENTRIES=("relay|origin.relay.datatalks.club|http-0-fjnzwomg8n42lztloo34just-web-2567@docker|$V_RELAY_PROD||/health/"
-           "relaydev|origin.dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker|$V_RELAY_DEV||/health/")
+           "relaypub|relay.datatalks.club|http-0-fjnzwomg8n42lztloo34just-web-2567@docker|$V_RELAY_PROD||/health/"
+           "relaydev|origin.dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker|$V_RELAY_DEV||/health/"
+           "relaydevpub|dev.relay.datatalks.club|http-0-t9uudl5ik40webxrzamrm8qy-web-2567@docker|$V_RELAY_DEV||/health/")
   IP="169.58.124.141"
 else
   echo "unknown host $HOST" >&2; exit 2

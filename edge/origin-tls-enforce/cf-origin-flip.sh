@@ -13,6 +13,7 @@
 set -euo pipefail
 
 DIST="${1:-}"; ORIGIN_ID="${2:-}"; WANT="${3:-}"
+export ORIGIN_ID
 [[ -n "$DIST" && -n "$ORIGIN_ID" && "$WANT" =~ ^(https-only|http-only)$ ]] \
   || { echo "usage: $0 <dist-id> <origin-id> <https-only|http-only>" >&2; exit 2; }
 [[ "$DIST" =~ ^(E1VNMGFFIXBOXX|E33FS79KPFSAOM|E3L9KUTE15WFJF|E35QPYDA1452SA)$ ]] \
@@ -24,14 +25,22 @@ trap 'rm -rf "$TMP"' EXIT
 
 ETAG="$("${AWS[@]}" cloudfront get-distribution --id "$DIST" --query ETag --output text)"
 "${AWS[@]}" cloudfront get-distribution --id "$DIST" --query Distribution.DistributionConfig > "$TMP/cfg.json"
-DOMAIN="$("${AWS[@]}" cloudfront get-distribution --id "$DIST" \
-  --query "Distribution.DistributionConfig.Origins.Items[?Id=='$ORIGIN_ID'].DomainName | [0]" --output text)"
-CUR="$("${AWS[@]}" cloudfront get-distribution --id "$DIST" \
-  --query "Distribution.DistributionConfig.Origins.Items[?Id=='$ORIGIN_ID'].CustomOriginConfig.OriginProtocolPolicy | [0]" --output text)"
-HDR="$("${AWS[@]}" cloudfront get-distribution --id "$DIST" \
-  --query "Distribution.DistributionConfig.Origins.Items[?Id=='$ORIGIN_ID'].CustomHeaders.Items[?HeaderName=='X-Origin-Verify'].HeaderValue | [0]" --output text)"
+eval "$("${AWS[@]}" cloudfront get-distribution --id "$DIST" \
+  --query Distribution.DistributionConfig.Origins --output json | python3 -c "
+import json,sys,os
+oid = os.environ['ORIGIN_ID']
+items = json.load(sys.stdin)['Items']
+hit = [o for o in items if o['Id'] == oid]
+assert len(hit) == 1, 'origin id not unique/found'
+o = hit[0]
+hdrs = [(h['HeaderName'], h['HeaderValue']) for h in o.get('CustomHeaders', {}).get('Items', [])]
+v = [v for (k, v) in hdrs if k == 'X-Origin-Verify']
+print('DOMAIN=' + o['DomainName'])
+print('CUR=' + o['CustomOriginConfig']['OriginProtocolPolicy'])
+print('HDR=' + (v[0] if v else ''))
+")"
 [[ "$DOMAIN" != "None" && -n "$DOMAIN" ]] || { echo "refusing: origin $ORIGIN_ID not found on $DIST" >&2; exit 2; }
-echo "dist=$DIST origin=$ORIGIN_ID domain=$DOMAIN current=$CUR want=$WANT (header configured: $([[ -n "$HDR" && "$HDR" != "None" ]] && echo yes || echo NO)"
+echo "dist=$DIST origin=$ORIGIN_ID domain=$DOMAIN current=$CUR want=$WANT (header configured: $([[ -n "$HDR" && "$HDR" != "None" ]] && echo yes || echo NO))"
 [[ "$CUR" == "$WANT" ]] && { echo "already $WANT, nothing to do"; exit 0; }
 
 if [[ "$WANT" == "https-only" ]]; then
