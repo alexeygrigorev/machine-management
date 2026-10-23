@@ -5,6 +5,20 @@ development use HTTPS origins. Website development remains on HTTP while its
 isolation guard returns 503. This is a deferred cutover, not full four-origin
 closure. No DNS or unrelated distribution changes are needed.
 
+**Intake closure is not accepted yet.** The extended check at
+15:58:59–16:00:15 UTC also caught intermittent production website availability
+failures: public health, homepage and authenticated direct-origin health each
+returned two 503s and one connection timeout in ten samples. The remaining
+seven samples succeeded. Unauthenticated origin requests were denied in all
+ten samples, and Relay public health succeeded in all ten. A separate internal
+probe observed application readiness taking over three seconds and cached
+readiness returning 503. This points to backend availability rather than a TLS
+handshake failure; the underlying cause is not established. Active enforcement,
+backend mappings, credentials, firewall rules and CloudFront transport were
+unchanged during this verification. Restore stable website availability before
+claiming the healthy-public-traffic criterion is met. A later passing single
+matrix does not erase the failed window.
+
 | Distribution | Origin ID | Transport | Viewer |
 | --- | --- | --- | --- |
 | E1VNMGFFIXBOXX | website-production-alb | https-only | prod.datatalks.club |
