@@ -12,14 +12,17 @@
 #   ./coolify-pg-replay.sh --mode pitr --stack pg-shared \
 #     --base /path/to/pg-shared-base-<STAMP>.tar.gz \
 #     --base-wal /path/to/pg-shared-pg_wal-<STAMP>.tar.gz \
-#     --wal-dir /path/to/wal/
-# --base-wal is the pg_wal.tar.gz member written by pg_basebackup -Ft -X
-# stream (same STAMP as --base); --wal-dir holds archived segments after it.
-# --db-user names the restored cluster's superuser for the census
-# (prod Coolify clusters use pgadmin, not postgres).
-# The WAL set must be COMPLETE: collect it after a clean source shutdown
-# (a live tail segment is torn and replays forever — the script waits, then
-# fails loudly rather than promoting a gapped timeline).
+#     --wal-dir /path/to/wal/ [--recovery-target '<time|lsn|xid|latest>'
+#     --recovery-target-action promote|pause|shutdown]
+# --wal-dir holds archived segments after it (--base-wal end). Segments may be
+# bare (`0000000100000000000000AB`) or gzipped (`...AB.gz`, as produced by
+# coolify-wal-shipper.sh S3 layout); .gz files are integrity-checked
+# (gzip -t) and decompressed — never silently skipped. Any other file, a
+# corrupt archive, or a gap in the segment sequence FAILS LOUDLY.
+# --recovery-target pins the replay end: 'YYYY-MM-DD HH:MM:SS+TZ' (validated
+# via date -d), '0/1A2B3C' LSN, numeric XID, or 'latest' (replay to tip).
+# Continuity is verified from the base backup_label START segment through the
+# staged tip, so a missing leading/trailing segment cannot replay silently.
 #
 # Both modes: start a THROWAWAY postgres (pinned image, 127.0.0.1 only),
 # restore/replay, run a per-table row census, compare with --expect-counts
@@ -42,6 +45,7 @@ set -euo pipefail
 
 MODE="dump"; STACK=""; DB=""; DUMP=""; FETCH_S3=""; EXPECT=""; KEEP=0
 BASE=""; BASEWAL=""; WALDIR=""; DBUSER="postgres"
+RECOVERY_TARGET="latest"; RECOVERY_TARGET_ACTION="promote"
 PG_IMAGE="${PG_IMAGE:-postgres:16.15-alpine}"
 WORKDIR="${WORKDIR:-$(mktemp -d /tmp/pg-replay-XXXXXX)}"
 
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --base) BASE="$2"; shift 2 ;;
     --base-wal) BASEWAL="$2"; shift 2 ;;
     --wal-dir) WALDIR="$2"; shift 2 ;;
+    --recovery-target) RECOVERY_TARGET="$2"; shift 2 ;;
+    --recovery-target-action) RECOVERY_TARGET_ACTION="$2"; shift 2 ;; 
     --db-user) DBUSER="$2"; shift 2 ;;
     --pg-image) PG_IMAGE="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
@@ -67,6 +73,31 @@ log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" ; }
 fail() { log "ERROR: $*"; exit 1; }
 [[ "$MODE" == "dump" || "$MODE" == "pitr" ]] || fail "--mode must be dump|pitr"
 [[ "$PG_IMAGE" != *":latest"* ]] || fail "pinned image required, not :latest"
+
+# ---- recovery-target validation (pitr only; dump ignores these) ----
+# Accepted: 'latest' (replay to tip), timestamptz, LSN (X/X hex), or XID.
+RECOVERY_KIND=""
+if [[ "$MODE" == "pitr" ]]; then
+  case "$RECOVERY_TARGET_ACTION" in
+    promote|pause|shutdown) ;;
+    *) fail "--recovery-target-action must be promote|pause|shutdown (got: $RECOVERY_TARGET_ACTION)" ;;
+  esac
+  if [[ "$RECOVERY_TARGET" == "latest" ]]; then
+    RECOVERY_KIND="latest"
+  elif [[ "$RECOVERY_TARGET" =~ ^[0-9A-Fa-f]+/[0-9A-Fa-f]+$ ]]; then
+    RECOVERY_KIND="lsn"
+  elif [[ "$RECOVERY_TARGET" =~ ^[0-9]+$ ]]; then
+    RECOVERY_KIND="xid"
+  elif [[ "$RECOVERY_TARGET" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T\ ][0-9]{2}:[0-9]{2}(:[0-9]{2})? ]]; then
+    CANON="$(date -u -d "$RECOVERY_TARGET" '+%Y-%m-%d %H:%M:%S%z' 2>/dev/null)" \
+      || fail "--recovery-target is not a parseable timestamp: $RECOVERY_TARGET"
+    RECOVERY_TARGET="$CANON"
+    RECOVERY_KIND="time"
+  else
+    fail "--recovery-target must be 'latest', a timestamp (YYYY-MM-DD HH:MM[:SS][TZ]), an LSN (X/X), or a numeric XID (got: $RECOVERY_TARGET)"
+  fi
+  log "recovery target: kind=$RECOVERY_KIND value=$RECOVERY_TARGET action=$RECOVERY_TARGET_ACTION"
+fi
 
 command -v docker >/dev/null 2>&1 || fail "missing binary: docker"
 command -v psql >/dev/null 2>&1 || fail "missing binary: psql (apt install postgresql-client)"
@@ -172,6 +203,16 @@ else
   printf "restore_command = 'cp /wal/%%f %%p'\n" > "$PGDATA/postgresql.auto.conf.restore"
   cat "$PGDATA/postgresql.auto.conf.restore" >> "$PGDATA/postgresql.auto.conf"
   rm -f "$PGDATA/postgresql.auto.conf.restore"
+  if [[ "$RECOVERY_KIND" == "time" ]]; then
+    printf "recovery_target_time = '%s'\nrecovery_target_action = '%s'\n" \
+      "$RECOVERY_TARGET" "$RECOVERY_TARGET_ACTION" >> "$PGDATA/postgresql.auto.conf"
+  elif [[ "$RECOVERY_KIND" == "lsn" ]]; then
+    printf "recovery_target_lsn = '%s'\nrecovery_target_action = '%s'\n" \
+      "$RECOVERY_TARGET" "$RECOVERY_TARGET_ACTION" >> "$PGDATA/postgresql.auto.conf"
+  elif [[ "$RECOVERY_KIND" == "xid" ]]; then
+    printf "recovery_target_xid = '%s'\nrecovery_target_action = '%s'\n" \
+      "$RECOVERY_TARGET" "$RECOVERY_TARGET_ACTION" >> "$PGDATA/postgresql.auto.conf"
+  fi
   touch "$PGDATA/recovery.signal"
   # Files extract as our uid; the container runs postgres as its own uid, so
   # hand ownership over from INSIDE the image (container root has CAP_CHOWN —
@@ -179,11 +220,60 @@ else
   docker run --rm --entrypoint /bin/chown -v "$PGDATA:/w/pgdata" "$PG_IMAGE" \
     -R postgres:postgres /w/pgdata >/dev/null || fail "chown of staged pgdata failed"
   # Stage a world-readable WAL copy (inputs may be 600; never mutate caller's dir).
-  # Empty when --wal-dir is absent: restore_command then fails fast and the
-  # instance promotes at the end of the base's own WAL-stream window.
+  # .gz segments (coolify-wal-shipper.sh S3 layout) are integrity-checked and
+  # decompressed to bare names; anything else FAILS LOUDLY — never skipped.
+  # Empty --wal-dir, or a --wal-dir with zero usable segments, fails: an
+  # explicit dir that stages nothing is almost certainly a mistake, and a
+  # silent base-only replay would masquerade as PITR.
   WALCOPY="$WORKDIR/wal"; mkdir -p "$WALCOPY"
   if [[ -n "$WALDIR" ]]; then
-    cp "$WALDIR"/0* "$WALCOPY"/ 2>/dev/null || cp -r "$WALDIR"/. "$WALCOPY"/
+    STAGED=0
+    while IFS= read -r -d '' SRC; do
+      FN="$(basename "$SRC")"
+      if [[ "$FN" == *.gz ]]; then
+        BARE="${FN%.gz}"
+        [[ "$BARE" =~ ^[0-9A-F]{24}$ ]] \
+          || fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
+        gzip -t "$SRC" || fail "WAL segment is CORRUPT (gzip -t failed): $FN"
+        gzip -dc "$SRC" > "$WALCOPY/$BARE" \
+          || fail "WAL segment decompress failed: $FN"
+        STAGED=$((STAGED + 1))
+      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ ]]; then
+        cp "$SRC" "$WALCOPY/$FN" || fail "WAL stage copy failed: $FN"
+        STAGED=$((STAGED + 1))
+      else
+        fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
+      fi
+    done < <(find "$WALDIR" -maxdepth 1 -type f -print0)
+    [[ "$STAGED" -gt 0 ]] \
+      || fail "--wal-dir holds zero usable WAL segments: $WALDIR"
+    log "staged $STAGED WAL file(s) from $WALDIR"
+    # Continuity check: sequence must start at the base backup_label START
+    # segment and increment by 1 with no gaps (same timeline). A gap means
+    # replay would stop mid-chain and promote a partial timeline — fail now.
+    STARTSEG=""
+    if [[ -f "$PGDATA/backup_label" ]]; then
+      STARTSEG="$(grep -a -o '(file [0-9A-F]\{24\})' "$PGDATA/backup_label" | head -1 | grep -a -o '[0-9A-F]\{24\}')"
+    fi
+    [[ -n "$STARTSEG" ]] \
+      || fail "base backup_label missing START segment — cannot verify WAL continuity"
+    log "base START segment: $STARTSEG"
+    PREV=""
+    while IFS= read -r SEG; do
+      if [[ -z "$PREV" ]]; then
+        [[ "$SEG" == "$STARTSEG" ]] \
+          || fail "WAL GAP: staged chain starts at $SEG but base needs $STARTSEG"
+      else
+        if [[ "${SEG:0:16}" != "${PREV:0:16}" ]]; then
+          fail "WAL TIMELINE CHANGE unsupported ($PREV -> $SEG) — investigate, refusing silent replay"
+        fi
+        WANT="$(printf '%08X' $((16#${PREV:16:8} + 1)))"
+        [[ "${SEG:16:8}" == "$WANT" ]] \
+          || fail "WAL GAP: after $PREV expected ${PREV:0:16}${WANT} but chain has $SEG"
+      fi
+      PREV="$SEG"
+    done < <(ls "$WALCOPY" | grep -E '^[0-9A-F]{24}$' | sort)
+    log "WAL chain continuous: $STARTSEG .. $PREV"
     chmod -R a+rX "$WALCOPY"
   fi
   log "starting throwaway $PG_IMAGE on 127.0.0.1:$PORT for WAL replay (stack=${STACK:-?}) ..."
@@ -198,7 +288,10 @@ else
     PGPASSWORD="$PW" pg_isready -h 127.0.0.1 -p "$PORT" >/dev/null 2>&1 && break
     sleep 2
   done
-  # Wait for recovery to finish (replay to tip of available WAL).
+  # Wait for recovery to finish (replay to tip of available WAL, or to the
+  # explicit --recovery-target). A torn/missing tail segment makes Postgres
+  # retry restore_command forever — the loop below times out and fails LOUDLY
+  # with the tail of the recovery log instead of promoting a gapped timeline.
   # NOTE: local-socket exec as the image superuser — the restored instance
   # keeps its ORIGINAL password, which we do not know (and never ask for).
   # TARGET_DB must exist in the restored cluster (it does — same DBs as prod).
@@ -207,7 +300,11 @@ else
     [[ "$INREC" == "f" ]] && break
     sleep 2
   done
-  [[ "$INREC" == "f" ]] || fail "instance still in recovery (WAL gap?)"
+  if [[ "$INREC" != "f" ]]; then
+    log "ERROR: recovery log tail (why replay is stuck):"
+    docker logs "$RUN_ID" 2>&1 | grep -a -E 'FATAL|ERROR|WARNING|restore|recovery|WAL|target' | tail -20 || true
+    fail "instance still in recovery after 120s (WAL gap, torn tail, or unreachable target) — refusing to promote"
+  fi
   # pitr census uses the image's postgres superuser via local socket (trust).
   CENSUS_TMP="$WORKDIR/census.txt"; : > "$CENSUS_TMP"; PTOTAL=0
   while IFS= read -r t; do
