@@ -5,19 +5,29 @@ development use HTTPS origins. Website development remains on HTTP while its
 isolation guard returns 503. This is a deferred cutover, not full four-origin
 closure. No DNS or unrelated distribution changes are needed.
 
-**Intake closure is not accepted yet.** The extended check at
-15:58:59–16:00:15 UTC also caught intermittent production website availability
-failures: public health, homepage and authenticated direct-origin health each
-returned two 503s and one connection timeout in ten samples. The remaining
-seven samples succeeded. Unauthenticated origin requests were denied in all
-ten samples, and Relay public health succeeded in all ten. A separate internal
-probe observed application readiness taking over three seconds and cached
-readiness returning 503. This points to backend availability rather than a TLS
-handshake failure; the underlying cause is not established. Active enforcement,
-backend mappings, credentials, firewall rules and CloudFront transport were
-unchanged during this verification. Restore stable website availability before
-claiming the healthy-public-traffic criterion is met. A later passing single
-matrix does not erase the failed window.
+**The three active origins passed sustained re-verification at
+16:40:20–16:45:19 UTC on 2026-10-23.** Sixty rounds produced 780 matching
+responses: public health and authenticated HTTPS origin health for Website,
+Relay production and Relay development, the Website homepage, and missing/wrong
+header rejection on every active origin. All 420 serving responses were 200;
+all 360 unauthenticated responses were 403. Public caching was disabled on the
+three distributions. Trusted certificates, HTTP/HTTPS credential enforcement,
+current deployment states and the IPv4/IPv6 administrative-port firewall were
+checked separately. File-provider rollback passed on both nodes with unchanged
+enforcement files and firewall rules. No new transport change was necessary:
+production was already HTTPS; the guarded Website-dev cutover was refused
+before any write. This closes active-origin security/traffic verification;
+Website-dev cutover remains explicitly deferred under the readiness condition.
+
+The failed earlier window is retained: at 15:58:59–16:00:15 UTC, Website public
+health, homepage and authenticated direct-origin health each returned two 503s
+and one connection timeout in ten samples. Unauthenticated origin requests
+were denied throughout. Subsequent rolling-web work landed the Website
+`GUNICORN_CMD_ARGS=--threads 4` capacity override in `e82fe3e`; its serving
+container now has that setting. See [the availability diagnosis and
+remediation](../../deployments/coolify-rolling-web.md). The fresh passing
+window above follows that deployed change; it does not erase the failed
+window or claim uninterrupted availability outside the measured interval.
 
 | Distribution | Origin ID | Transport | Viewer |
 | --- | --- | --- | --- |
