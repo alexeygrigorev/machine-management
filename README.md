@@ -21,6 +21,7 @@ keeps **thin SOP / reference pages that link here** — no duplicate heavy scrip
 | [`monitors/`](monitors/) | **Permanent continuous** healthcheck (pg-shared + pg-relay + HTTP apps, every 5 min, alerts dev@), cron, installer |
 | [`inventory/hosts.md`](inventory/hosts.md) | Contabo Coolify IPs, order refs, SSH aliases — **no secrets** |
 | [`contingency/replace-host.md`](contingency/replace-host.md) | Dead-host / replace stubs |
+| [`contingency/dr-status-t1143u.md`](contingency/dr-status-t1143u.md) | Fresh DR audit closure evidence and started implementation children |
 
 ## Quick start
 
