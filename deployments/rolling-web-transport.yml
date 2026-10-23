@@ -1,0 +1,7 @@
+# Install on both Contabo nodes at /data/coolify/proxy/dynamic/rolling-web.yml.
+# Native applications refer to rolling-web@file via their Docker labels.
+http:
+  serversTransports:
+    rolling-web:
+      forwardingTimeouts:
+        dialTimeout: 1s

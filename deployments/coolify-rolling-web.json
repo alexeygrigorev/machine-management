@@ -1,0 +1,69 @@
+{
+  "base": "http://169.58.119.163:8000",
+  "token_file": "/home/alexey/.secrets/coolify-api-169.58.119.163.token",
+  "applications": [
+    {
+      "name": "aishl",
+      "source_uuid": "mekt9kz74fvbixla6olinuma",
+      "ssh_host": "contabo-b",
+      "image": "ghcr.io/ai-shipping-labs/website",
+      "environment": {
+        "BOOT_MODE": "web",
+        "RUN_MIGRATIONS": "false"
+      },
+      "path": "/ping",
+      "port": "8000",
+      "app_uuid": "w3mxfr6wzjnpg3hqaw3y0obq",
+      "label_namespace": "w3mxfr6wzjnpg3hqaw3y0obqv2",
+      "domains": "https://aishippinglabs.com,https://www.aishippinglabs.com,https://prod.aishippinglabs.com,http://aisl-staging.169.58.124.141.sslip.io",
+      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8000/ping"
+    },
+    {
+      "name": "relay",
+      "source_uuid": "fjnzwomg8n42lztloo34just",
+      "ssh_host": "contabo-b",
+      "image": "ghcr.io/datatalksclub/relay",
+      "environment": {},
+      "path": "/health/ready",
+      "port": "8000",
+      "app_uuid": "oascx5kjeimc0ivpttag9z3q",
+      "label_namespace": "oascx5kjeimc0ivpttag9z3qv2",
+      "domains": "http://origin.relay.datatalks.club,http://relay.datatalks.club",
+      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8000/health/ready"
+    },
+    {
+      "name": "cmp",
+      "source_uuid": "avcfd5kwb7cj9r1tx4ygjs6v",
+      "ssh_host": "contabo-a",
+      "image": "ghcr.io/datatalksclub/course-management-platform",
+      "environment": {},
+      "path": "/api/health/",
+      "port": "80",
+      "app_uuid": "9gqubsq4lxubaxm27v1mtq9u",
+      "label_namespace": "9gqubsq4lxubaxm27v1mtq9uv2",
+      "domains": "https://courses.datatalks.club,http://cmp-staging.169.58.119.163.sslip.io",
+      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:80/api/health/"
+    }
+  ],
+  "native_settings": {
+    "build_pack": "dockerimage",
+    "health_check_enabled": true,
+    "health_check_type": "cmd",
+    "health_check_interval": 2,
+    "health_check_timeout": 3,
+    "health_check_retries": 60,
+    "health_check_start_period": 45,
+    "stop_grace_period": 45,
+    "is_consistent_container_name_enabled": false,
+    "ports_mappings": null,
+    "custom_docker_run_options": "",
+    "is_container_label_readonly_enabled": false
+  },
+  "website": {
+    "app_uuid": "wodajblzizrjunwme3ossav3",
+    "ssh_host": "contabo-a",
+    "label_namespace": "wodajblzizrjunwme3ossav3v2",
+    "build_pack": "dockerfile",
+    "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8000/health/ready"
+  }
+}

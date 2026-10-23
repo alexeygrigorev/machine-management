@@ -1,0 +1,2 @@
+# Hetzner user cron; keep existing source/promotion pollers and their locks.
+* * * * * flock -n /home/alexey/.local/state/coolify-rolling-web.lock /usr/bin/python3 /home/alexey/tmp/bin/coolify-rolling-web.py --config /home/alexey/.config/coolify-rolling-web.json --apply >> /home/alexey/.local/state/coolify-rolling-web.log 2>&1
