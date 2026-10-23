@@ -201,6 +201,12 @@ else
     # so extract into pgdata/pg_wal, NOT pgdata.
     if [[ "$BASEWAL" == *.gz ]]; then tar -xzf "$BASEWAL" -C "$PGDATA/pg_wal"; else tar -xf "$BASEWAL" -C "$PGDATA/pg_wal"; fi
   fi
+  # Read the base START segment BEFORE the chown handoff below (after chown
+  # our uid can no longer read pgdata). Needed for WAL continuity validation.
+  STARTSEG=""
+  if [[ -f "$PGDATA/backup_label" ]]; then
+    STARTSEG="$(grep -a -o '(file [0-9A-F]\{24\})' "$PGDATA/backup_label" | head -1 | grep -a -o '[0-9A-F]\{24\}')"
+  fi
   printf "restore_command = 'cp /wal/%%f %%p'\n" > "$PGDATA/postgresql.auto.conf.restore"
   cat "$PGDATA/postgresql.auto.conf.restore" >> "$PGDATA/postgresql.auto.conf"
   rm -f "$PGDATA/postgresql.auto.conf.restore"
@@ -256,13 +262,11 @@ else
     [[ "$STAGED" -gt 0 ]] \
       || fail "--wal-dir holds zero usable WAL segments: $WALDIR"
     log "staged $STAGED WAL file(s) from $WALDIR"
-    # Continuity check: sequence must start at the base backup_label START
+    # Continuity check: sequence must include the base backup_label START
     # segment and increment by 1 with no gaps (same timeline). A gap means
     # replay would stop mid-chain and promote a partial timeline — fail now.
-    STARTSEG=""
-    if [[ -f "$PGDATA/backup_label" ]]; then
-      STARTSEG="$(grep -a -o '(file [0-9A-F]\{24\})' "$PGDATA/backup_label" | head -1 | grep -a -o '[0-9A-F]\{24\}')"
-    fi
+    # (STARTSEG was captured before the chown handoff; pgdata is no longer
+    # readable by our uid here.)
     [[ -n "$STARTSEG" ]] \
       || fail "base backup_label missing START segment — cannot verify WAL continuity"
     log "base START segment: $STARTSEG"
