@@ -1,0 +1,35 @@
+# TEMPLATE (illustrative, one hostname) — placeholders only, never real values.
+# The installers generate the real per-host file with the same shape for each
+# origin hostname. `__VERIFY_A__` / `__VERIFY_B__` are the CF CustomHeader
+# values (one or two per hostname); `__SERVICE__` is the existing Coolify
+# docker service (`<name>@docker`, stable across redeploys).
+http:
+  middlewares:
+    origin-example-deny:
+      ipAllowList:
+        sourceRange:
+          - "127.0.0.1/32"
+  routers:
+    origin-example-allow-http:
+      rule: "Host(`origin.example.datatalks.club`) && (Header(`X-Origin-Verify`, `__VERIFY_A__`) || Header(`X-Origin-Verify`, `__VERIFY_B__`) || PathPrefix(`/.well-known/acme-challenge/`))"
+      service: "__SERVICE__"
+      entryPoints:
+        - http
+      priority: 200
+    origin-example-allow-tls:
+      rule: "Host(`origin.example.datatalks.club`) && (Header(`X-Origin-Verify`, `__VERIFY_A__`) || Header(`X-Origin-Verify`, `__VERIFY_B__`))"
+      service: "__SERVICE__"
+      entryPoints:
+        - https
+      priority: 200
+      tls:
+        certResolver: letsencrypt
+    origin-example-deny:
+      rule: "Host(`origin.example.datatalks.club`)"
+      service: "__SERVICE__"
+      middlewares:
+        - origin-example-deny
+      entryPoints:
+        - http
+        - https
+      priority: 150
