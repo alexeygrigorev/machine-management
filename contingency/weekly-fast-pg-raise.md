@@ -43,7 +43,7 @@ Example queries:
 dr_fast_pg_raise_rto_seconds
 dr_fast_pg_raise_last_success_unixtime
 dr_fast_pg_raise_db_bytes
-time() - dr_fast_pg_raise_last_success_unixtime
+time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[8d]))
 ```
 
 Note: VM default `search.latencyOffset` ≈ 30s — wait briefly after push before instant queries.
@@ -53,8 +53,20 @@ Note: VM default `search.latencyOffset` ≈ 30s — wait briefly after push befo
 `monitors/dr-raise-stale-check.sh` on **contabo-a**:
 
 - Fires if metric **missing** or age **> 691200 s (~8 days)**.
+- Searches samples over `STALE_SECONDS` (`[691200s]`, equivalent to `[8d]` by
+  default). Weekly push metrics disappear from instant-query lookback between
+  runs; the range keeps successes visible throughout the existing stale window.
 - Email **only** `dev@dtcdev.click` via existing msmtp → SES (`noreply@datatalks.club`).
 - Deduped to at most once per day while still failing; sends RECOVERED on clear.
+
+Read-only proof on contabo-a (queries real VM; sends no mail and changes no state):
+
+```bash
+sudo DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh
+```
+
+Exit 0 means fresh; exit 1 still means missing/unreadable or stale. Regression
+checks: `bash monitors/tests/test-dr-raise-stale-check.sh`.
 
 ## Install
 

@@ -7,6 +7,7 @@
 #
 # Prefer running on contabo-a (local VM + existing msmtp SES path).
 # Cron: daily 09:00 Europe/Berlin (see dr-raise-stale-check.cron).
+# DRY_RUN=1 queries and logs only; no email or state changes.
 set -euo pipefail
 
 ENV_FILE="${DR_RAISE_STALE_ENV_FILE:-/etc/dr-raise-stale-check.env}"
@@ -23,7 +24,10 @@ STALE_SECONDS="${STALE_SECONDS:-691200}"  # 8 days
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 STATE_DIR="${STATE_DIR:-/var/lib/dr-raise-stale-check}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-1440}"  # once/day while still stale
-mkdir -p "$STATE_DIR"
+DRY_RUN="${DRY_RUN:-0}"
+if [[ "$DRY_RUN" != 1 ]]; then
+  mkdir -p "$STATE_DIR"
+fi
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 NOW="$(date +%s)"
@@ -35,6 +39,10 @@ query_vm() {
 
 send_alert() {
   local subject="$1" body="$2"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    log "DRY_RUN would alert: ${subject} (no email/state changes)"
+    return 0
+  fi
   local state_file="${STATE_DIR}/stale.state"
   local last_alert=0 last_status=""
   if [[ -f "$state_file" ]]; then
@@ -83,8 +91,10 @@ send_alert() {
     "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" >"$state_file"
 }
 
-# Prefer PromQL age; fall back to absent metric.
-AGE_JSON="$(query_vm "time() - max(dr_fast_pg_raise_last_success_unixtime)")"
+# Weekly push samples disappear from instant lookback between runs. Search the
+# full stale window (8d by default), then take the newest success across hosts.
+# This also keeps a 7-8 day old success valid until the existing 8d deadline.
+AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[${STALE_SECONDS}s]))")"
 AGE="$(python3 - <<'PY' "$AGE_JSON" 2>/dev/null || true
 import json,sys
 try:
@@ -122,6 +132,10 @@ Alert destination: ${ALERT_TO}."
 fi
 
 log "OK last_success age=${AGE_INT}s (threshold ${STALE_SECONDS})"
+if [[ "$DRY_RUN" == 1 ]]; then
+  log "DRY_RUN no email/state changes"
+  exit 0
+fi
 state_file="${STATE_DIR}/stale.state"
 last_status=""
 if [[ -f "$state_file" ]]; then
