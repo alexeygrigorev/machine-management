@@ -21,10 +21,13 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$HERE/contabo-deadman.sh"
+SCRIPT_SRC="$HERE/contabo-deadman.sh"
+# Stable runtime path (worktrees come and go; the pager must not die with one).
+SCRIPT="/usr/local/sbin/contabo-deadman.sh"
 FAIL=0
 
-echo "== syntax =="
+echo "== install script to stable path =="
+sudo install -m 0755 "$SCRIPT_SRC" "$SCRIPT"
 bash -n "$SCRIPT" && echo SYNTAX_OK
 
 echo "== ssh reachability (BatchMode) =="
@@ -54,8 +57,15 @@ fi
 
 echo "== user cron (every 5 min) =="
 CRON_LINE="*/5 * * * * $SCRIPT >> $HOME/.local/state/contabo-deadman/cron.log 2>&1"
-if crontab -l 2>/dev/null | grep -qF "$SCRIPT"; then
-  echo "cron already installed"
+if crontab -l 2>/dev/null | grep -qF "contabo-deadman.sh"; then
+  if crontab -l 2>/dev/null | grep -qF "$SCRIPT"; then
+    echo "cron already installed"
+  else
+    echo "WARN: an older contabo-deadman.sh cron points elsewhere:"
+    crontab -l 2>/dev/null | grep -F "contabo-deadman.sh"
+    echo "remove the stale line with 'crontab -e', then re-run this installer"
+    FAIL=1
+  fi
 else
   (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
   echo "cron installed: $CRON_LINE"
