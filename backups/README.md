@@ -128,24 +128,47 @@ Europe/Berlin (`/etc/cron.d/coolify-cp-backup`):
 
 ```
 s3://<BACKUP_BUCKET>/coolify/control-plane/<contabo-a-163|contabo-b-141>/YYYY/MM/DD/coolify-db-<host>-<STAMP>.dump.gz
-s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/YYYY/MM/DD/coolify-cp-bundle-<host>-<STAMP>.tar.gz.gpg
+s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/YYYY/MM/DD/coolify-deploy-inputs-<host>-<STAMP>.json   (sanitized, plaintext)
+s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/YYYY/MM/DD/coolify-cp-bundle-<host>-<STAMP>.tar.gz.gpg  (gpg-AES256)
 ```
 
-The bundle holds `coolify.env` (+ `.env.production`) and `ssh-keys/`
-from `/data/coolify/`, gpg-AES256-encrypted; the passphrase lives only in
-`/etc/coolify-cp-backup.pass` (600) on the node and
-`~/tmp/secrets/coolify-cp-backup.pass` on operator boxes. Second off-host
-copy: `~/storagebox/backups/coolify-cp/<host>/YYYY/MM/DD/`. S3 retention:
-30 d lifecycle (`coolify-control-plane-30d`); local copies 7 d.
+The **manifest** (`coolify-deploy-inputs.sh`, sanitized — fingerprints, never
+secret values) records Coolify resource metadata (apps/services/postgres/
+servers + counts), git pins, running-image tag→digest pairs (e.g. website =
+exact `dtc-website` commit SHA + `sha256:` digest, not floating `main`),
+compose fingerprints, and a per-host config checklist. It is plaintext so
+rebuild planning never needs the passphrase.
 
-Restore pointers (operator box, secrets stay under `~/tmp/`):
+The **encrypted bundle** holds `coolify.env` + `.env.production`,
+`ssh-keys/`, `deploy-inputs.json` copy, and the host-reconstruction inputs:
+`host/wg/` (wg0.conf + keys), `host/bridge-compose.yml` (or `.ABSENT`
+marker — data node only), `host/firewall-{ufw,iptables-v4,iptables-v6}.txt`
+(live rulesets), `host/docker-10-wg.conf`, `host/sysctl-99-wg-bind.conf`,
+`host/docker-daemon.json`, `host/systemd-units.txt`,
+`host/proxy-compose.yml` + `host/proxy-dynamic/` + `host/acme.json`
+(reconstruction copy; recurring plaintext TLS copies stay with the
+backup-copies sibling schedule — no duplicate schedule here).
+
+The passphrase lives only in `/etc/coolify-cp-backup.pass` (600) on the
+nodes and the operator box (`~/tmp/secrets/` + `~/.secrets/`); human-held
+second escrow (Drive doc / password manager) is an explicit open item for
+Alexey. S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
+copies 7 d.
+
+Isolated restore drill (operator box only, never on a CP host —
+`contingency/coolify-cp-restore.sh` refuses live `coolify-db` / `/data/coolify`,
+loopback-only throwaway Postgres, destroys container+volume+workdir after):
 
 ```bash
-aws s3 cp s3://<BACKUP_BUCKET>/coolify/control-plane/<host>/<date>/coolify-db-<host>-<STAMP>.dump.gz /tmp/cp.dump.gz
-gunzip -c /tmp/cp.dump.gz | pg_restore --list | head   # verify, no data printed
-gpg --batch --pinentry-mode loopback --passphrase-file ~/tmp/secrets/coolify-cp-backup.pass \
-  -d coolify-cp-bundle-<host>-<STAMP>.tar.gz.gpg | tar tz   # filenames only
+./contingency/coolify-cp-restore.sh --host-id contabo-a-163 [--date 2026/10/23] [--port 55439]
+# → downloads 3 objects, verifies TOC + bundle checklist, restores into
+#   throwaway postgres:15-alpine (pinned digest), cross-checks metadata
+#   counts vs manifest, prints measured phases + RECOVERY_OK
 ```
+
+Proven 2026-10-23: `contabo-a-163` RECOVERY_OK in 14 s (1 app, 4 services,
+3 PG, 2 servers, auto_update=f, manifest MATCH); `contabo-b-141`
+RECOVERY_OK in 13 s (empty CP + bridge=present, MATCH).
 
 Coolify auto-update is **OFF** on both CP hosts
 (`instance_settings.is_auto_update_enabled=false`); upgrades are manual.

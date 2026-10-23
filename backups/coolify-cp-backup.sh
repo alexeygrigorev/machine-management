@@ -8,13 +8,18 @@
 # What it backs up:
 #   1. coolify-db (Postgres 15, db=coolify user=coolify): pg_dump custom
 #      format (-Fc) via `docker exec coolify-db`, gzipped.
-#   2. Control-plane bundle: /data/coolify/source/.env (+ .env.production)
-#      + /data/coolify/ssh/keys/* (Coolify-managed SSH private keys),
-#      tarred + gzipped + gpg symmetric-encrypted (AES256) with a host-local
-#      passphrase file. Decrypt needs the passphrase (operator secrets only).
+#   2. Sanitized deploy-inputs manifest (no secret values): Coolify resource
+#      metadata, git pins, image digests, host-config checklist — uploaded as
+#      PLAINTEXT JSON for rebuild planning without the passphrase.
+#   3. Encrypted recovery bundle (gpg AES256, host-local passphrase file):
+#      /data/coolify/source/.env (+ .env.production), /data/coolify/ssh/keys,
+#      WireGuard config+keys, WG bridge compose (or ABSENT marker), live
+#      firewall rulesets (ufw + iptables DOCKER-USER), docker/systemd host
+#      config, proxy compose + dynamic config + acme.json, manifest copy.
 #
 # S3 layout (canonical):
 #   s3://<S3_BUCKET>/coolify/control-plane/<host-id>/YYYY/MM/DD/coolify-db-<host-id>-<STAMP>.dump.gz
+#   s3://<S3_BUCKET>/coolify/control-plane/<host-id>/YYYY/MM/DD/coolify-deploy-inputs-<host-id>-<STAMP>.json
 #   s3://<S3_BUCKET>/coolify/control-plane/<host-id>/YYYY/MM/DD/coolify-cp-bundle-<host-id>-<STAMP>.tar.gz.gpg
 #
 # Secrets: NEVER in git. S3 keys come from /etc/coolify-cp-backup.env
@@ -51,6 +56,15 @@ COOLIFY_ENV_SRC="${COOLIFY_ENV_SRC:-/data/coolify/source/.env}"
 COOLIFY_ENV_PROD="${COOLIFY_ENV_PROD:-/data/coolify/source/.env.production}"
 SSH_KEYS_DIR="${SSH_KEYS_DIR:-/data/coolify/ssh/keys}"
 GPG_PASSPHRASE_FILE="${GPG_PASSPHRASE_FILE:-/etc/coolify-cp-backup.pass}"
+
+# ---- host-reconstruction inputs (t1143u: WG/bridge/firewall/proxy/TLS) ----
+WG_DIR="${WG_DIR:-/etc/wireguard}"
+BRIDGE_COMPOSE="${BRIDGE_COMPOSE:-/opt/pg-shared-wg-bridge/docker-compose.yml}"
+PROXY_DIR="${PROXY_DIR:-/data/coolify/proxy}"
+DOCKER_WG_DROPIN="${DOCKER_WG_DROPIN:-/etc/systemd/system/docker.service.d/10-wg.conf}"
+SYSCTL_WG_BIND="${SYSCTL_WG_BIND:-/etc/sysctl.d/99-wg-bind.conf}"
+DOCKER_DAEMON_JSON="${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+MANIFEST_GEN="${CP_MANIFEST_GEN:-/usr/local/sbin/coolify-deploy-inputs.sh}"
 
 S3_BUCKET="${S3_BUCKET:-}"
 S3_PREFIX="${S3_PREFIX:-coolify/control-plane}"
@@ -103,7 +117,25 @@ else
   log "ERROR: pg_dump failed coolify-db host=${CP_HOST_ID}: $(tail -3 "${DB_OUT}.err" 2>/dev/null)"; rm -f "$DB_OUT"; FAILED=1
 fi
 
-# ---- 2) encrypted .env + SSH keys bundle ----
+# ---- 2) deploy-inputs manifest (sanitized: fingerprints, never secrets) ----
+MANIFEST_OUT="${DUMP_DIR}/coolify-deploy-inputs-${CP_HOST_ID}-${STAMP}.json"
+log "manifest start host=${CP_HOST_ID}"
+if [[ -x "$MANIFEST_GEN" ]]; then
+  if CP_HOST_ID="$CP_HOST_ID" STAMP="$STAMP" "$MANIFEST_GEN" "$MANIFEST_OUT" >>"$DUMP_DIR/manifest-gen.log" 2>&1; then
+    MANIFEST_KEY="${S3_PREFIX}/${CP_HOST_ID}/${DAY_PATH}/coolify-deploy-inputs-${CP_HOST_ID}-${STAMP}.json"
+    if s3_put "$MANIFEST_OUT" "$MANIFEST_KEY"; then
+      log "manifest ok host=${CP_HOST_ID} s3=s3://${S3_BUCKET}/${MANIFEST_KEY}"
+    else
+      log "ERROR: S3 upload failed manifest host=${CP_HOST_ID}"; FAILED=1
+    fi
+  else
+    log "ERROR: manifest generator failed host=${CP_HOST_ID} (see $DUMP_DIR/manifest-gen.log)"; FAILED=1
+  fi
+else
+  log "ERROR: manifest generator missing/not executable: $MANIFEST_GEN"; FAILED=1
+fi
+
+# ---- 3) encrypted bundle: .env + SSH keys + host-reconstruction inputs ----
 BUNDLE_PLAIN="${DUMP_DIR}/coolify-cp-bundle-${CP_HOST_ID}-${STAMP}.tar.gz"
 BUNDLE_ENC="${BUNDLE_PLAIN}.gpg"
 log "bundle start host=${CP_HOST_ID}"
@@ -119,8 +151,54 @@ cp -a "$SSH_KEYS_DIR"/ssh_key@* "$STAGE/ssh-keys/" 2>/dev/null || true
 rm -f "$STAGE"/ssh-keys/*.lock 2>/dev/null || true
 KEY_COUNT="$(find "$STAGE/ssh-keys" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
 [[ "$KEY_COUNT" -ge 1 ]] || log "WARN: no SSH keys staged from $SSH_KEYS_DIR (bundle .env only)"
-tar -czf "$BUNDLE_PLAIN" -C "$STAGE" coolify.env coolify.env.production ssh-keys 2>/dev/null \
-  || tar -czf "$BUNDLE_PLAIN" -C "$STAGE" coolify.env ssh-keys \
+
+# ---- host-reconstruction inputs (all land inside the ENCRYPTED bundle) ----
+mkdir -p "$STAGE/host"
+# WireGuard identity + peer config (private keys OK: bundle is gpg-encrypted).
+if [[ -d "$WG_DIR" ]]; then
+  mkdir -p "$STAGE/host/wg"
+  cp -a "$WG_DIR"/wg0.conf "$STAGE/host/wg/" 2>/dev/null || log "WARN: cannot stage $WG_DIR/wg0.conf"
+  cp -a "$WG_DIR"/*.key "$WG_DIR"/*.pub "$STAGE/host/wg/" 2>/dev/null || true
+else
+  log "WARN: WG dir missing: $WG_DIR"
+fi
+# WG bridge compose (present on data node only; absence is recorded).
+if [[ -f "$BRIDGE_COMPOSE" ]]; then
+  cp -a "$BRIDGE_COMPOSE" "$STAGE/host/bridge-compose.yml" 2>/dev/null || log "WARN: cannot stage $BRIDGE_COMPOSE"
+else
+  printf 'absent on %s\n' "$CP_HOST_ID" >"$STAGE/host/bridge-compose.ABSENT"
+fi
+# Firewall: live rulesets (no secrets — infra IPs/ports only).
+(ufw status numbered 2>/dev/null || sudo -n ufw status numbered 2>/dev/null || echo "ufw-unavailable") >"$STAGE/host/firewall-ufw.txt"
+(iptables -S DOCKER-USER 2>/dev/null || sudo -n iptables -S DOCKER-USER 2>/dev/null || echo "iptables-unavailable") >"$STAGE/host/firewall-iptables-v4.txt"
+(ip6tables -S DOCKER-USER 2>/dev/null || sudo -n ip6tables -S DOCKER-USER 2>/dev/null || echo "ip6tables-unavailable") >"$STAGE/host/firewall-iptables-v6.txt"
+# Docker/systemd host config (canonical names for rebuild tooling).
+[[ -f "$DOCKER_WG_DROPIN" ]] && cp -a "$DOCKER_WG_DROPIN" "$STAGE/host/docker-10-wg.conf" 2>/dev/null || log "WARN: cannot stage $DOCKER_WG_DROPIN"
+[[ -f "$SYSCTL_WG_BIND" ]] && cp -a "$SYSCTL_WG_BIND" "$STAGE/host/sysctl-99-wg-bind.conf" 2>/dev/null || log "WARN: cannot stage $SYSCTL_WG_BIND"
+[[ -f "$DOCKER_DAEMON_JSON" ]] && cp -a "$DOCKER_DAEMON_JSON" "$STAGE/host/docker-daemon.json" 2>/dev/null || log "WARN: cannot stage $DOCKER_DAEMON_JSON"
+{
+  for u in pg-shared-wg-bridge edge-docker-user-restore docker wg-quick@wg0; do
+    e="$(systemctl is-enabled "$u" 2>/dev/null)"; e="${e:-unknown}"
+    a="$(systemctl is-active "$u" 2>/dev/null)"; a="${a:-unknown}"
+    printf '%s:enabled=%s:active=%s\n' "$u" "$e" "$a"
+  done
+} >"$STAGE/host/systemd-units.txt" 2>/dev/null || echo "systemd-unavailable" >"$STAGE/host/systemd-units.txt"
+# Proxy: traefik static + dynamic config plus ACME state (private keys OK:
+# encrypted bundle; recurring plaintext TLS copies stay with the
+# backup-copies sibling schedule — this copy is for host reconstruction).
+if [[ -d "$PROXY_DIR" ]]; then
+  mkdir -p "$STAGE/host/proxy-dynamic"
+  cp -a "$PROXY_DIR"/docker-compose.yml "$STAGE/host/proxy-compose.yml" 2>/dev/null || true
+  cp -a "$PROXY_DIR"/dynamic/. "$STAGE/host/proxy-dynamic/" 2>/dev/null || true
+  cp -a "$PROXY_DIR"/acme.json "$STAGE/host/acme.json" 2>/dev/null || log "WARN: cannot stage $PROXY_DIR/acme.json"
+else
+  log "WARN: proxy dir missing: $PROXY_DIR"
+fi
+# Sanitized deploy-inputs manifest (copy inside the bundle too).
+[[ -f "$MANIFEST_OUT" ]] && cp -a "$MANIFEST_OUT" "$STAGE/deploy-inputs.json" 2>/dev/null || true
+tar -czf "$BUNDLE_PLAIN" -C "$STAGE" coolify.env coolify.env.production ssh-keys host deploy-inputs.json 2>/dev/null \
+  || tar -czf "$BUNDLE_PLAIN" -C "$STAGE" coolify.env coolify.env.production ssh-keys host 2>/dev/null \
+  || tar -czf "$BUNDLE_PLAIN" -C "$STAGE" coolify.env ssh-keys host 2>/dev/null \
   || { log "ERROR: tar bundle failed"; FAILED=1; }
 if [[ -f "$BUNDLE_PLAIN" ]]; then
   if gpg --batch --yes --pinentry-mode loopback \
@@ -142,7 +220,7 @@ fi
 rm -rf "$STAGE"; trap - EXIT
 
 # Local prune: keep newest LOCAL_KEEP_DAYS of local copies only.
-find "$DUMP_DIR" -maxdepth 1 \( -name '*.dump.gz' -o -name '*.tar.gz.gpg' \) -mtime "+${LOCAL_KEEP_DAYS}" -delete 2>/dev/null || true
+find "$DUMP_DIR" -maxdepth 1 \( -name '*.dump.gz' -o -name '*.tar.gz.gpg' -o -name 'coolify-deploy-inputs-*.json' \) -mtime "+${LOCAL_KEEP_DAYS}" -delete 2>/dev/null || true
 
 if [[ "$FAILED" -ne 0 ]]; then
   fail "one or more CP backup steps failed"

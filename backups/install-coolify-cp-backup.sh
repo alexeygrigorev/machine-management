@@ -26,9 +26,10 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
 
-echo "== copy CP backup script to ${HOST} =="
-scp "${HERE}/coolify-cp-backup.sh" "${HOST}:/tmp/coolify-cp-backup.sh"
+echo "== copy CP backup script + manifest generator to ${HOST} =="
+scp "${HERE}/coolify-cp-backup.sh" "${HERE}/coolify-deploy-inputs.sh" "${HOST}:/tmp/"
 "${SSH[@]}" "$HOST" sudo install -m 0755 /tmp/coolify-cp-backup.sh /usr/local/sbin/coolify-cp-backup.sh
+"${SSH[@]}" "$HOST" sudo install -m 0755 /tmp/coolify-deploy-inputs.sh /usr/local/sbin/coolify-deploy-inputs.sh
 
 echo "== env file (placeholders only; never overwritten) =="
 scp "${HERE}/coolify-cp-backup.env.example" "${HOST}:/tmp/coolify-cp-backup.env.example"
@@ -42,7 +43,7 @@ else
   echo "keep existing /etc/coolify-cp-backup.env (not overwritten)"
 fi
 mkdir -p /var/backups/coolify-cp
-for bin in aws gpg pg_dump docker; do
+for bin in aws gpg pg_dump docker python3 tar; do
   command -v "$bin" >/dev/null || echo "WARN: $bin missing on node"
 done
 EOF
@@ -52,10 +53,13 @@ scp "${HERE}/coolify-cp-backup.cron" "${HOST}:/tmp/coolify-cp-backup.cron"
 "${SSH[@]}" "$HOST" sudo install -m 0644 /tmp/coolify-cp-backup.cron /etc/cron.d/coolify-cp-backup
 
 echo "== verify =="
-"${SSH[@]}" "$HOST" 'sudo bash -n /usr/local/sbin/coolify-cp-backup.sh && echo SYNTAX_OK; cat /etc/cron.d/coolify-cp-backup'
+"${SSH[@]}" "$HOST" 'sudo bash -n /usr/local/sbin/coolify-cp-backup.sh && sudo bash -n /usr/local/sbin/coolify-deploy-inputs.sh && echo SYNTAX_OK; cat /etc/cron.d/coolify-cp-backup'
 echo
 echo "NEXT on ${HOST}:"
 echo "  1. sudo nano /etc/coolify-cp-backup.env  (CP_HOST_ID + S3 keys, chmod 600)"
 echo "  2. place /etc/coolify-cp-backup.pass     (GPG passphrase, chmod 600, from operator ~/tmp/secrets/coolify-cp-backup.pass)"
 echo "  3. ssh ${HOST} 'sudo /usr/local/sbin/coolify-cp-backup.sh'  (manual first run)"
 echo "  4. confirm S3 objects under s3://<bucket>/coolify/control-plane/"
+echo "  5. ESCROW (human): keep a second copy of the GPG passphrase OFF this"
+echo "     operator box + off the CP hosts (private Drive credentials doc or"
+echo "     password manager). Host /etc copies are reconstruction INPUT, not escrow."
