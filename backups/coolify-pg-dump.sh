@@ -21,6 +21,11 @@
 # Exit code: 0 only if every configured database dumped AND uploaded.
 set -euo pipefail
 
+# Private PII dumps must never be world-readable, even briefly: newly created
+# files land 600 regardless of the caller's umask (existing files are
+# tightened separately, non-destructively).
+umask 077
+
 ENV_FILE="${COOLIFY_ENV_FILE:-${COOLIFY_PGDUMP_ENV_FILE:-/etc/coolify-pg-dump.env}}"
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -41,8 +46,8 @@ DAY_PATH="$(TZ=Europe/Berlin date '+%Y/%m/%d')"
 
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
 PG_RELAY_CONTAINER="${PG_RELAY_CONTAINER:-}"
-PG_SHARED_DBS="${PG_SHARED_DBS:-}"     # space-separated, e.g. "cmp aisl website"
-PG_RELAY_DB="${PG_RELAY_DB:-}"         # single db name on pg-relay
+PG_SHARED_DBS="${PG_SHARED_DBS:-}"     # space-separated, e.g. "cmp aisl website biz_metrics"
+PG_RELAY_DB="${PG_RELAY_DB:-}"         # space-separated, e.g. "relay relay_dev"
 PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"
 PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"
 # TCP fallback (only used when *_CONTAINER is empty):
@@ -113,10 +118,10 @@ for db in $PG_SHARED_DBS; do
     "$PGHOST_SHARED" "$PGPORT_SHARED" "$db" || FAILED=1
 done
 
-if [[ -n "$PG_RELAY_DB" ]]; then
+for db in $PG_RELAY_DB; do
   dump_one "pg-relay" "$PG_RELAY_CONTAINER" "$PGUSER_RELAY" \
-    "$PGHOST_RELAY" "$PGPORT_RELAY" "$PG_RELAY_DB" || FAILED=1
-fi
+    "$PGHOST_RELAY" "$PGPORT_RELAY" "$db" || FAILED=1
+done
 
 # Local prune (t1146u): hot 1–2d only; also keep newest LOCAL_KEEP_COUNT per DB stem.
 LOCAL_KEEP_COUNT="${LOCAL_KEEP_COUNT:-2}"
@@ -132,7 +137,7 @@ fi
 if [[ "$S3_PRUNE_ENABLED" == "1" ]]; then
   log "S3 prune enabled: deleting objects older than ${S3_RETENTION_DAYS}d under s3://${S3_BUCKET}/${S3_PREFIX}/"
   CUTOFF="$(date -u -d "${S3_RETENTION_DAYS} days ago" '+%Y-%m-%dT%H:%M:%SZ')"
-  for stack_db in $(for db in $PG_SHARED_DBS; do echo "pg-shared/${db}"; done; [[ -n "$PG_RELAY_DB" ]] && echo "pg-relay/${PG_RELAY_DB}"); do
+  for stack_db in $(for db in $PG_SHARED_DBS; do echo "pg-shared/${db}"; done; for db in $PG_RELAY_DB; do echo "pg-relay/${db}"; done); do
     if [[ -n "$S3_ENDPOINT_URL" ]]; then
       EP=(--endpoint-url "$S3_ENDPOINT_URL")
     else

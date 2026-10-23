@@ -1,52 +1,36 @@
 {
   "Rules": [
     {
-      "ID": "coolify-postgres-14d",
+      "ID": "coolify-postgres-30d",
       "Status": "Enabled",
-      "Filter": {
-        "Prefix": "coolify/postgres/"
-      },
-      "Expiration": {
-        "Days": 14
-      },
-      "NoncurrentVersionExpiration": {
-        "NoncurrentDays": 7
-      },
-      "AbortIncompleteMultipartUpload": {
-        "DaysAfterInitiation": 7
-      }
+      "Filter": { "Prefix": "coolify/postgres/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
+      "ID": "coolify-native-backups-30d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "data/coolify/backups/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     },
     {
       "ID": "coolify-obs-14d",
       "Status": "Enabled",
-      "Filter": {
-        "Prefix": "coolify/obs/"
-      },
-      "Expiration": {
-        "Days": 14
-      },
-      "NoncurrentVersionExpiration": {
-        "NoncurrentDays": 7
-      },
-      "AbortIncompleteMultipartUpload": {
-        "DaysAfterInitiation": 7
-      }
+      "Filter": { "Prefix": "coolify/obs/" },
+      "Expiration": { "Days": 14 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     },
     {
       "ID": "coolify-control-plane-30d",
       "Status": "Enabled",
-      "Filter": {
-        "Prefix": "coolify/control-plane/"
-      },
-      "Expiration": {
-        "Days": 30
-      },
-      "NoncurrentVersionExpiration": {
-        "NoncurrentDays": 7
-      },
-      "AbortIncompleteMultipartUpload": {
-        "DaysAfterInitiation": 7
-      }
+      "Filter": { "Prefix": "coolify/control-plane/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     }
   ]
 }

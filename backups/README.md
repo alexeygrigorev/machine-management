@@ -18,11 +18,17 @@ panel Auto-Backup (out of scope for DR).
 
 | Stack | Databases | Container / port |
 |-------|-----------|------------------|
-| **pg-shared** | `cmp`, `aisl`, `website` (one instance, separate DB names) | `PG_SHARED_CONTAINER` (or TCP `PGHOST_SHARED:PGPORT_SHARED`) |
-| **pg-relay** | `relay` (own instance, never shared) | `PG_RELAY_CONTAINER` (or TCP `PGHOST_RELAY:PGPORT_RELAY`) |
+| **pg-shared** | `cmp`, `aisl`, `website`, `biz_metrics` (one instance, separate DB names) | `PG_SHARED_CONTAINER` (or TCP `PGHOST_SHARED:PGPORT_SHARED`) |
+| **pg-relay** | `relay`, `relay_dev` (own instance, never shared) | `PG_RELAY_CONTAINER` (or TCP `PGHOST_RELAY:PGPORT_RELAY`) |
 
 Exact DB/container names are set in `/etc/coolify-pg-dump.env` on the node —
-this repo keeps **placeholders only**.
+this repo keeps **placeholders only**. Coverage 2026-10-23: all nonempty
+in-scope DBs are scheduled. Deliberately NOT scheduled: `cmp_dev`,
+`aisl_dev`, `website_dev` (0 public tables each — empty), `*_seed_empty_*`
+(one-off 22 Oct seeds), `postgres` system DBs. Native Coolify schedules
+(`databases_to_backup`) still cover prod `cmp,aisl,website` + `relay`;
+the dupe empty-DB `dtc-postgres` schedule `id=1` was disabled 2026-10-23
+(row kept, reversible; `id=2` keeps covering empty `dtc`).
 
 ## S3 layout (canonical pattern)
 
@@ -36,10 +42,13 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 
 | Location | Policy |
 |----------|--------|
-| S3 `coolify/postgres/` | **14 days** via bucket lifecycle (`s3-lifecycle.example.json`, obs-aligned t1146u) |
+| S3 `coolify/postgres/` | **30 days** via bucket lifecycle (`s3-lifecycle.example.json`, t1143u) |
+| S3 `data/coolify/backups/` (native Coolify schedules) | **30 days** backstop via bucket lifecycle; Coolify itself keeps newest **30** per schedule (`database_backup_retention_amount_s3`) |
 | S3 `coolify/obs/` | **14 days** (VM/VL day archives — see coolify-observability `docs/retention-s3.md`) |
+| S3 `coolify/control-plane/` | **30 days** via bucket lifecycle |
 | Local node (pg dumps) | newest **1–2 days** (`LOCAL_KEEP_DAYS=2` + `LOCAL_KEEP_COUNT`), pruned by the script |
-| Storagebox off-host copies | newest **14–30 days** (mirror of S3) via `prune-storagebox.sh` (dry-run default; `--apply` deletes) |
+| Storagebox S3 mirror (`s3/…`) | newest **30 days**, age-pruned by `prune-storagebox.sh --apply` inside the daily sync (no `--delete` on sync) |
+| Storagebox legacy per-area + `edge-tls/` | newest **30 days** via `prune-storagebox.sh` (dry-run default; `--apply` deletes) |
 | In-script S3 prune | backstop only, default **OFF** (`S3_PRUNE_ENABLED=0`) |
 
 
@@ -81,6 +90,29 @@ Real values live **only** in:
    that fresh `YYYY/MM/DD` objects exist for **every** database.
 6. Run a restore drill (disposable DB) before DNS cutover — see below.
 
+## Off-Contabo Storagebox mirror (Hetzner, live since 2026-10-23)
+
+S3 alone is single-region. `storagebox-sync.sh` runs on the Hetzner operator
+box daily at `30 4 * * *` Europe/Berlin (`/etc/cron.d/storagebox-backup-sync`,
+after the 02:30 pg dumps and 03:30 CP bundles) and:
+
+1. `aws s3 sync` (no `--delete`) `coolify/postgres/` + `coolify/control-plane/`
+   → `~/storagebox/backups/s3/…` (AWS creds via `AWS_PROFILE`, default
+   `main-temp` — read-only use, no rotation);
+2. `edge/acme-backup.sh` — fetches Traefik `acme.json` from both Contabo
+   hosts, stores GPG-symmetric-encrypted (`~/.secrets/acme-backup-gpg.pass`,
+   600, escrowed offline) decrypt-verified copies under
+   `~/storagebox/backups/edge-tls/YYYY/MM/DD/`;
+3. `prune-storagebox.sh --apply` (30d) over the mirror + `edge-tls/` +
+   legacy per-area copies;
+4. tightens the whole tree to 600 files / 700 dirs (PII), writes
+   `s3/.last-sync`.
+
+Install: `sudo ./backups/install-storagebox-sync.sh` (copies 3 scripts to
+`/usr/local/sbin`, never touches creds). Proof is the log tail
+(`ALL_DONE s3-mirror + edge-tls + prune`) + `s3/.last-sync`, not just the
+installed cron — see the t1143u backup-copies report for a verified run.
+
 ## Restore pointers
 
 Full procedure: contingency SOP § DB restore (DataTalksClub/dataops-knowledge →
@@ -111,7 +143,7 @@ production restore so the next dump matches the restored state.
 | `coolify-cp-backup.cron` | `30 3 * * *` Europe/Berlin entry (one hour after app-DB dumps) |
 | `coolify-cp-backup.env.example` | placeholders for `/etc/coolify-cp-backup.env` (+ `/etc/coolify-cp-backup.pass`) |
 | `install-coolify-cp-backup.sh` | operator-box installer for the CP job (per CP host, never overwrites env) |
-| `s3-lifecycle.example.json` | 30-day S3 retention rules for `coolify/postgres/`, `coolify/obs/` (14d), `coolify/control-plane/` |
+| `s3-lifecycle.example.json` | 30-day S3 retention rules for `coolify/postgres/`, `data/coolify/backups/` (native), `coolify/control-plane/`; 14d for `coolify/obs/` |
 | `coolify-pg-basebackup.sh` | weekly `pg_basebackup -Ft -z -X stream` → S3 `…/<stack>/base/…` (no restart needed) |
 | `coolify-pg-basebackup.cron` | `0 3 * * 0` Europe/Berlin entry (same env file as dumps) |
 | `coolify-wal-shipper.sh` | per-minute host cron: spool → gzip → S3 `…/<stack>/wal/…` with read-back |
@@ -119,6 +151,9 @@ production restore so the next dump matches the restored state.
 | `coolify-wal-archive.sh` | SUPERSEDED by the shipper (kept for reference): direct-upload helper that cannot run inside the Coolify PG container (no aws binary, no mounts) |
 | `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
 | `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
+| `storagebox-sync.sh` | **Hetzner** daily job: S3 `coolify/postgres/` + `coolify/control-plane/` → `~/storagebox/backups/s3/…`, then `edge/acme-backup.sh`, then `prune-storagebox.sh --apply`; tightens perms; writes `s3/.last-sync` |
+| `storagebox-sync.cron` | `30 4 * * *` Europe/Berlin entry (one hour after CP bundles) |
+| `install-storagebox-sync.sh` | Hetzner installer (copies 3 scripts to `/usr/local/sbin`, installs cron) |
 
 ## Control-plane backups (Coolify CP itself — live since 2026-10-22)
 

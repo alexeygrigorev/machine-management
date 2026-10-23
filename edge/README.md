@@ -11,7 +11,7 @@ what can be closed without a traffic flip and proves the rest on canary routes.
 | cAdvisor `:9101` public leak | no listener (nothing to bind) | rebound to `10.100.0.2` + `127.0.0.1` (`cadvisor-bind.sh`) |
 | Coolify `:8000`, Soketi `:6001/:6002`, cAdvisor `:9101` via DOCKER-USER | allowlist + LOG/DROP (`docker-user-fw.sh`) | same |
 | `X-Origin-Verify` enforcement | canary proof only (`install-origin-verify.sh`) | canary proof only |
-| `acme.json` off-host backup | `acme-backup.sh` → `/root` + storagebox | same |
+| `acme.json` off-host backup | `acme-backup.sh` → GPG-encrypted + decrypt-verified storagebox `edge-tls/` (daily via `storagebox-sync`) | same |
 | Origin TLS for `origin.website` | GAP (no LE cert; needs Coolify FQDN add + deploy — follow-up, documented in report) | OK (`origin.relay` LE cert present) |
 
 ## Run from operator box (Hetzner RMTHZ), never develop on Contabo

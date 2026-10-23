@@ -2,9 +2,9 @@
 # Prune off-host Storagebox dump copies — 30d retention to mirror S3 lifecycle.
 #
 # S3 enforces retention via bucket lifecycle (see s3-lifecycle.example.json:
-# coolify/postgres/ 30d, coolify/obs/ 14d). The Storagebox off-host copies
-# (~/storagebox/backups/<area>/YYYY/MM/DD/*.{dump,dump.gz}) have no lifecycle
-# engine, so this script is the retention enforcer for that leg.
+# coolify/postgres/ + data/coolify/backups/ 30d, coolify/obs/ + 14d,
+# coolify/control-plane/ 30d). The Storagebox off-host copies below have no
+# lifecycle engine, so this script is the retention enforcer for that leg.
 #
 # SAFE BY DEFAULT: dry-run only lists what would be deleted.
 # Delete only with --apply.
@@ -39,9 +39,14 @@ done
 AREAS="cmp-pg aisl-pg website-pg relay-pg rds-seed rds-seed-t1019u"
 
 TOTAL=0
-for area in $AREAS; do
-  dir="$STORAGEBOX_ROOT/$area"
-  [[ -d "$dir" ]] || continue
+prune_one() {
+  # $1 = dir, $2.. = -name globs (OR-ed)
+  local dir="$1"; shift
+  [[ -d "$dir" ]] || return 0
+  local args=()
+  local g
+  for g in "$@"; do args+=(-o -name "$g"); done
+  # strip leading -o: ("("${args[@]:1}")")
   while IFS= read -r -d '' f; do
     TOTAL=$((TOTAL + 1))
     if [[ "$APPLY" == "1" ]]; then
@@ -50,8 +55,18 @@ for area in $AREAS; do
     else
       echo "WOULD-DELETE $f"
     fi
-  done < <(find "$dir" -type f \( -name '*.dump' -o -name '*.dump.gz' \) -mtime "+$KEEP_DAYS" -print0 2>/dev/null)
+  done < <(find "$dir" -type f \( "${args[@]:1}" \) -mtime "+$KEEP_DAYS" -print0 2>/dev/null)
+}
+
+for area in $AREAS; do
+  prune_one "$STORAGEBOX_ROOT/$area" '*.dump' '*.dump.gz'
 done
+# GPG-encrypted edge TLS snapshots (see edge/acme-backup.sh).
+prune_one "$STORAGEBOX_ROOT/edge-tls" '*.json.gpg'
+# S3 mirror tree maintained by storagebox-sync.sh (no --delete: age-pruned here).
+if [[ -d "$STORAGEBOX_ROOT/s3" ]]; then
+  prune_one "$STORAGEBOX_ROOT/s3" '*.dump.gz' '*.dump' '*.tar.gz.gpg' '*.json.gpg'
+fi
 
 if [[ "$APPLY" == "1" ]]; then
   # Drop date dirs left empty by the prune (YYYY/MM/DD husks only).
