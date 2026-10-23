@@ -8,7 +8,7 @@
 #
 # What it checks:
 #   1. Reachability + check freshness per node (DEADMAN_HOSTS): SSH in and
-#      read the last healthcheck log line. FAILs only when the node is
+#      read the last completed healthcheck run. FAILs only when the node is
 #      unreachable or its checks stopped advancing (stale/missing log).
 #      A node that is alive but reporting FAIL stays the on-node healthcheck's
 #      job — the dead-man does not double-page its content.
@@ -42,9 +42,9 @@ LOG_FILE="${LOG_FILE:-$HOME/.local/state/contabo-deadman/cron.log}"
 # Space-separated SSH targets, e.g. "contabo-a contabo-b".
 DEADMAN_HOSTS="${DEADMAN_HOSTS:-contabo-a contabo-b}"
 DEADMAN_SSH_TIMEOUT="${DEADMAN_SSH_TIMEOUT:-10}"
-# Remote healthcheck log whose advance proves the node + its checks are alive.
+# Remote healthcheck log; only ALL_OK/CHECKS_FAILED prove a completed run.
 DEADMAN_REMOTE_LOG="${DEADMAN_REMOTE_LOG:-/var/log/coolify-healthcheck.log}"
-# Alert if the remote log has not advanced within this long (5-min on-node
+# Alert if no completed run falls within this long (5-min on-node
 # cadence + skew margin).
 DEADMAN_MAX_LOG_AGE_SEC="${DEADMAN_MAX_LOG_AGE_SEC:-600}"
 # External content probes, name=url::marker (lowercase, no whitespace;
@@ -62,6 +62,7 @@ ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 command -v ssh >/dev/null 2>&1 || { log "ERROR: missing required binary: ssh"; exit 1; }
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: missing required binary: flock"; exit 1; }
+command -v timeout >/dev/null 2>&1 || { log "ERROR: missing required binary: timeout"; exit 1; }
 
 mkdir -p "$STATE_DIR"
 exec 9>"$LOCK_FILE"
@@ -129,6 +130,13 @@ send_alert() {
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp (see install-contabo-deadman.sh)"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
+  # A failed delivery must retry next run, including a failed recovery mail.
+  # Keep the previously delivered state rather than starting the dedupe timer.
+  if [[ "$sent" == "no" ]]; then
+    log "FAIL check=mail-${name}: delivery failed; retaining state for retry"
+    FAILED=1
+    return 0
+  fi
   printf 'STATUS=%s\nLAST_ALERT=%s\n' "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
     "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" > "$state_file"
 }
@@ -169,28 +177,31 @@ mark_ok_ops() {
 
 check_node() {
   # $1=ssh target — reachability + on-node check freshness
-  local name="node-${1}" host="$1" out rc last_line mtime age
-  out="$(ssh -o BatchMode=yes -o ConnectTimeout="$DEADMAN_SSH_TIMEOUT" "$host" \
-    "stat -c%Y '$DEADMAN_REMOTE_LOG' 2>/dev/null; tail -n 1 '$DEADMAN_REMOTE_LOG' 2>/dev/null" 2>&1)" && rc=0 || rc=$?
-  if [[ "$rc" -ne 0 || -z "$out" ]]; then
+  local name="node-${1}" host="$1" out rc last_line completed_at epoch age
+  # Bound the entire SSH operation: ConnectTimeout alone cannot stop a
+  # connected but hung remote command from holding our lock forever.
+  out="$(timeout "$DEADMAN_SSH_TIMEOUT" ssh -o BatchMode=yes -o ConnectTimeout="$DEADMAN_SSH_TIMEOUT" "$host" \
+    "tail -n 2000 '$DEADMAN_REMOTE_LOG' 2>/dev/null | grep -E ' (ALL_OK|CHECKS_FAILED)$' | tail -n 1" 2>&1)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
     log "FAIL check=${name}: ssh unreachable (rc=${rc}): $(echo "$out" | head -c 200)"
     send_alert "$name" "FAIL" "Off-Contabo dead-man cannot SSH to ${host} (rc=${rc}): ${out} — node may be down or the network path broken. On-node checks cannot page while unreachable."
     FAILED=1; return
   fi
-  mtime="$(echo "$out" | head -n 1 | tr -d '[:space:]')"
-  last_line="$(echo "$out" | tail -n 1)"
-  if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
-    log "FAIL check=${name}: remote log missing/unreadable: ${last_line:0:120}"
-    send_alert "$name" "FAIL" "Dead-man reached ${host} but cannot read ${DEADMAN_REMOTE_LOG}."
+  last_line="${out##*$'\n'}"
+  completed_at="${last_line%% *}"
+  epoch="$(date -d "$completed_at" +%s 2>/dev/null || true)"
+  if [[ ! "$completed_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || ! "$epoch" =~ ^[0-9]+$ || ! "$last_line" =~ \ (ALL_OK|CHECKS_FAILED)$ ]]; then
+    log "FAIL check=${name}: completed run missing/unreadable"
+    send_alert "$name" "FAIL" "Dead-man reached ${host} but no completed healthcheck run is readable in ${DEADMAN_REMOTE_LOG}."
     FAILED=1; return
   fi
-  age=$(( NOW - mtime ))
+  age=$(( $(date +%s) - epoch ))
   if [[ "$age" -gt "$DEADMAN_MAX_LOG_AGE_SEC" ]]; then
-    log "FAIL check=${name}: on-node checks stale — log age ${age}s (> ${DEADMAN_MAX_LOG_AGE_SEC}s), last='${last_line:0:120}'"
-    send_alert "$name" "FAIL" "On-node healthcheck on ${host} stopped advancing: ${DEADMAN_REMOTE_LOG} age ${age}s (threshold ${DEADMAN_MAX_LOG_AGE_SEC}s). Cron may be dead — the node is up but unwatched."
+    log "FAIL check=${name}: on-node checks stale — completed run age ${age}s (> ${DEADMAN_MAX_LOG_AGE_SEC}s), last='${last_line:0:120}'"
+    send_alert "$name" "FAIL" "On-node healthcheck on ${host} stopped completing: ${DEADMAN_REMOTE_LOG} last completed run age ${age}s (threshold ${DEADMAN_MAX_LOG_AGE_SEC}s). Cron may be dead or a check hung — the node is up but unwatched."
     FAILED=1; return
   fi
-  log "OK check=${name}: reachable, checks fresh (log age ${age}s, last='${last_line:0:100}')"
+  log "OK check=${name}: reachable, checks fresh (completed run age ${age}s, last='${last_line:0:100}')"
   mark_ok "$name"
 }
 
@@ -209,7 +220,7 @@ check_url() {
     send_alert "$name" "FAIL" "External probe for '${1}' (${url}) returned status ${code}."
     FAILED=1; rm -f "$body_file"; return
   fi
-  if tr '[:upper:]' '[:lower:]' < "$body_file" | tr -d '[:space:]' | grep -Fq -- "$marker"; then
+  if tr '[:upper:]' '[:lower:]' < "$body_file" | tr -d '[:space:]' | grep -F -- "$marker" >/dev/null; then
     log "OK check=${name}: ${url} -> ${code} marker='${marker}'"
     mark_ok "$name"
   else

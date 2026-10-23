@@ -10,7 +10,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | What | Value |
 |------|-------|
 | Cron | `*/5 * * * *` with `TZ=Europe/Berlin` (see `coolify-healthcheck.cron`) |
-| Where | data node **contabo-b** (`169.58.124.141`) runs full checks incl. dump/WAL freshness; primary **contabo-a** (`169.58.119.163`) is CP/obs only — **must** set `SKIP_BACKUP_CHECKS=1` (and usually `SKIP_PG_*=1`) so dump/WAL paths that exist only on `.141` do not false-FAIL |
+| Where | **contabo-b** runs both primary PG checks, public content, AISHL jobs, and dump/WAL freshness; **contabo-a** runs local CP/obs, disk and Created-container checks. Set `SKIP_BACKUP_CHECKS=1`, `SKIP_PG_*=1` and `SKIP_PUBLIC_HTTP_CHECKS=1` on a: primary PG/backups live on b, and b owns public-content paging to avoid duplicate mail. |
 | Alternative | Coolify Scheduled Task on the node, same `*/5 * * * *` |
 | Alert to | `alexey@datatalks.club,dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; recovery notice when an outage lasted at least `RECOVER_NOTIFY_MIN_SEC`, default 600 seconds) |
 
@@ -22,6 +22,9 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | **pg-relay** | same via `PG_RELAY_CONTAINER` / `PGHOST_RELAY:PGPORT_RELAY` (own instance, never shared) |
 | **HTTP apps** | `curl` expects 2xx/3xx for each `name=url` pair in `APP_URLS`: Coolify UI, Relay, CMP, AISHL, website |
 | **Content markers** | each `name=url::marker` triple in `CONTENT_CHECKS` must return 2xx/3xx **and** the body (lowercased, whitespace-stripped) must contain the marker verbatim — catches proxy-default-page / error-page-with-200 incidents that status-only checks miss |
+| **AISHL jobs** | `CHECK_AISL_Q=1` on b checks recent failure count and age of the latest successful task with read-only, bounded SQL; real app failures remain red until repaired |
+| **Host / containers** | root-disk usage and Created containers older than `CREATED_GRACE_SEC` on both nodes; node-exporter and cAdvisor scrape both hosts into VictoriaMetrics |
+| **Backup freshness** | four DB dumps plus both stacks' WAL shipper success markers on b; these checks remain enabled there |
 
 > Coolify `standalone-postgresql` uses `POSTGRES_USER=pgadmin` — there is no
 > `postgres` role. Always use `PGUSER_*=pgadmin` (script default); `psql -U
@@ -53,8 +56,9 @@ The script uses `sendmail` (or `msmtp`) on the node. Without an MTA it
 1. `apt install msmtp-mta` (or equivalent) on the node.
 2. Configure SMTP out-of-band (`/etc/msmtprc`, root-only `600`) with real
    relay credentials from the Drive secrets doc — never in git.
-3. Force a failure (e.g. point one `APP_URLS` entry at a dead port), run the
-   script by hand, confirm mail arrives at dev@, then fix the URL back.
+3. Force a failure (e.g. point one `APP_URLS` entry at a dead port) with
+   isolated state and ops-only recipients, confirm transport acceptance,
+   then restore the URL and healthy state.
 
 ## Enable (once targets exist on Contabo)
 
@@ -219,3 +223,30 @@ pages.
 SOP: `../contingency/relay-pg-dns-after-coolify-pg-redeploy.md`
 
 Install: `./monitors/install-relay-pg-dns-watchdog.sh contabo-b`
+
+## Independent off-Contabo dead-man
+
+Hetzner user cron runs the stable `/usr/local/sbin/contabo-deadman.sh` copy
+every five minutes. It checks both nodes over SSH plus public content from
+outside Contabo. SSH has an overall deadline, including the remote command.
+Freshness is the timestamp of the latest completed `ALL_OK` or `CHECKS_FAILED`
+run, not the log's modification time: repeated lock-skip or partial output
+must not hide a stuck monitor. A completed failing run is fresh; its actual
+findings remain the on-node pager's responsibility. Unaccepted mail delivery
+retains the previous state and retries on the next run, including recovery.
+
+Install updates with `./monitors/install-contabo-deadman.sh` as the operator
+user on Hetzner. SMTP configuration stays private. `DEADMAN_FORCE_FAIL=1`
+proves the mail path with ops-only recipients; run normally afterward to
+restore the drill state. To exercise freshness itself without stopping any
+service or cron, use a temporary remote log containing an old terminal run,
+an isolated local state/lock and env file, and **ops-only `ALERT_TO`**. Run
+once, replace the fixture with a fresh terminal run, run again for recovery,
+then remove the fixture and rerun the normal installed check. Never change
+the production healthcheck log or leave a drill override in cron/env.
+
+The weekly PG raise monitor uses an eight-day `max_over_time` query so recent
+sparse push samples remain visible outside the instant lookback. Verify with
+`DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh` on a; this leaves mail and
+state untouched. Its query can only see samples retained by VictoriaMetrics
+(currently two days of hot data); the window does not extend storage retention.

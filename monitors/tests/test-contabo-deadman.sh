@@ -24,8 +24,8 @@ cat > "$TMP/stubbin/ssh" <<'EOF'
 # Stub ssh: target host = first non-flag arg (skips -o K V pairs);
 # behavior via $STUB_DM_*.
 #   STUB_DM_SSH_FAIL=host   -> rc=7, no output (unreachable)
-#   STUB_DM_STALE=host      -> mtime NOW-9999 (stale log)
-#   STUB_DM_MISSING=host    -> garbage instead of mtime (unreadable log)
+#   STUB_DM_STALE=host      -> completed run NOW-9999
+#   STUB_DM_MISSING=host    -> garbage instead of a completed run
 host=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,18 +34,21 @@ while [[ $# -gt 0 ]]; do
     *) host="$1"; shift; break;;
   esac
 done
+if [[ -n "${STUB_DM_LOG:-}" ]]; then
+  exec bash -c "$1"
+fi
+if [[ "${STUB_DM_HANG:-}" == "$host" ]]; then sleep 30; fi
 if [[ "${STUB_DM_SSH_FAIL:-}" == "$host" ]]; then
   echo "ssh: connect to host $host port 22: Connection timed out" >&2
   exit 7
 fi
-now="$(date +%s)"
 if [[ "${STUB_DM_STALE:-}" == "$host" ]]; then
-  echo "$(( now - 9999 ))"; echo "2026-10-23T10:00:00Z ALL_OK"; exit 0
+  echo "$(date -u -d '9999 seconds ago' '+%Y-%m-%dT%H:%M:%SZ') ALL_OK"; exit 0
 fi
 if [[ "${STUB_DM_MISSING:-}" == "$host" ]]; then
   echo "stat: cannot statx ..."; echo ""; exit 0
 fi
-echo "$(( now - 60 ))"; echo "2026-10-23T11:30:04Z ALL_OK"; exit 0
+echo "$(date -u -d '60 seconds ago' '+%Y-%m-%dT%H:%M:%SZ') ALL_OK"; exit 0
 EOF
 cat > "$TMP/stubbin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -61,6 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 case "$url" in
   *good*) printf '{ "STATUS": "OK" }' > "$out"; echo "200"; exit 0;;
+  *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; echo "200"; exit 0;;
   *wrong*) printf '<html>edge default backend</html>' > "$out"; echo "200"; exit 0;;
   *down*) echo "curl: (7) connect failed" >&2; echo ""; exit 7;;
   *) echo "stub curl: unknown url $url" >&2; exit 99;;
@@ -75,6 +79,7 @@ msg="$(cat)"
 to="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^To:/{print $2; exit}')"
 subj="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^Subject:/{print $2; exit}')"
 printf '%s\t%s\n' "$to" "$subj" >> "$STUB_DM_MAILDIR/sent.tsv"
+[[ "${STUB_DM_MAIL_FAIL:-0}" == 1 ]] && exit 75
 exit 0
 EOF
 chmod +x "$TMP/stubbin/sendmail"
@@ -177,6 +182,80 @@ if [[ $rc -eq 0 && "$out" == *'skipping malformed DEADMAN_URLS entry'* && "$out"
   pass "D6 malformed entry skipped, good probe green"
 else
   fail "D6 malformed entry (rc=$rc) -- $out"
+fi
+
+# D8: recent skip/partial output must not refresh a hung monitor. Execute
+# the actual remote reader against a fixture whose mtime is fresh.
+fixture="$TMP/healthcheck.log"
+printf '%s ALL_OK\n%s WARN: another healthcheck run is in progress; skipping\n' \
+  "$(date -u -d '9999 seconds ago' '+%Y-%m-%dT%H:%M:%SZ')" \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$fixture"
+out=""; set +e
+out="$(STUB_DM_LOG=1 DEADMAN_REMOTE_LOG="$fixture" run_dm 'node-a' "$GOOD_URLS" "$(mktemp -d -p "$TMP")" 0)"; rc=$?
+set -e
+if [[ $rc -ne 0 && "$out" == *'completed run age'* && "$out" == *'stale'* ]]; then
+  pass "D8 fresh log mtime and lock-skip do not hide stale completed run"
+else
+  fail "D8 hung monitor freshness (rc=$rc) -- $out"
+fi
+printf '%s CHECKS_FAILED\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$fixture"
+out="$(STUB_DM_LOG=1 DEADMAN_REMOTE_LOG="$fixture" run_dm 'node-a' "$GOOD_URLS" "$(mktemp -d -p "$TMP")" 0)"
+if [[ "$out" == *ALL_OK* && "$out" == *CHECKS_FAILED* ]]; then
+  pass "D9 completed failing check is fresh; on-node pager retains ownership"
+else
+  fail "D9 fresh CHECKS_FAILED -- $out"
+fi
+
+# D10: no completed record must fail even when the log is recently written.
+printf '%s OK check=pg-shared\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$fixture"
+out=""; set +e
+out="$(STUB_DM_LOG=1 DEADMAN_REMOTE_LOG="$fixture" run_dm 'node-a' "$GOOD_URLS" "$(mktemp -d -p "$TMP")" 0)"; rc=$?
+set -e
+if [[ $rc -ne 0 && "$out" == *'completed run missing/unreadable'* ]]; then
+  pass "D10 partial run without completion fails freshness"
+else
+  fail "D10 missing completion (rc=$rc) -- $out"
+fi
+
+SD11="$(mktemp -d -p "$TMP")"
+out=""; set +e
+out="$(STUB_DM_HANG=node-a DEADMAN_SSH_TIMEOUT=1 run_dm 'node-a node-b' "$GOOD_URLS" "$SD11" 0)"; rc=$?
+set -e
+if [[ $rc -ne 0 && "$out" == *'rc=124'* && "$out" == *'OK check=node-node-b'* ]]; then
+  pass "D11 hung SSH times out and peer checks continue"
+else
+  fail "D11 SSH deadline (rc=$rc) -- $out"
+fi
+
+# D12: failure delivery is retried next run; a successful send then dedupes.
+SD12="$(mktemp -d -p "$TMP")"
+set +e
+out="$(STUB_DM_MAIL_FAIL=1 run_dm 'node-a' "$GOOD_URLS" "$SD12" 1)"; rc=$?
+set -e
+[[ $rc -ne 0 && ! -f "$SD12/drill-forced.state" ]] || fail "D12 failed send must not advance state"
+run_dm 'node-a' "$GOOD_URLS" "$SD12" 1 >/dev/null || true
+run_dm 'node-a' "$GOOD_URLS" "$SD12" 1 >/dev/null || true
+if [[ "$(wc -l < "$SD12/mail/sent.tsv")" -eq 2 ]] && grep -q '^STATUS=FAIL$' "$SD12/drill-forced.state"; then
+  pass "D12 failed delivery retries immediately; accepted FAIL dedupes"
+else
+  fail "D12 delivery retry/dedupe"
+fi
+set +e
+out="$(STUB_DM_MAIL_FAIL=1 run_dm 'node-a' "$GOOD_URLS" "$SD12" 0)"; rc=$?
+set -e
+if [[ $rc -ne 0 ]] && grep -q '^STATUS=FAIL$' "$SD12/drill-forced.state"; then
+  run_dm 'node-a' "$GOOD_URLS" "$SD12" 0 >/dev/null
+  grep -q '^STATUS=OK$' "$SD12/drill-forced.state"
+  pass "D13 failed RECOVERED delivery retries before clearing FAIL state"
+else
+  fail "D13 recovery delivery retention (rc=$rc) -- $out"
+fi
+
+out="$(run_dm 'node-a' 'svc=https://example.test/large::"status":"ok"' "$(mktemp -d -p "$TMP")" 0)"
+if [[ "$out" == *'OK check=ext-svc'* ]]; then
+  pass "D14 large content marker match consumes pipe (no SIGPIPE false alarm)"
+else
+  fail "D14 large marker -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
