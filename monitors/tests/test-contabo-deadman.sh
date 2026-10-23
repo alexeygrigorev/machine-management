@@ -151,6 +151,25 @@ if [[ $rc -ne 0 && -f "$mailf" ]] \
 else
   fail "D7 ops-only drill -- out=$out mail=$(cat "$mailf" 2>/dev/null || echo missing)"
 fi
+out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 0)"; rc=$?; set -e
+if [[ $rc -eq 0 && $(wc -l < "$mailf") -eq 2 ]] \
+  && grep -q $'dev@dtcdev.click\t.*RECOVERED.*drill-forced' "$mailf" \
+  && ! grep -q 'alexey@datatalks.club' "$mailf"; then
+  pass "D7 recovery recipients also ops-only (no alexey@)"
+else
+  fail "D7 ops-only recovery -- $out"
+fi
+
+# D8: a real failure during a drill still pages ALERT_TO.
+SD8="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' "$GOOD_URLS" "$SD8" 1)"; rc=$?; set -e
+if [[ $rc -ne 0 ]] \
+  && grep -q $'alexey@datatalks.club, dev@dtcdev.click\t.*FAIL.*node-node-a' "$SD8/mail/sent.tsv" \
+  && grep -q $'dev@dtcdev.click\t.*FAIL.*drill-forced' "$SD8/mail/sent.tsv"; then
+  pass "D8 real node failure during drill keeps both real recipients"
+else
+  fail "D8 real failure recipients -- $out"
+fi
 
 # D6: malformed DEADMAN_URLS entry skipped, good entry still runs
 out=""; set +e; out="$(run_dm 'node-a' "bogus $GOOD_URLS" "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
