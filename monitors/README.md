@@ -182,6 +182,11 @@ pages.
 | `relay-pg-dns-watchdog.env.example` | `/etc/relay-pg-dns-watchdog.env` |
 | `install-relay-pg-dns-watchdog.sh` | scp + cron installer |
 | `tests/test-relay-pg-dns-watchdog.sh` | regression test suite (TCP + stale pool + SQL progress) |
+| `contabo-deadman.sh` | off-Contabo dead-man (Hetzner user cron): node reachability + check freshness + external markers |
+| `contabo-deadman.cron` | `*/5 * * * *` user-crontab template (Hetzner, never Contabo) |
+| `contabo-deadman.env.example` | `~/.contabo-deadman.env` (optional overrides) |
+| `install-contabo-deadman.sh` | Hetzner-side installer (ssh/msmtp/cron checks, no secrets) |
+| `tests/test-contabo-deadman.sh` | dead-man suite (unreachable/stale/marker/drill/recovery) |
 
 SOP: `../contingency/relay-pg-dns-after-coolify-pg-redeploy.md`
 

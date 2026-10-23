@@ -1,0 +1,10 @@
+# Off-Contabo dead-man — user-crontab entry for the Hetzner operator box.
+#
+# The dead-man MUST run off Contabo (it pages when Contabo itself is dark).
+# Install (once, as your normal user — no root needed):
+#   ./monitors/install-contabo-deadman.sh
+# which appends the line below to your crontab if missing.
+#
+# Cadence: EVERY 5 MINUTES. Do NOT run this on contabo-a/contabo-b.
+
+# */5 * * * * /home/alexey/git/machine-management/monitors/contabo-deadman.sh >> /home/alexey/.local/state/contabo-deadman/cron.log 2>&1
