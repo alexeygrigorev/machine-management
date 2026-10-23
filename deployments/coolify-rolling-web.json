@@ -58,6 +58,7 @@
       "image": "dtc-website",
       "rollout_mode": "git-commit",
       "environment": {
+        "GUNICORN_CMD_ARGS": "--threads 4",
         "ROLLING_APP_URL": "http://127.0.0.1:8000/health/ready"
       },
       "path": "/health/ready",

@@ -177,6 +177,16 @@ Neither the
 application port nor the readiness port is published on the host. There is
 no HTTP drain operation: the actuator runs only through local Docker exec.
 
+Website public web also sets `GUNICORN_CMD_ARGS=--threads 4`. Its two worker
+processes therefore use Gunicorn's threaded worker with eight request slots.
+The follower's website environment override preserves this setting even if
+the private source still uses synchronous workers. Slow page requests must
+leave capacity for application health requests; overlap at deployment alone
+does not prevent the sole steady-state backend from withdrawing when both
+synchronous workers are occupied. See
+[Gunicorn thread settings](https://gunicorn.org/reference/settings/#threads).
+Do not increase readiness timeouts or suppress monitoring to hide saturation.
+
 ## Explicit pre-stop drain
 
 Native Coolify waits for the replacement's health before stopping the old
@@ -334,6 +344,17 @@ Service. Overlapping force-recreate operations removed the only web backend;
 Traefik had no active load-balancer health gate. The public monitor observed
 a real 503. `RUN_MIGRATIONS=true` and the long boot period extended the gap.
 The separate creation-time network repair is preserved and is not this fix.
+
+Website monitoring separately recorded readiness 503 responses at 14:40,
+14:55 and 15:35 UTC, including one after the earlier rolling acceptance window.
+At 15:35 the same native container was still running. Its access log shows
+two synchronous workers handling slow event pages, including past-event
+requests taking 6.08 and 6.40 seconds, while health completions paused.
+Application health completions around the incident were 200. This supports
+request starvation and readiness withdrawal, rather than a Compose replacement
+gap, as the explanation for that later incident. Threaded serving capacity
+addresses that additional failure mode. Preserve failed diagnostic samples
+and record a separate post-change controlled replacement window.
 
 Evidence, implementation test failures and final acceptance results are in
 the private dated `coolify-rolling-0dt-t1287u` report under
