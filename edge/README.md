@@ -1,18 +1,21 @@
 # Edge harden P1 (t1037u) — DR recovery plan Phase 4, risk R-06/R-08
 
-Status: applied 2026-10-22 (see `~/tmp/agent-reports/dr-p1-edge-harden-t1037u-2026-10-22.md`).
+Original t1037u stage: applied 2026-10-22 (see `~/tmp/agent-reports/dr-p1-edge-harden-t1037u-2026-10-22.md`).
 
-Scope (hard boundary): **no RDS delete, no DNS/CF flip, no app restarts.**
-CloudFront stays `http-only`; prod Traefik routers untouched. This kit closes
-what can be closed without a traffic flip and proves the rest on canary routes.
+The original stage below made no DNS/CloudFront changes or app restarts.
+The subsequent [origin TLS and enforcement stage](origin-tls-enforce/README.md)
+now protects live Website/Relay routes: three origins use HTTPS; website-dev
+remains deferred behind its isolation guard. Use that runbook for current
+verification and rollback. Do not replay historical canary/bootstrap routing
+over the current rolling backends.
 
 | Item | .163 (contabo-a) | .141 (contabo-b) |
 |------|------------------|------------------|
 | cAdvisor `:9101` public leak | no listener (nothing to bind) | rebound to `10.100.0.2` + `127.0.0.1` (`cadvisor-bind.sh`) |
 | Coolify `:8000`, Soketi `:6001/:6002`, cAdvisor `:9101` via DOCKER-USER | allowlist + LOG/DROP (`docker-user-fw.sh`) | same |
-| `X-Origin-Verify` enforcement | canary proof only (`install-origin-verify.sh`) | canary proof only |
+| `X-Origin-Verify` enforcement | live Website origin/viewer routes; dev guard retained | live Relay production/development origin/viewer routes |
 | `acme.json` off-host backup | `acme-backup.sh` → GPG-encrypted + decrypt-verified storagebox `edge-tls/` (daily via `storagebox-sync`) | same |
-| Origin TLS for `origin.website` | GAP (no LE cert; needs Coolify FQDN add + deploy — follow-up, documented in report) | OK (`origin.relay` LE cert present) |
+| Origin TLS | Website origin + viewer certificates verified | Relay production/development origin + viewer certificates verified |
 
 ## Run from operator box (Hetzner RMTHZ), never develop on Contabo
 
