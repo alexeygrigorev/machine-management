@@ -75,15 +75,24 @@ trap 'rm -f "$RENDERED"' EXIT
       priority: 200
       tls:
         certResolver: letsencrypt
-    origin-${SLUG}-deny:
+    origin-${SLUG}-deny-http:
       rule: "Host(\`${H}\`)"
       service: "${SVC}"
       middlewares:
         - origin-${SLUG}-deny
       entryPoints:
         - http
+      priority: 150
+    origin-${SLUG}-deny-tls:
+      rule: "Host(\`${H}\`)"
+      service: "${SVC}"
+      middlewares:
+        - origin-${SLUG}-deny
+      entryPoints:
         - https
       priority: 150
+      tls:
+        certResolver: letsencrypt
 Y
   done
 } > "$RENDERED"
@@ -127,7 +136,9 @@ echo "== gate check =="
 gate_check || { echo "GATE FAILED after install" >&2; exit 1; }
 
 echo "== rollback test: remove file -> old behavior must return =="
-"${SSH[@]}" "$HOST" sudo bash -c 'rm -f /data/coolify/proxy/dynamic/origin-enforce.yml && sleep 5 && echo removed'
+"${SSH[@]}" "$HOST" sudo bash -s <<'EOF'
+rm -f /data/coolify/proxy/dynamic/origin-enforce.yml && sleep 5 && echo removed
+EOF
 RB_FAIL=0
 for E in "${ENTRIES[@]}"; do
   IFS='|' read -r SLUG H SVC V1 V2 HP <<<"$E"

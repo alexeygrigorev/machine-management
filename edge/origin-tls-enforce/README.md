@@ -11,11 +11,14 @@
 # routers stay as the instant fallback: removing the rendered file restores
 # yesterday's behavior with zero restarts (rollback is tested live).
 #
-# Per hostname, 3 routers + 1 middleware (priorities beat Coolify docker
+# Per hostname, 4 routers + 1 middleware (priorities beat Coolify docker
 # routers, whose priority ~= rule length ~55):
 #   allow-http (200): Host && (Header(verify) || acme-challenge path) [http]
 #   allow-tls  (200): Host && Header(verify) [https] + LE certResolver
-#   deny       (150): Host [http,https] -> ipAllowList(127.0.0.1) = 403
+#   deny-http  (150): Host [http] -> ipAllowList(127.0.0.1) = 403
+#   deny-tls   (150): Host [https] + LE certResolver -> same 403
+# (deny is split per protocol: on this Traefik a tls-block router only
+# matches TLS connections and a plain one only plaintext.)
 # origin.website accepts TWO header values (prod + dev dists share the origin
 # with different CustomHeader values): Header(V1) || Header(V2).
 #

@@ -24,12 +24,24 @@ http:
       priority: 200
       tls:
         certResolver: letsencrypt
-    origin-example-deny:
+    # NOTE: deny is split per protocol. Verified live on Traefik v3.7: a router
+    # WITH a tls block only matches TLS connections, and one WITHOUT only
+    # matches plaintext — a single dual-entrypoint deny left one side open.
+    origin-example-deny-http:
       rule: "Host(`origin.example.datatalks.club`)"
       service: "__SERVICE__"
       middlewares:
         - origin-example-deny
       entryPoints:
         - http
+      priority: 150
+    origin-example-deny-tls:
+      rule: "Host(`origin.example.datatalks.club`)"
+      service: "__SERVICE__"
+      middlewares:
+        - origin-example-deny
+      entryPoints:
         - https
       priority: 150
+      tls:
+        certResolver: letsencrypt
