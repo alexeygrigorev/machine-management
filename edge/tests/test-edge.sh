@@ -34,13 +34,30 @@ done
 
 echo "== 5. prod edge still serves (no traffic impact) =="
 P1="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 https://courses.datatalks.club/api/health/ || echo 000)"
-P2="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 -H "Host: origin.relay.datatalks.club" "http://${B}/health/" || echo 000)"
-P3="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 -H "Host: origin.website.datatalks.club" "http://${A}/" || echo 000)"
-check "prod courses health" 200 "$P1"
-check "prod origin.relay /health/" 200 "$P2"
-[[ "$P3" =~ ^(200|301|302)$ ]] && echo "PASS: prod origin.website / (=$P3)" || { echo "FAIL: prod origin.website / (got $P3)"; fail=1; }
+P2="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 https://relay.datatalks.club/health/ || echo 000)"
+[[ "$P1" == "200" ]] && echo "PASS: prod courses health (=200)" || { echo "FAIL: prod courses health (got $P1)"; fail=1; }
+[[ "$P2" =~ ^(200|301|302)$ ]] && echo "PASS: prod relay /health/ (=$P2)" || { echo "FAIL: prod relay /health/ (got $P2)"; fail=1; }
+echo "NOTE: direct-Host origin probes now expect 403 (t1143u origin-security enforcement denies unauthenticated direct-origin bypass by design)"
+O1="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 -H "Host: origin.relay.datatalks.club" "http://${B}/health/" || echo 000)"
+check "direct origin.relay denied" 403 "$O1"
+O2="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 -H "Host: origin.website.datatalks.club" "http://${A}/health/ready" || echo 000)"
+check "direct origin.website denied" 403 "$O2"
 
 echo "== 6. WG scrape of cAdvisor on .141 intact =="
 ssh -o BatchMode=yes contabo-b 'curl -sf -m 5 http://10.100.0.2:9101/containers/ -o /dev/null && echo "PASS: WG scrape"' || { echo "FAIL: WG scrape"; fail=1; }
+
+echo "== 7. dev hostnames do not reach production containers (t1143u dev-isolation) =="
+D1="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 --resolve dev.courses.datatalks.club:443:${A} https://dev.courses.datatalks.club/ping || echo 000)"
+check "dev.courses no-route" 503 "$D1"
+D2="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 --resolve dev.aishippinglabs.com:443:${B} https://dev.aishippinglabs.com/ping || echo 000)"
+check "dev.aishippinglabs no-route" 503 "$D2"
+D3="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 -H "Host: dev.datatalks.club" "http://${A}/health/ready" || echo 000)"
+check "dev.datatalks no-route" 503 "$D3"
+P4="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 --resolve courses.datatalks.club:443:${A} https://courses.datatalks.club/ping || echo 000)"
+check "prod courses still serves" 200 "$P4"
+P5="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 --resolve aishippinglabs.com:443:${B} https://aishippinglabs.com/ping || echo 000)"
+check "prod aisl still serves" 200 "$P5"
+P6="$(curl -sk -o /dev/null -w "%{http_code}" -m 10 https://prod.datatalks.club/health/ready || echo 000)"
+check "prod website still serves (via CF)" 200 "$P6"
 
 [[ "$fail" == "0" ]] && echo "ALL EDGE CHECKS GREEN" || { echo "EDGE CHECKS FAILED" >&2; exit 1; }
