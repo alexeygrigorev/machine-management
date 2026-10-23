@@ -359,6 +359,31 @@ check_wal_freshness() {
   done
 }
 
+# Callback delivery can fail while HTTP and Postgres health remain green.
+# Enable on the Relay data host; use the existing label discovery / TCP config.
+check_cmp_callbacks() {
+  local name="cmp-callbacks" out rc pending recent sql
+  sql="SELECT count(*) FILTER (WHERE status='pending' AND created_at < now() - interval '30 minutes'), count(*) FILTER (WHERE status='failed' AND last_attempt_at >= now() - interval '24 hours') FROM cmp_callbacks WHERE status IN ('pending','failed')"
+  if [[ -n "$PG_RELAY_CONTAINER" ]]; then
+    out="$(timeout 20 docker exec -e PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' "$PG_RELAY_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$PGUSER_RELAY" -d "$PG_RELAY_DB" -tAc "$sql" 2>/dev/null)" && rc=0 || rc=$?
+  else
+    out="$(PGPASSWORD="$PGPASSWORD_RELAY" PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' timeout 20 psql -X -v ON_ERROR_STOP=1 -h "$PGHOST_RELAY" -p "$PGPORT_RELAY" -U "$PGUSER_RELAY" -d "$PG_RELAY_DB" -tAc "$sql" 2>/dev/null)" && rc=0 || rc=$?
+  fi
+  if [[ "$rc" -ne 0 || ! "$out" =~ ^[0-9]+\|[0-9]+$ ]]; then
+    log "FAIL check=${name}: callback count query failed or returned invalid counts (rc=${rc})"
+    send_alert "$name" "FAIL" "Cannot verify Relay callback delivery: count query failed or returned invalid counts (rc=${rc})."
+    FAILED=1; return
+  fi
+  IFS='|' read -r pending recent <<< "$out"
+  if [[ "$pending" -gt 0 || "$recent" -gt 0 ]]; then
+    log "FAIL check=${name}: pending_older_30m=${pending} failed_last_24h=${recent}"
+    send_alert "$name" "FAIL" "Relay to CMP delivery stalled: pending_older_30m=${pending} failed_last_24h=${recent}. Check CMP webhook configuration and Relay callback worker."
+    FAILED=1; return
+  fi
+  log "OK check=${name}: pending_older_30m=0 failed_last_24h=0"
+  mark_ok "$name"
+}
+
 # ---- run ----
 # Set SKIP_PG_SHARED=1 / SKIP_PG_RELAY=1 on hosts that cannot reach Postgres
 # (e.g. contabo-a when PG is docker-only on contabo-b).
@@ -374,6 +399,10 @@ if [[ "${SKIP_PG_RELAY:-0}" == "1" ]]; then
 else
   check_postgres "relay" "$PG_RELAY_CONTAINER" "$PGUSER_RELAY" "$PG_RELAY_DB" \
     "$PGHOST_RELAY" "$PGPORT_RELAY" "$PGPASSWORD_RELAY"
+fi
+
+if [[ "${CHECK_CMP_CALLBACKS:-0}" == "1" ]]; then
+  check_cmp_callbacks
 fi
 
 if [[ -n "${APP_URLS:-}" ]]; then
