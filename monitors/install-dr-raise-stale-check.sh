@@ -6,6 +6,6 @@ install -m 0755 "$SRC/dr-raise-stale-check.sh" /usr/local/sbin/dr-raise-stale-ch
 install -m 0644 "$SRC/dr-raise-stale-check.cron" /etc/cron.d/dr-raise-stale-check
 mkdir -p /var/lib/dr-raise-stale-check
 touch /var/log/dr-raise-stale-check.log
-echo "ALERT_TO=dev@dtcdev.click" > /etc/dr-raise-stale-check.env
+echo "ALERT_TO=alexey@datatalks.club,dev@dtcdev.click" > /etc/dr-raise-stale-check.env
 chmod 600 /etc/dr-raise-stale-check.env
 echo "installed stale-check on $(hostname)"

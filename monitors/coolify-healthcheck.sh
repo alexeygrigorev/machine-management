@@ -13,7 +13,7 @@
 #   3. HTTP/app endpoints:  configurable list (Coolify UI, Relay, CMP, AISHL,
 #      website) — curl must return 2xx/3xx within the timeout.
 #
-# Alerting: on failure, sends email to ALERT_TO (default dev@dtcdev.click)
+# Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click)
 # via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
 # while still failing; a RECOVERED notice goes out on transition back to OK.
@@ -102,7 +102,7 @@ HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 #   CONTENT_CHECKS="courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\""
 CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 
-ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 
@@ -136,7 +136,7 @@ send_alert() {
   fi
   local full_subject="[coolify-healthcheck] ${subject} (${name})"
   local sent="no"
-  # ALERT_TO may be comma-separated; prod default is only dev@dtcdev.click
+  # ALERT_TO may be comma-separated; prod default alexey@datatalks.club,dev@dtcdev.click (t1205u)
   local to_csv="${ALERT_TO// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()

@@ -55,6 +55,6 @@ echo "== verify =="
 "${SSH[@]}" "$HOST" 'sudo bash -n /usr/local/sbin/coolify-healthcheck.sh && echo SYNTAX_OK; cat /etc/cron.d/coolify-healthcheck'
 echo
 echo "NEXT: edit real values in /etc/coolify-healthcheck.env on ${HOST}, configure msmtp"
-echo "for delivery to dev@dtcdev.click, then run:"
+echo "for delivery to alexey@datatalks.club and dev@dtcdev.click, then run:"
 echo "  ssh ${HOST} 'sudo /usr/local/sbin/coolify-healthcheck.sh'"
 echo "expect ALL_OK (or CHECKS_FAILED with entries) in /var/log/coolify-healthcheck.log."

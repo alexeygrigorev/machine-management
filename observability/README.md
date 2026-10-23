@@ -8,7 +8,7 @@
 | VictoriaMetrics `:8428` + VictoriaLogs `:9428` | contabo-a `.163` | vmui; **no Grafana** |
 | Vector | `.163` + `.141` | Docker logs → VL; host_metrics → VM |
 | Exporters | `.141` | node + postgres×2 (+ cadvisor) |
-| coolify-healthcheck | both | [`../monitors/`](../monitors/) → `dev@dtcdev.click` |
+| coolify-healthcheck | both | [`../monitors/`](../monitors/) → `alexey@datatalks.club,dev@dtcdev.click` |
 
 ## Retention + S3 (t1031u)
 

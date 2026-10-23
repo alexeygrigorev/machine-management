@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dead-man for weekly Contabo→alt-host fast PG raise.
 #
-# Alerts ONLY to ALERT_TO (default dev@dtcdev.click) via msmtp/sendmail when:
+# Alerts to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click) via msmtp/sendmail when:
 #   - VictoriaMetrics has no dr_fast_pg_raise_last_success_unixtime, OR
 #   - (time() - last_success) > STALE_SECONDS (default 8 days = 691200)
 #
@@ -17,7 +17,7 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 STALE_SECONDS="${STALE_SECONDS:-691200}"  # 8 days
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
@@ -104,7 +104,7 @@ if [[ "$AGE" == "MISSING" || -z "$AGE" ]]; then
     "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}.
 Weekly Contabo→alt-host fast PG raise has no successful run recorded.
 Schedule: Sundays 04:30 Europe/Berlin on Hetzner (contingency/weekly-fast-pg-raise.sh).
-Alert destination: ${ALERT_TO} only."
+Alert destination: ${ALERT_TO}."
   exit 1
 fi
 
@@ -117,7 +117,7 @@ if [[ "$AGE_INT" -gt "$STALE_SECONDS" ]]; then
     "dr_fast_pg_raise_last_success_unixtime is ${AGE_INT}s old (~${DAYS} days; threshold ${STALE_SECONDS}s).
 Weekly Contabo→alt-host fast PG raise missed its window.
 vmui: ${VM_URL}/vmui
-Alert destination: ${ALERT_TO} only."
+Alert destination: ${ALERT_TO}."
   exit 1
 fi
 
