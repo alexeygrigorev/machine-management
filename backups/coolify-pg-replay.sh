@@ -267,10 +267,15 @@ else
       || fail "base backup_label missing START segment — cannot verify WAL continuity"
     log "base START segment: $STARTSEG"
     PREV=""
+    BEGUN=0
     while IFS= read -r SEG; do
-      if [[ -z "$PREV" ]]; then
+      if [[ "$BEGUN" -eq 0 ]]; then
+        # Segments older than the base START are harmless (restore never
+        # requests them) — skip, but the START segment itself must exist.
+        [[ "$SEG" < "$STARTSEG" ]] && continue
         [[ "$SEG" == "$STARTSEG" ]] \
           || fail "WAL GAP: staged chain starts at $SEG but base needs $STARTSEG"
+        BEGUN=1
       else
         if [[ "${SEG:0:16}" != "${PREV:0:16}" ]]; then
           fail "WAL TIMELINE CHANGE unsupported ($PREV -> $SEG) — investigate, refusing silent replay"
@@ -281,6 +286,8 @@ else
       fi
       PREV="$SEG"
     done < <(ls "$WALCOPY" | grep -E '^[0-9A-F]{24}$' | sort)
+    [[ "$BEGUN" -eq 1 ]] \
+      || fail "WAL GAP: base START segment $STARTSEG not present in staged WAL"
     log "WAL chain continuous: $STARTSEG .. $PREV"
     chmod -R a+rX "$WALCOPY"
   fi

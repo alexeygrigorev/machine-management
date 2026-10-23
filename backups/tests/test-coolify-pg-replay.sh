@@ -142,6 +142,19 @@ if printf '%s' "$OUT7" | grep -q 'WAL chain continuous: 000000010000000000000026
   pass "T7b chain check ignores .backup file"
 else fail "T7b chain check ignores .backup file"; fi
 
+# ---- T8: pre-base segments tolerated, missing START still fails ----
+D8="$TMP/t8"; read -r BASE8 PGW8 <<< "$(mkbase "$D8")"
+mkdir -p "$D8/wal"; mkwal "$D8/wal" 00000024 00000025 00000026 00000027
+OUT8="$(run_replay --base "$BASE8" --base-wal "$PGW8" --wal-dir "$D8/wal" || true)"
+if printf '%s' "$OUT8" | grep -q 'WAL chain continuous: 000000010000000000000026 .. 000000010000000000000027'; then
+  pass "T8a older leading segments skipped, chain verified from START"
+else fail "T8a older leading segments skipped, chain verified from START"; fi
+D8b="$TMP/t8b"; read -r BASE8B PGW8B <<< "$(mkbase "$D8b")"
+mkdir -p "$D8b/wal"; mkwal "$D8b/wal" 00000024 00000025
+if run_replay --base "$BASE8B" --base-wal "$PGW8B" --wal-dir "$D8b/wal" | grep -q 'START segment .* not present'; then
+  pass "T8b START nowhere in chain fails loudly"
+else fail "T8b START nowhere in chain fails loudly"; fi
+
 echo "----"
 echo "PASS=$PASS FAIL=$FAILN"
 [[ "$FAILN" -eq 0 ]]
