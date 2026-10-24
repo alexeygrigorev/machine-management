@@ -252,3 +252,19 @@ sparse push samples remain visible outside the instant lookback. Verify with
 `DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh` on a; this leaves mail and
 state untouched. Its query can only see samples retained by VictoriaMetrics
 (currently two days of hot data); the window does not extend storage retention.
+
+### DR stale-check Relay sender
+
+`dr-raise-stale-check.sh` uses the dedicated Contabo monitors Relay client,
+sender `alerts` (`DTC Alerts <alerts@dtcdev.click>`). Install the Datamailer CLI
+at `/usr/local/bin/datamailer` and provision `/etc/relay-monitors.toml` through
+Relay's admin/client API with `url` and `api_key`. The file must be owned by root,
+mode 0600. Never put the key in shell arguments, source control or cron entries.
+`RELAY_MONITOR_CONFIG` and `DATAMAILER_BIN` can override the paths for testing.
+Existing `ALERT_TO` recipients are preserved; comma/space-separated recipients
+receive separate Relay messages. A rejected send does not advance dedupe state.
+
+`dr-raise-stale-check.sh --test-alert` sends a real source-specific proof only to
+`dev@dtcdev.click`, without querying VictoriaMetrics or changing monitor state.
+The Relay self-monitors (`relay-pg-dns-watchdog`, `coolify-healthcheck`, and
+`contabo-deadman`) retain their independent direct SES SMTP transport.

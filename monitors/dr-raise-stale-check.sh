@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Dead-man for weekly Contabo→alt-host fast PG raise.
 #
-# Alerts to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click) via msmtp/sendmail when:
+# Alerts to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click) via Relay when:
 #   - VictoriaMetrics has no dr_fast_pg_raise_last_success_unixtime, OR
 #   - (time() - last_success) > STALE_SECONDS (default 8 days = 691200)
 #
-# Prefer running on contabo-a (local VM + existing msmtp SES path).
+# Prefer running on contabo-a (local VM + dedicated Relay client).
 # Cron: daily 09:00 Europe/Berlin (see dr-raise-stale-check.cron).
 # DRY_RUN=1 queries and logs only; no email or state changes.
 set -euo pipefail
@@ -19,9 +19,33 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
-ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
-ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
+
+# One client/key for Contabo monitors, stored root-owned mode 0600. The CLI
+# loads it from disk; credentials never appear in process arguments or logs.
+relay_alert() {
+  local recipients="${1// /,}" subject="$2" body="$3" recipient sent=0
+  local -a addresses=()
+  IFS=',' read -r -a addresses <<< "$recipients"
+  for recipient in "${addresses[@]}"; do
+    [[ -n "$recipient" ]] || continue
+    if ! printf '%s\n' "$body" | env -u DATAMAILER_API_KEY -u DATAMAILER_URL \
+      DATAMAILER_CONFIG="${RELAY_MONITOR_CONFIG:-/etc/relay-monitors.toml}" \
+      "${DATAMAILER_BIN:-/usr/local/bin/datamailer}" send --from alerts \
+      --to "$recipient" --subject "$subject"; then
+      echo "ERROR: Relay alert delivery request failed" >&2
+      return 1
+    fi
+    sent=$((sent + 1))
+  done
+  [[ "$sent" -gt 0 ]]
+}
+
+# Exercise this source's real transport without queries, repairs or state changes.
+# The proof destination is fixed, irrespective of the configured recipients.
+if [[ "${1:-}" == "--test-alert" ]]; then
+  relay_alert dev@dtcdev.click "TEST dr-raise-stale-check Relay alert" "Controlled dr-raise-stale-check alert transport proof."
+  exit $?
+fi
 STALE_SECONDS="${STALE_SECONDS:-691200}"  # 8 days
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 STATE_DIR="${STATE_DIR:-/var/lib/dr-raise-stale-check}"
@@ -62,58 +86,11 @@ send_alert() {
     fi
   fi
   local full_subject="[dr-fast-pg-raise] ${subject}"
-  local to_csv="${ALERT_TO// /,}"
-  local to_header="${to_csv//,/, }"
-  local -a to_args=()
-  IFS=',' read -r -a to_args <<< "$to_csv"
-
-  local envelope_from from_header
-  local from_pat='<([^>]+)>'
-  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
-    envelope_from="${BASH_REMATCH[1]}"
-    from_header="$ALERT_FROM"
-  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
-    envelope_from="$ALERT_FROM"
-    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
-  else
-    envelope_from="$ALERT_FROM"
-    from_header="$ALERT_FROM"
+  if ! relay_alert "$ALERT_TO" "$full_subject" "$body"; then
+    log "ERROR alert request failed; dedupe state unchanged"
+    return 1
   fi
-
-  local msmtp_args=()
-  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
-
-  local sent=no
-  if command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}"; then
-      sent=msmtp
-    fi
-  elif command -v sendmail >/dev/null 2>&1; then
-    local sendmail_args=("-t")
-    local sendmail_bin
-    sendmail_bin="$(command -v sendmail)"
-    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
-      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-    fi
-    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | sendmail "${sendmail_args[@]}"; then
-      sent=sendmail
-    fi
-  fi
-  log "ALERT subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  log "ALERT subject='${full_subject}' via=relay to=${ALERT_TO}"
   printf 'STATUS=%s\nLAST_ALERT=%s\n' "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
     "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" >"$state_file"
 }

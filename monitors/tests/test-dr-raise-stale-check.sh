@@ -18,13 +18,13 @@ case "$FIXTURE" in
   *) printf '{"status":"success","data":{"result":[{"value":[0,"%s"]}]}}\n' "$FIXTURE";;
 esac
 STUB
-cat > "$TMP/bin/msmtp" <<'STUB'
+cat > "$TMP/bin/datamailer" <<'STUB'
 #!/usr/bin/env bash
 echo "ARGS: $*" >> "$MAIL_LOG"
 cat >> "$MAIL_LOG"
 STUB
 chmod +x "$TMP/bin/"*
-export PATH="$TMP/bin:$PATH" MAIL_LOG="$TMP/mail.log"
+export PATH="$TMP/bin:$PATH" MAIL_LOG="$TMP/mail.log" DATAMAILER_BIN="$TMP/bin/datamailer"
 export DR_RAISE_STALE_ENV_FILE="$TMP/no-env" STATE_DIR="$TMP/state" STALE_SECONDS=691200
 run() {
   local expected="$1"; shift
@@ -62,11 +62,20 @@ rg -q 'dedupe: still FAIL' "$TMP/output"
 cmp "$MAIL_LOG" "$TMP/first-mail"
 run 0 FIXTURE=45436 DRY_RUN=0
 rg -q '^STATUS=OK$' "$STATE_DIR/stale.state"
-[[ "$(rg -c '^Subject:' "$MAIL_LOG")" == 2 ]]
-rg -q '^From: DTC Alerts <alerts@dtcdev.click>$' "$MAIL_LOG"
-rg -q 'ARGS: -a alerts -f alerts@dtcdev.click --' "$MAIL_LOG"
-rg -q 'Subject: .*RECOVERED' "$MAIL_LOG"
+[[ "$(rg -c '^ARGS:' "$MAIL_LOG")" == 4 ]]
+rg -q -- '--from alerts --to alexey@datatalks.club' "$MAIL_LOG"
+rg -q -- '--from alerts --to dev@dtcdev.click' "$MAIL_LOG"
+rg -q 'ARGS: send --from alerts' "$MAIL_LOG"
+rg -q -- '--subject .*RECOVERED' "$MAIL_LOG"
 cp "$MAIL_LOG" "$TMP/recovered-mail"
 run 0 FIXTURE=45436 DRY_RUN=0
 cmp "$MAIL_LOG" "$TMP/recovered-mail"
 echo 'PASS: alert dedupe and single recovery preserved'
+
+# Test sends use dev only and never read VictoriaMetrics or change live state.
+rm "$MAIL_LOG"
+bash "$REPO/monitors/dr-raise-stale-check.sh" --test-alert
+[[ "$(rg -c '^ARGS:' "$MAIL_LOG")" == 1 ]]
+rg -q -- '--to dev@dtcdev.click' "$MAIL_LOG"
+! rg -q 'alexey@datatalks.club' "$MAIL_LOG"
+echo 'PASS: test alert is dev-only'
