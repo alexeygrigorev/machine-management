@@ -11,7 +11,7 @@ Project `dtc-prod`, envs: `production`, `staging`.
 |---|---|---|---|---|
 | `dev.courses.datatalks.club` | 169.58.119.163 | 200 from `cmp-staging` → prod `cmp` | **503 no-route** (Host rule removed from service, container redeployed with fresh labels) | `curl --resolve … /ping` → 503 + label inspect |
 | `dev.aishippinglabs.com` | 169.58.124.141 | 200 from `aisl-staging` → prod `aisl` | **503 no-route** (Host rule removed, redeployed; web+worker healthy) | same |
-| `dev.datatalks.club` | CloudFront → `origin.website` → .163 | 200 from `website-staging` → prod `website` | **503 no-route** (FQDN record edited; stale-label container shadowed by `edge/traefik/dev-route-guard.yml` until website worker fixes the curl-less image healthcheck and redeploys) | direct + CF probes → 503 |
+| `dev.datatalks.club` | CloudFront → `origin.website` → .163 | 200 from `website-staging` → prod `website` | **200 isolated dev** (routes to `website-dev-web` backed by `website_dev` DB; dev guard retired; CF https-only) | direct unauth 403, auth/CF 200 |
 | `dev.relay.datatalks.club` | CloudFront (not Contabo) | `relay-dev` → `relay_dev` (already isolated) | unchanged | out of scope, untouched |
 
 Prod serving intact: `courses` 200, apex/`www`/`prod.aishippinglabs` 200,
@@ -24,6 +24,7 @@ Prod serving intact: `courses` 200, apex/`www`/`prod.aishippinglabs` 200,
 | `cmp-staging` svc | `cmp_app` @ `10.100.0.2` / `cmp` |
 | `aisl-staging` svc | `aisl_app` @ pg-shared / `aisl` |
 | `website-staging` app | `website_app` @ `10.100.0.2` / `website` |
+| `website-dev-web` svc | `website_dev` @ `10.100.0.2` / `website_dev` |
 | `relay-staging` svc | `relay_app` @ pg-relay / `relay` (least-privilege, t1037u) |
 | `relay-dev` svc | `relay_dev` @ pg-relay / `relay_dev` |
 

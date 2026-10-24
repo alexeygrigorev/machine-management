@@ -1,9 +1,10 @@
 # Origin TLS and verification enforcement (t1143u)
 
-Live verification on 2026-10-23: website production, Relay production and Relay
-development use HTTPS origins. Website development remains on HTTP while its
-isolation guard returns 503. This is a deferred cutover, not full four-origin
-closure. No DNS or unrelated distribution changes are needed.
+Live verification on 2026-10-24: website production, website development,
+Relay production and Relay development all use HTTPS origins. Website development
+is isolated and routes to a distinct dev website backend backed by the
+website_dev database. All four origins are https-only with active origin
+verification. No DNS or unrelated distribution changes were made.
 
 **The three active origins passed sustained re-verification at
 16:40:20–16:45:19 UTC on 2026-10-23.** Sixty rounds produced 780 matching
@@ -32,7 +33,7 @@ window or claim uninterrupted availability outside the measured interval.
 | Distribution | Origin ID | Transport | Viewer |
 | --- | --- | --- | --- |
 | E1VNMGFFIXBOXX | website-production-alb | https-only | prod.datatalks.club |
-| E33FS79KPFSAOM | website-dev-alb | http-only, deferred | dev.datatalks.club |
+| E33FS79KPFSAOM | website-dev-alb | https-only | dev.datatalks.club |
 | E3L9KUTE15WFJF | relay-production-shared-alb | https-only | relay.datatalks.club |
 | E35QPYDA1452SA | relay-dev-shared-alb | https-only | dev.relay.datatalks.club |
 
@@ -64,13 +65,11 @@ They now refuse to overwrite existing enforcement. Preserve installed backend
 references, middleware, credentials and deny routers when making a deliberate
 routing change; replaying the old renderer is not a recovery procedure.
 
-Website-dev still refers to the production website backend beneath its guard.
-**Do not remove that guard to enable the cutover.** The dev-isolation owner must
-first provide a distinct healthy development backend and rebind the dev routes.
-The shared origin's development credential is also accepted by design; changing
-that arrangement requires coordinated origin/header routing, not just deleting
-the guard. Then verify isolation and TLS/credential readiness for both possible
-Host/SNI names. Only after these checks and rollback verification may E33 switch.
+Website-dev routes to the isolated dev backend `website-dev-web` backed by
+the `website_dev` database on pg-shared (`10.100.0.2:5432`). The priority-500
+isolation guard has been retired, and origin verification routes requests to this
+distinct dev backend with valid TLS and credential enforcement. Both origin domain
+and viewer hostname (`dev.datatalks.club`) pass readiness checks. E33 uses https-only.
 
 ## Verification
 

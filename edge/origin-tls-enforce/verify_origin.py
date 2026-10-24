@@ -18,34 +18,20 @@ def ssh(host, command):
 
 def verify():
     guard = ssh("contabo-a", "sudo test ! -f /data/coolify/proxy/dynamic/dev-route-guard.yml || printf present") == "present"
+    if guard:
+        raise Refused("dev-route-guard.yml is still present on contabo-a")
+
     for scope in ORIGINS:
         snapshot = aws("cloudfront", "get-distribution", "--id", scope.distribution)
         _, origin, header = config_origin(snapshot, scope)
         protocol = origin["CustomOriginConfig"]["OriginProtocolPolicy"]
-        deferred = scope.viewer == "dev.datatalks.club" and guard
-        expected = "http-only" if deferred else "https-only"
+        expected = "https-only"
         if protocol != expected:
             raise Refused(f"{scope.distribution} expected {expected}, observed {protocol}")
-        if deferred:
-            # Still check the shared origin using this distribution's credential.
-            # The guard's existence alone never licenses an arbitrary dev failure.
-            for scheme in ("http", "https"):
-                for value in (None, "invalid-origin-verification-value", header):
-                    if probe(scope, scope.viewer, scheme, value) != "503":
-                        raise Refused("website-dev no longer matches the recorded isolation state")
-                for value in (None, "invalid-origin-verification-value"):
-                    if probe(scope, scope.domain, scheme, value) != "403":
-                        raise Refused("shared website origin bypass is open")
-                if probe(scope, scope.domain, scheme, header) != "200":
-                    raise Refused("shared website origin authentication failed")
-            if probe(scope, scope.viewer, public=True) != "503":
-                raise Refused("website-dev public isolation state changed")
-            print("DEFER: website-dev cutover; trusted TLS but isolation guard returns 503; transport remains HTTP")
-        else:
-            readiness(scope, header)
-            if probe(scope, scope.viewer, public=True) != "200":
-                raise Refused(f"{scope.viewer} public traffic is not healthy")
-            print(f"PASS: {scope.distribution} Deployed, HTTPS origin, public health 200")
+        readiness(scope, header)
+        if probe(scope, scope.viewer, public=True) != "200":
+            raise Refused(f"{scope.viewer} public traffic is not healthy")
+        print(f"PASS: {scope.distribution} Deployed, HTTPS origin, public health 200")
 
     for host in ("contabo-a", "contabo-b"):
         # Verify every protected port in BOTH families, plus persistence.
@@ -64,8 +50,7 @@ sys.exit(0 if all(checks) else 1)
 PY"""
         ssh(host, command)
         print(f"PASS: {host} IPv4/IPv6 administrative-port DROP rules, persistence, private enforcement file")
-    print("Verified live TLS, authentication, public traffic and firewall."
-          + (" Website-dev cutover remains deferred." if guard else " All four origins use HTTPS."))
+    print("Verified live TLS, authentication, public traffic and firewall. All four origins use HTTPS.")
 
 
 if __name__ == "__main__":
