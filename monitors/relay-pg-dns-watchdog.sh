@@ -84,6 +84,8 @@ PG_DB="${PG_DB:-relay}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-4}"          # seconds, per TCP attempt
 RESTART_VERIFY_WAIT="${RESTART_VERIFY_WAIT:-12}" # seconds after restart before re-probe
 RESTART_COOLDOWN_SEC="${RESTART_COOLDOWN_SEC:-900}"  # per container
+DEP_STARTUP_GRACE_SEC="${DEP_STARTUP_GRACE_SEC:-120}"
+DNS_RECHECK_WAIT_SEC="${DNS_RECHECK_WAIT_SEC:-25}"
 DRY_RUN="${DRY_RUN:-0}"
 # Never-restart container-name regex (extra safety net on top of the env gate).
 DEPENDENT_EXCLUDE="${DEPENDENT_EXCLUDE:-^coolify-proxy$|^coolify-realtime$|^watchtower$}"
@@ -443,6 +445,19 @@ container_started_epoch() {
   date -d "$iso" +%s 2>/dev/null || echo 0
 }
 
+# Use StartedAt (not Created) so both deploys and restarts receive grace.
+dependent_is_young() {
+  local c="$1" started age
+  started="$(container_started_epoch "$(container_started_iso "$c")")"
+  (( started > 0 )) || return 1
+  age=$(( $(date +%s) - started ))
+  if (( age < DEP_STARTUP_GRACE_SEC )); then
+    log "SKIP_YOUNG dep=${c} age=${age}s grace=${DEP_STARTUP_GRACE_SEC}s"
+    return 0
+  fi
+  return 1
+}
+
 is_web_container() {
   # $1=container name — 0 if HTTP server (web-* / gunicorn / uvicorn), 1 if worker
   [[ "$1" == web-* ]] && return 0
@@ -623,7 +638,9 @@ check_pg_worker_progress() {
       [[ "$d" == scheduler-* ]] && { sched_c="$d"; break; }
     done
     hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
-    if [[ "$hb_age" =~ ^-?[0-9]+$ ]]; then
+    if [[ -n "$sched_c" ]] && dependent_is_young "$sched_c"; then
+      : # Leave existing alert state untouched during startup.
+    elif [[ "$hb_age" =~ ^-?[0-9]+$ ]]; then
       (( hb_age < 0 )) && hb_age=0
       if (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
         log "OK check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
@@ -656,7 +673,7 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
   local has_tasks
   has_tasks="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   if [[ "$has_tasks" == "t" ]]; then
-    local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0
+    local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0 q_young=0
     q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
       SELECT queue_name || '|' || COUNT(*) || '|' || COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
       FROM django_tasks_database_dbtaskresult
@@ -669,18 +686,26 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
       WHERE status = 'SUCCESSFUL' AND queue_name = 'provider-events';
     " 2>/dev/null | tr -d '[:space:]')"
     local line qname qcnt qage qworker d
+    for d in $deps; do
+      if [[ "$d" == provider-events-worker-* || "$d" == worker-* ]] && dependent_is_young "$d"; then
+        q_young=1
+      fi
+    done
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       IFS='|' read -r qname qcnt qage <<< "$line"
       [[ "$qage" =~ ^-?[0-9]+$ ]] || continue
       if (( qage > TASK_QUEUE_MAX_READY_AGE_SEC )); then
-        q_failed=1
-        FAILED=1
         qworker=""
         for d in $deps; do
           if [[ "$qname" == "provider-events" && "$d" == provider-events-worker-* ]]; then qworker="$d"; break; fi
           if [[ "$qname" == "default" && "$d" == worker-* ]]; then qworker="$d"; break; fi
         done
+        if [[ -n "$qworker" ]] && dependent_is_young "$qworker"; then
+          continue
+        fi
+        q_failed=1
+        FAILED=1
         log "FAIL check=${q_check} pg=${label} queue=${qname} ready=${qcnt} oldest_ready=${qage}s max=${TASK_QUEUE_MAX_READY_AGE_SEC}s worker=${qworker:-none}"
         if [[ -n "$qworker" ]] && restart_dependent "$qworker"; then
           sleep "$RESTART_VERIFY_WAIT"
@@ -706,7 +731,7 @@ Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
         fi
       fi
     done <<< "$q_rows"
-    if (( q_failed == 0 )); then
+    if (( q_failed == 0 && q_young == 0 )); then
       log "OK check=${q_check} pg=${label} stuck_ready=0 max_age=${TASK_QUEUE_MAX_READY_AGE_SEC}s last_provider_event_ok=${last_pe_ok:-none}"
       mark_ok "$q_check"
     fi
@@ -716,6 +741,7 @@ Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
 restart_dependent() {
   # $1=container — cooldown-gated docker restart; 0 if a restart happened now
   local c="$1" stamp="${STATE_DIR}/restart-$(safe_name "$1").stamp" last=0
+  dependent_is_young "$c" && return 1
   [[ -f "$stamp" ]] && last="$(tr -d '[:space:]' < "$stamp")"
   last="${last:-0}"
   if (( NOW - last < RESTART_COOLDOWN_SEC )); then
@@ -776,6 +802,7 @@ watch_pg() {
   fi
 
   for c in $deps; do
+    dependent_is_young "$c" && continue
     target="$(parse_db_target "$(dep_env_block "$c")")"
     host="${target%% *}"; port="${target##* }"
     [[ -z "$port" ]] && port=5432
@@ -787,6 +814,14 @@ watch_pg() {
     target_pg="$(resolve_target_pg_container "$host" "$pg" "$pgname")"
     prog_out="progress=n/a"
     probe_from_container "$c" "$host" "$port"; rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+      log "DNS_RECHECK dep=${c} initial_rc=2 wait=${DNS_RECHECK_WAIT_SEC}s"
+      sleep "$DNS_RECHECK_WAIT_SEC"
+      # A deploy/restart may have happened while waiting.
+      dependent_is_young "$c" && continue
+      probe_from_container "$c" "$host" "$port"; rc=$?
+      log "DNS_RECHECK dep=${c} rc=${rc} $(resolved_addrs "$c" "$host")"
+    fi
     if [[ "$rc" -eq 0 ]]; then
       if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
         log "OK check=${dep_check} dep=${c} host=${host}:${port} $(resolved_addrs "$c" "$host") ${prog_out}"

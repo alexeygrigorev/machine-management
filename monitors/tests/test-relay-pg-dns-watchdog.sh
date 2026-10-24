@@ -105,7 +105,9 @@ case "${1:-}" in
         echo "healthy"
         ;;
       *'.State.StartedAt'*)
-        if [[ "$target" == "fake-shared-pg" ]]; then
+        if [[ "$MODE" == young* && "$target" != "$PG_NAME" ]]; then
+          date -u -d '30 seconds ago' '+%Y-%m-%dT%H:%M:%SZ'
+        elif [[ "$target" == "fake-shared-pg" ]]; then
           echo "2026-10-20T10:00:00Z"
         elif [[ "$target" == "$PG_NAME" ]]; then
           echo "2026-10-22T15:13:26Z"
@@ -197,7 +199,13 @@ case "${1:-}" in
       # Distinguish probe_from_container vs check_active_socket_peers by script content
       py_code="$2"
       if [[ "$py_code" == *"socket.getaddrinfo"* ]]; then
-        # Fresh sibling TCP probe ALWAYS succeeds in these tests!
+        printf '%s\n' "$c" >> "${STUB_STATE_DIR}/probes"
+        if [[ "$MODE" == young* ]]; then exit 2; fi
+        if [[ "$MODE" == dns_* && "$c" == ses-ingress-* ]] && ! was_restarted "$c"; then
+          count=$(cat "${STUB_STATE_DIR}/dns-count" 2>/dev/null || echo 0)
+          echo "$((count + 1))" > "${STUB_STATE_DIR}/dns-count"
+          if [[ "$MODE" != dns_transient || "$count" == 0 ]]; then exit 2; fi
+        fi
         exit 0
       fi
       if [[ "$py_code" == *"/proc/1/net/tcp"* ]]; then
@@ -231,7 +239,7 @@ case "${1:-}" in
         echo "t"; exit 0
       fi
       if [[ "$sql" == *"FROM relay_scheduler_heartbeat"* ]]; then
-        if [[ "$MODE" == "hb_stale" ]] && ! was_restarted "scheduler-fjnzwomg"; then
+        if [[ "$MODE" == "hb_stale" || "$MODE" == "young_sql" ]] && ! was_restarted "scheduler-fjnzwomg"; then
           echo "420"
         else
           echo "8"
@@ -239,13 +247,13 @@ case "${1:-}" in
         exit 0
       fi
       if [[ "$sql" == *"GROUP BY queue_name"* ]]; then
-        if [[ "$MODE" == "queue_stuck" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
+        if [[ "$MODE" == "queue_stuck" || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
           echo "provider-events|4|360"
         fi
         exit 0
       fi
       if [[ "$sql" == *"AND queue_name ="* ]]; then
-        if [[ "$MODE" == "queue_stuck" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
+        if [[ "$MODE" == "queue_stuck" || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
           echo "360"
         else
           echo "0"
@@ -264,6 +272,13 @@ esac
 exit 0
 EOF
 chmod +x "$TMP/stubbin/docker"
+
+# Never deliver real mail; record attempts, including unexpected recovery mail.
+cat > "$TMP/stubbin/sendmail" <<'EOF'
+#!/usr/bin/env bash
+cat >> "$STUB_STATE_DIR/mail"
+EOF
+chmod +x "$TMP/stubbin/sendmail"
 
 run_watchdog() {
   # $1=mode
@@ -441,6 +456,46 @@ if [[ ! -f "$sdir_t13/var/dep-gonecontainer1.state" && ! -f "$sdir_t13/var/resta
 else
   fail "T13 stale state pruning -- remaining files: $(ls "$sdir_t13/var")"
 fi
+
+# Deploy grace, transient DNS, persistent DNS and retained restart cooldown.
+for mode in young_dns young_sql dns_transient dns_persistent dns_cooldown; do
+  sdir="$TMP/state-$mode"
+  mkdir -p "$sdir/var"
+  echo "$mode" > "$sdir/mode"
+  if [[ "$mode" == young* ]]; then
+    for check in dep-ses-ingress-fjnzwomg progress-scheduler-heartbeat progress-task-queues; do
+      printf 'STATUS=FAIL\nFAIL_SINCE=1\nLAST_ALERT=1\n' > "$sdir/var/$check.state"
+    done
+  fi
+  if [[ "$mode" == dns_cooldown ]]; then
+    date +%s > "$sdir/var/restart-ses-ingress-fjnzwomg.stamp"
+  fi
+  set +e
+  out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent \
+    STATE_DIR="$sdir/var" LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 \
+    DNS_RECHECK_WAIT_SEC=0 ALERT_TO=test@example.com \
+    PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+  rc=$?
+  set -e
+  case "$mode" in
+    young*)
+      if [[ "$rc" == 0 && "$out" == *SKIP_YOUNG* && "$out" != *FAIL* && "$out" != *RESTART* && ! -f "$sdir/probes" && ! -f "$sdir/mail" ]]; then
+        pass "$mode: no probe, failure, restart or mail during startup grace"
+      else fail "$mode (rc=$rc): $out"; fi;;
+    dns_transient)
+      if [[ "$rc" == 0 && "$out" == *"DNS_RECHECK dep=ses-ingress-fjnzwomg rc=0"* && "$out" != *FAIL* && "$out" != *RESTART* && ! -f "$sdir/mail" && $(cat "$sdir/dns-count") == 2 ]]; then
+        pass "$mode: confirmed recovery without restart or mail"
+      else fail "$mode (rc=$rc): $out"; fi;;
+    dns_persistent)
+      if [[ "$rc" == 1 && "$out" == *"DNS_RECHECK dep=ses-ingress-fjnzwomg rc=2"* && -f "$sdir/restarted-ses-ingress-fjnzwomg" && "$out" == *AUTOHEALED* ]]; then
+        pass "$mode: persistent failure restarts and verifies recovery"
+      else fail "$mode (rc=$rc): $out"; fi;;
+    dns_cooldown)
+      if [[ "$rc" == 1 && "$out" == *"DNS_RECHECK dep=ses-ingress-fjnzwomg rc=2"* && "$out" == *"cooldown active"* && ! -f "$sdir/restarted-ses-ingress-fjnzwomg" ]]; then
+        pass "$mode: persistent failure respects existing restart stamp"
+      else fail "$mode (rc=$rc): $out"; fi;;
+  esac
+done
 
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]
