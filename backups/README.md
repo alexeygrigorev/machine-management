@@ -109,7 +109,7 @@ after the 02:30 pg dumps and 03:30 CP bundles) and:
    `main-temp` — read-only use, no rotation);
 2. `edge/acme-backup.sh` — fetches Traefik `acme.json` from both Contabo
    hosts, stores GPG-symmetric-encrypted (`~/.secrets/acme-backup-gpg.pass`,
-   600, escrowed offline) decrypt-verified copies under
+   600, escrowed in Secrets Manager `dr/acme-backup-gpg-passphrase`) decrypt-verified copies under
    `~/storagebox/backups/edge-tls/YYYY/MM/DD/`;
 3. `prune-storagebox.sh --apply` (30d) over the mirror + `edge-tls/` +
    legacy per-area copies;
@@ -192,10 +192,12 @@ marker — data node only), `host/firewall-{ufw,iptables-v4,iptables-v6}.txt`
 (reconstruction copy; recurring plaintext TLS copies stay with the
 backup-copies sibling schedule — no duplicate schedule here).
 
-The passphrase lives only in `/etc/coolify-cp-backup.pass` (600) on the
-nodes and the operator box (`~/tmp/secrets/` + `~/.secrets/`); human-held
-second escrow (Drive doc / password manager) is an explicit open item for
-Alexey. S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
+The passphrase lives in `/etc/coolify-cp-backup.pass` (600) on the nodes and
+the operator box (`~/tmp/secrets/` + `~/.secrets/`). Off-host escrow: AWS
+Secrets Manager, MAIN account, eu-west-1, secret
+`dr/coolify-cp-backup-gpg-passphrase` (2026-10-24, t1378u; decrypt of the latest
+contabo-a/b bundles verified with the escrowed copy). The ACME edge-tls
+passphrase is escrowed in `dr/acme-backup-gpg-passphrase`. S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
 copies 7 d.
 
 Isolated restore drill (operator box only, never on a CP host —

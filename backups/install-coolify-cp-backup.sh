@@ -60,6 +60,6 @@ echo "  1. sudo nano /etc/coolify-cp-backup.env  (CP_HOST_ID + S3 keys, chmod 60
 echo "  2. place /etc/coolify-cp-backup.pass     (GPG passphrase, chmod 600, from operator ~/tmp/secrets/coolify-cp-backup.pass)"
 echo "  3. ssh ${HOST} 'sudo /usr/local/sbin/coolify-cp-backup.sh'  (manual first run)"
 echo "  4. confirm S3 objects under s3://<bucket>/coolify/control-plane/"
-echo "  5. ESCROW (human): keep a second copy of the GPG passphrase OFF this"
+echo "  5. ESCROW: store a second copy of the GPG passphrase OFF this host in AWS Secrets Manager (MAIN eu-west-1) dr/coolify-cp-backup-gpg-passphrase"
 echo "     operator box + off the CP hosts (private Drive credentials doc or"
 echo "     password manager). Host /etc copies are reconstruction INPUT, not escrow."
