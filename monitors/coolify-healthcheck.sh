@@ -605,22 +605,27 @@ check_created_containers() {
   fi
   # shellcheck disable=SC2086
   ids="$(docker ps -a --filter status=created --format '{{.ID}}' 2>/dev/null || true)"
-  local stale="" id created epoch age now
+  local stale="" id created epoch age now details
   now="$(date +%s)"
   # shellcheck disable=SC2086
   for id in $ids; do
     created="$(docker inspect -f '{{.Created}}' "$id" 2>/dev/null || true)"
     epoch="$(date -d "$created" +%s 2>/dev/null || echo 0)"
     age=$(( now - epoch ))
-    if [[ "$epoch" -le 0 ]]; then
-      stale="$stale ${id}(age-unknown)"
-    elif [[ "$age" -gt "$CREATED_GRACE_SEC" ]]; then
-      stale="$stale ${id}(${age}s)"
+    if [[ "$epoch" -le 0 || "$age" -gt "$CREATED_GRACE_SEC" ]]; then
+      # Only ownership labels are emitted: arbitrary labels may hold secrets.
+      details="$(docker inspect -f 'name={{.Name}} image={{.Config.Image}} agent.session={{index .Config.Labels "agent.session"}} coolify.app={{index .Config.Labels "coolify.applicationId"}} coolify.resourceName={{index .Config.Labels "coolify.resourceName"}} coolify.managed={{index .Config.Labels "coolify.managed"}}' "$id" 2>/dev/null || echo 'metadata-unavailable')"
+      details="${details//$'\n'/ }"
+      if [[ "$epoch" -le 0 ]]; then
+        stale="$stale ${id}(age-unknown ${details})"
+      else
+        stale="$stale ${id}(${age}s ${details})"
+      fi
     fi
   done
   if [[ -n "${stale// /}" ]]; then
     log "FAIL check=${name}: stale Created container(s):${stale} (grace ${CREATED_GRACE_SEC}s)"
-    send_alert "$name" "FAIL" "Stale Created container(s) on $(hostname):${stale} — a Coolify deploy created but never started them (cf. t658u). Inspect, then 'docker rm' the leftover or 'docker start' it."
+    send_alert "$name" "FAIL" "Stale Created container(s) on $(hostname):${stale} — containers were created but never started; use ownership labels to attribute them. Inspect, then 'docker rm' the leftover or 'docker start' it."
     FAILED=1; return
   fi
   log "OK check=${name}: no stale Created containers"
