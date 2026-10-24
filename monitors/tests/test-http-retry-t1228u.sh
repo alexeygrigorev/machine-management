@@ -12,6 +12,13 @@ grep -qF 'HTTP_RETRIES="${HTTP_RETRIES:-2}"' "$SCRIPT" && pass "HTTP_RETRIES def
 grep -qF 'HTTP_CONNECT_TIMEOUT="${HTTP_CONNECT_TIMEOUT:-10}"' "$SCRIPT" && pass "CONNECT_TIMEOUT default" || fail "CONNECT_TIMEOUT default"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/stubbin"
+# Never let a synthetic FAIL reach the operator host's real mail transport.
+export TEST_MAIL="$TMP/mail"
+cat > "$TMP/stubbin/msmtp" <<'M'
+#!/usr/bin/env bash
+cat >> "$TEST_MAIL"
+M
+chmod +x "$TMP/stubbin/msmtp"
 cat > "$TMP/stubbin/curl" <<'C'
 #!/usr/bin/env bash
 STATE_DIR="${CURL_STUB_STATE}"; mkdir -p "$STATE_DIR"
@@ -36,8 +43,8 @@ OUT="$(
   PATH="$TMP/stubbin:$PATH" COOLIFY_HEALTHCHECK_ENV_FILE=/dev/null \
   STATE_DIR="$TMP/s1" LOCK_FILE="$TMP/l1" LOG_FILE="$TMP/log1" \
   SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_DISK_CHECK=1 SKIP_BACKUP_CHECKS=1 CHECK_CMP_CALLBACKS=0 \
-  APP_URLS="relay=https://relay.example.test/health/" CONTENT_CHECKS= \
-  HTTP_RETRIES=2 HTTP_RETRY_SLEEP_SEC=0 HTTP_CONNECT_TIMEOUT=5 HTTP_TIMEOUT=5 ALERT_TO= \
+  APP_URLS="relay=https://127.0.0.1/health/" CONTENT_CHECKS= \
+  HTTP_RETRIES=2 HTTP_RETRY_SLEEP_SEC=0 HTTP_CONNECT_TIMEOUT=5 HTTP_TIMEOUT=5 ALERT_TO=retry-test@example.test \
   bash "$SCRIPT" 2>&1
 )"; RC=$?; set -e
 if [[ $RC -eq 0 ]] && echo "$OUT" | grep -q 'OK check=http-relay: .* -> 200' && echo "$OUT" | grep -q 'http-retry'; then
@@ -59,12 +66,18 @@ OUT2="$(
   PATH="$TMP/stubbin:$PATH" COOLIFY_HEALTHCHECK_ENV_FILE=/dev/null \
   STATE_DIR="$TMP/s2" LOCK_FILE="$TMP/l2" LOG_FILE="$TMP/log2" \
   SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_DISK_CHECK=1 SKIP_BACKUP_CHECKS=1 CHECK_CMP_CALLBACKS=0 \
-  APP_URLS="relay=https://relay.example.test/health/" CONTENT_CHECKS= \
-  HTTP_RETRIES=1 HTTP_RETRY_SLEEP_SEC=0 HTTP_CONNECT_TIMEOUT=5 HTTP_TIMEOUT=5 ALERT_TO= \
+  APP_URLS="relay=https://127.0.0.1/health/" CONTENT_CHECKS= \
+  HTTP_RETRIES=1 HTTP_RETRY_SLEEP_SEC=0 HTTP_CONNECT_TIMEOUT=5 HTTP_TIMEOUT=5 ALERT_TO=retry-test@example.test \
   bash "$SCRIPT" 2>&1
 )"; RC2=$?; set -e
 if [[ $RC2 -ne 0 ]] && echo "$OUT2" | grep -q 'FAIL check=http-relay'; then pass "exhaust still FAIL"
 else fail "exhaust rc=$RC2"
+fi
+if [[ -f "$TEST_MAIL" ]] && grep -qF 'To: retry-test@example.test' "$TEST_MAIL" &&
+   grep -qF 'Subject: [coolify-healthcheck] FAIL (http-relay)' "$TEST_MAIL" &&
+   ! grep -qE 'alexey@datatalks.club|dev@dtcdev.click' "$TEST_MAIL"; then
+  pass "synthetic failure mail captured locally with test recipients"
+else fail "test mail isolation"
 fi
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]

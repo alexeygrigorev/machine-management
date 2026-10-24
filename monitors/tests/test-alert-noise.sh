@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 echo "$url" >> "$STUB_CURL_LOG"
 code=200; body='{"status":"ok"}'
-if [[ "$url" == https://aishl.example.test/* ]]; then
+if [[ "$url" == https://aishl.test/* ]]; then
   case "$STUB_RESPONSE" in
     fail) code=503; body='unavailable';;
     wrong) body='proxy default page';;
@@ -62,8 +62,8 @@ run_check() { # state-dir, response, epoch, skip-public
     CHECK_AISL_Q=0 CHECK_CMP_CALLBACKS=0 \
     ALERT_TO=alexey@datatalks.club,dev@dtcdev.click ALERT_REPEAT_MIN=60 \
     RECOVER_NOTIFY_MIN_SEC=600 SKIP_PUBLIC_HTTP_CHECKS="$4" \
-    APP_URLS='aishl=https://aishl.example.test/ping loopback=http://127.0.0.1/health/' \
-    CONTENT_CHECKS='aishl_home=https://aishl.example.test/::"status":"ok" wg=http://10.100.0.2/health/::"status":"ok"' \
+    APP_URLS='aishl=https://aishl.test/ping loopback=http://127.0.0.1/health/' \
+    CONTENT_CHECKS='aishl_home=https://aishl.test/::"status":"ok" wg=http://10.100.0.2/health/::"status":"ok"' \
     STUB_RESPONSE="$2" STUB_NOW="$3" STUB_MAIL="$dir/mail" STUB_CURL_LOG="$dir/curls" \
     PATH="$TMP/bin:/usr/bin:/bin" bash "$SCRIPT" > "$dir/log" 2>&1; then
     rc=0

@@ -179,7 +179,7 @@ run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
 }
 
 # T6: marker present (case/whitespace-insensitive) -> green
-out=""; set +e; out="$(run_content 'svc=https://example.test/good::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'svc=https://127.0.0.1/good::"status":"ok"')"; rc=$?; set -e
 if [[ $rc -eq 0 && "$out" == *'OK check=content-svc'* ]]; then
   pass "T6 content marker match green (rc=$rc)"
 else
@@ -187,7 +187,7 @@ else
 fi
 
 # T7: HTTP 200 but marker absent (proxy default page) -> FAIL
-out=""; set +e; out="$(run_content 'svc=https://example.test/wrong::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'svc=https://127.0.0.1/wrong::"status":"ok"')"; rc=$?; set -e
 if [[ $rc -ne 0 && "$out" == *"marker"*"absent"* ]]; then
   pass "T7 wrong-content 200 FAILs on missing marker (rc=$rc)"
 else
@@ -195,7 +195,7 @@ else
 fi
 
 # T8: empty 200 body -> FAIL (catches empty-backend incidents)
-out=""; set +e; out="$(run_content 'svc=https://example.test/empty::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'svc=https://127.0.0.1/empty::"status":"ok"')"; rc=$?; set -e
 if [[ $rc -ne 0 && "$out" == *'FAIL check=content-svc'* ]]; then
   pass "T8 empty-body 200 FAILs (rc=$rc)"
 else
@@ -203,9 +203,9 @@ else
 fi
 
 # T9: connect failure + HTTP 500 -> FAIL (marker stage never masks transport)
-out=""; set +e; out="$(run_content 'svc=https://example.test/down::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'svc=https://127.0.0.1/down::"status":"ok"')"; rc=$?; set -e
 t9a=1; [[ $rc -ne 0 && "$out" == *'FAIL check=content-svc'* ]] || t9a=0
-out=""; set +e; out="$(run_content 'svc=https://example.test/fivehundred::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'svc=https://127.0.0.1/fivehundred::"status":"ok"')"; rc=$?; set -e
 if [[ $t9a -eq 1 && $rc -ne 0 && "$out" == *'returned HTTP 500'* ]]; then
   pass "T9 transport/500 FAILs before marker match"
 else
@@ -213,7 +213,7 @@ else
 fi
 
 # T10: malformed CONTENT_CHECKS entry is skipped with WARN, others still run
-out=""; set +e; out="$(run_content 'bogus-no-delimiter svc=https://example.test/good::"status":"ok"')"; rc=$?; set -e
+out=""; set +e; out="$(run_content 'bogus-no-delimiter svc=https://127.0.0.1/good::"status":"ok"')"; rc=$?; set -e
 if [[ $rc -eq 0 && "$out" == *'skipping malformed CONTENT_CHECKS entry'* && "$out" == *'OK check=content-svc'* ]]; then
   pass "T10 malformed entry skipped, good entry green"
 else

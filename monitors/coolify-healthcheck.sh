@@ -37,6 +37,27 @@ fi
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# Reserved test hosts must never become live monitor targets, even when public
+# checks are skipped on this node. Validate before probes, state or mail writes.
+validate_target_hosts() {
+  local setting entry url authority host
+  for setting in APP_URLS CONTENT_CHECKS; do
+    for entry in ${!setting:-}; do
+      url="${entry#*=}"; url="${url%%::*}"
+      authority="${url#*://}"; authority="${authority%%[/?#]*}"
+      authority="${authority##*@}"
+      host="${authority%%:*}"; host="${host,,}"; host="${host%.}"
+      case "$host" in
+        example.test|*.example.test)
+          log "ERROR: reserved example.test host in ${setting}; use a real health URL"
+          return 1
+          ;;
+      esac
+    done
+  done
+}
+validate_target_hosts || exit 2
+
 # ---- config (overridable via env file) ----
 STATE_DIR="${STATE_DIR:-/var/lib/coolify-healthcheck}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-healthcheck.lock}"
@@ -90,7 +111,7 @@ PG_SHARED_CONTAINER="$(resolve_pg_container "$PG_SHARED_CONTAINER" "pg-shared")"
 PG_RELAY_CONTAINER="$(resolve_pg_container "$PG_RELAY_CONTAINER" "pg-relay")"
 
 # Space-separated name=url pairs, e.g.:
-#   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.example.com/healthz"
+#   APP_URLS="coolify_ui=http://169.58.119.163:8000/ relay=https://relay.datatalks.club/health/"
 # NOTE: these are STATUS-ONLY checks (2xx/3xx). They catch TCP/DNS outages
 # but NOT wrong-content incidents (proxy default page, error page with 200).
 # Pair every user-facing surface with a CONTENT_CHECKS entry below.
