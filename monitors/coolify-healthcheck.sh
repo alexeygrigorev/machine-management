@@ -653,6 +653,54 @@ else
   check_wal_freshness
 fi
 
+prune_stale_checks() {
+  # Prune state files for checks that are no longer configured (t1342u).
+  [[ -d "$STATE_DIR" ]] || return 0
+  local -A valid_checks=()
+  valid_checks["pg-shared"]=1
+  valid_checks["pg-relay"]=1
+  valid_checks["docker-created"]=1
+  valid_checks["disk-root"]=1
+  valid_checks["aisl-q"]=1
+  valid_checks["cmp-callbacks"]=1
+
+  local pair app entry db stack
+  if [[ -n "${APP_URLS:-}" ]]; then
+    for pair in $APP_URLS; do
+      app="${pair%%=*}"
+      [[ -n "$app" ]] && valid_checks["http-${app}"]=1
+    done
+  fi
+  if [[ -n "${CONTENT_CHECKS:-}" ]]; then
+    for entry in $CONTENT_CHECKS; do
+      app="${entry%%=*}"
+      [[ -n "$app" ]] && valid_checks["content-${app}"]=1
+    done
+  fi
+  if [[ -n "${EXPECT_DBS:-}" ]]; then
+    for db in $EXPECT_DBS; do
+      [[ -n "$db" ]] && valid_checks["dump-${db}"]=1
+    done
+  fi
+  if [[ -n "${WAL_STACKS:-}" ]]; then
+    for stack in $WAL_STACKS; do
+      [[ -n "$stack" ]] && valid_checks["wal-${stack}"]=1
+    done
+  fi
+
+  local f cname
+  for f in "$STATE_DIR"/*.state; do
+    [[ -f "$f" ]] || continue
+    cname="$(basename "$f" .state)"
+    if [[ -z "${valid_checks[$cname]:-}" ]]; then
+      log "PRUNE check=${cname}: check no longer in config — removed stale state"
+      rm -f "$f"
+    fi
+  done
+}
+
+prune_stale_checks
+
 if [[ "$FAILED" -ne 0 ]]; then
   log "CHECKS_FAILED"
   exit 1

@@ -82,6 +82,10 @@ case "${1:-}" in
         *) target="$1"; shift;;
       esac
     done
+    if [[ "$target" == *"gone"* || "$target" == "nonexistent"* ]]; then
+      echo "error: no such object: $target" >&2
+      exit 1
+    fi
     case "$fmt" in
       *'NetworkSettings.Networks'*'IPAddress'*)
         # All PG targets resolve to the live relay IPs in these tests, so
@@ -132,11 +136,15 @@ case "${1:-}" in
   logs)
     target="${!#}"
     if [[ "$target" == "ses-ingress-fjnzwomg" ]]; then
-      if [[ "$MODE" == "ses_fail" ]] && ! was_restarted "$target"; then
+      if [[ "$MODE" == "ses_fail" ]]; then
         printf '%s\n' \
           "Starting ses-webhooks ingress drain" \
           "received=2 deleted=2 failed=0" \
           "received=1 deleted=0 failed=1"
+      elif [[ "$MODE" == "ses_db_err" ]] && ! was_restarted "$target"; then
+        printf '%s\n' \
+          "Starting ses-webhooks ingress drain" \
+          "django.db.utils.OperationalError: could not translate host name"
       else
         printf '%s\n' \
           "Starting ses-webhooks ingress drain" \
@@ -281,12 +289,20 @@ else
   fail "T2 healthy baseline (rc=$rc) -- $out"
 fi
 
-# ---- T3: Fresh TCP OK, ses-ingress batch failed -> AUTOHEALED ----
+# ---- T3: Fresh TCP OK, ses-ingress per-message failure (deleted>0 recently or failed=1) -> NO restart, no FAIL mail, logged locally, ALL_OK ----
 out=""; set +e; out="$(run_watchdog ses_fail)"; rc=$?; set -e
-if [[ "$out" == *"ses_ingress_batch_failed"* && "$out" == *"HEALED check=dep-ses-ingress-fjnzwomg"* && "$out" == *"AUTOHEALED"* ]]; then
-  pass "T3 ses-ingress deleted=0 failed=1 caught despite TCP OK and AUTOHEALED"
+if [[ $rc -eq 0 && "$out" == *"ALL_OK"* && "$out" == *"ses_per_msg_fail=received=1,deleted=0,failed=1"* && "$out" != *"AUTOHEALED"* && "$out" != *"RESTART dep=ses-ingress"* ]]; then
+  pass "T3 ses-ingress per-message failure (deleted=0 failed=1) recognized without container restart or false FAIL alert (t1342u)"
 else
-  fail "T3 ses-ingress batch failure (rc=$rc) -- $out"
+  fail "T3 ses-ingress per-message failure (rc=$rc) -- $out"
+fi
+
+# ---- T3b: Fresh TCP OK, ses-ingress DB OperationalError -> AUTOHEALED ----
+out=""; set +e; out="$(run_watchdog ses_db_err)"; rc=$?; set -e
+if [[ "$out" == *"worker_db_error_since_start"* && "$out" == *"HEALED check=dep-ses-ingress-fjnzwomg"* && "$out" == *"AUTOHEALED"* ]]; then
+  pass "T3b ses-ingress real DB OperationalError caught and AUTOHEALED"
+else
+  fail "T3b ses-ingress real DB error (rc=$rc) -- $out"
 fi
 
 # ---- T4: Fresh TCP OK, stale active socket peer -> AUTOHEALED ----
@@ -364,6 +380,66 @@ if [[ $rc -eq 0 && "$out" == *"ALL_OK"* \
   pass "T10 pg-shared branch uses PG_DB_pg_shared=postgres, relay keeps PG_DB, ALL_OK"
 else
   fail "T10 multi-label per-label DB (rc=$rc) -- $out"
+fi
+
+# ---- T11: AUTOHEALED deduplication (at most 1 per cooldown window with count) ----
+sdir_t11="$TMP/state-t11-$RANDOM"
+mkdir -p "$sdir_t11/var"
+printf '%s' "stale_peer" > "$sdir_t11/mode"
+# Run 1: first autoheal -> should alert AUTOHEALED
+out1=""; set +e
+out1="$(STUB_STATE_DIR="$sdir_t11" RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir_t11/var" LOCK_FILE="$sdir_t11/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="test@example.com" PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+# Clear the restarted flag and allow restart again by clearing stamp
+rm -f "$sdir_t11/restarted-ses-ingress-fjnzwomg" "$sdir_t11/var/restart-ses-ingress-fjnzwomg.stamp"
+# Run 2: second autoheal in same cooldown window -> alert should be suppressed
+out2=""; set +e
+out2="$(STUB_STATE_DIR="$sdir_t11" RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir_t11/var" LOCK_FILE="$sdir_t11/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="test@example.com" PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out1" == *"AUTOHEALED"* && "$out2" == *"AUTOHEALED check=dep-ses-ingress-fjnzwomg: alert suppressed"* ]]; then
+  pass "T11 AUTOHEALED deduped: second autoheal within cooldown window suppressed"
+else
+  fail "T11 AUTOHEALED deduplication -- out1: $out1 -- out2: $out2"
+fi
+
+# ---- T12: RECOVER_NOTIFY_MIN_SEC suppresses rapid flap RECOVERED mail ----
+sdir_t12="$TMP/state-t12-$RANDOM"
+mkdir -p "$sdir_t12/var"
+now_sec=$(date +%s)
+# Simulate check that failed just 30s ago
+printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\n' "$(( now_sec - 30 ))" "$(( now_sec - 30 ))" > "$sdir_t12/var/dep-ses-ingress-fjnzwomg.state"
+printf '%s' "healthy" > "$sdir_t12/mode"
+out_t12=""; set +e
+out_t12="$(STUB_STATE_DIR="$sdir_t12" RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir_t12/var" LOCK_FILE="$sdir_t12/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="test@example.com" RECOVER_NOTIFY_MIN_SEC=600 PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out_t12" == *"suppressing RECOVERED mail"* && "$out_t12" != *"ALERT check=dep-ses-ingress-fjnzwomg subject='[relay-pg-dns-watchdog] RECOVERED"* ]]; then
+  pass "T12 RECOVER_NOTIFY_MIN_SEC suppresses RECOVERED mail for sub-window flap"
+else
+  fail "T12 RECOVER_NOTIFY_MIN_SEC -- $out_t12"
+fi
+
+# ---- T13: Stale state files for gone containers are pruned ----
+sdir_t13="$TMP/state-t13-$RANDOM"
+mkdir -p "$sdir_t13/var"
+touch "$sdir_t13/var/dep-gonecontainer1.state"
+touch "$sdir_t13/var/restart-gonecontainer1.stamp"
+touch "$sdir_t13/var/dep-ses-ingress-fjnzwomg.state"
+printf '%s' "healthy" > "$sdir_t13/mode"
+out_t13=""; set +e
+out_t13="$(STUB_STATE_DIR="$sdir_t13" RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir_t13/var" LOCK_FILE="$sdir_t13/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="test@example.com" PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ ! -f "$sdir_t13/var/dep-gonecontainer1.state" && ! -f "$sdir_t13/var/restart-gonecontainer1.stamp" && -f "$sdir_t13/var/dep-ses-ingress-fjnzwomg.state" && "$out_t13" == *"PRUNE"* ]]; then
+  pass "T13 stale state and stamp files for gone containers pruned automatically"
+else
+  fail "T13 stale state pruning -- remaining files: $(ls "$sdir_t13/var")"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

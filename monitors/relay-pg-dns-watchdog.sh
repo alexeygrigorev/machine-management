@@ -99,6 +99,11 @@ TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
+# Outage / flap notification tuning (t1273u / t1342u):
+# Suppress RECOVERED notice if outage lasted shorter than this many seconds (default 600s = 10m)
+RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
+# At most one AUTOHEALED notice per check per cooldown window (default 3600s = 1h)
+AUTOHEALED_COOLDOWN_SEC="${AUTOHEALED_COOLDOWN_SEC:-3600}"
 
 command -v docker >/dev/null 2>&1 || { log "FATAL: docker not found"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "FATAL: missing required binary: flock"; exit 1; }
@@ -113,24 +118,73 @@ EXIT_CODE=0
 
 safe_name() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
+prune_stale_state_files() {
+  # Prune state and stamp files for containers that no longer exist (t1342u)
+  [[ -d "$STATE_DIR" ]] || return 0
+  local f base cname
+  for f in "$STATE_DIR"/dep-*.state; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f" .state)"
+    cname="${base#dep-}"
+    if ! docker inspect "$cname" >/dev/null 2>&1; then
+      log "PRUNE check=${base}: container '${cname}' no longer exists — removed stale state"
+      rm -f "$f" "${STATE_DIR}/restart-${cname}.stamp"
+    fi
+  done
+  for f in "$STATE_DIR"/restart-*.stamp; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f" .stamp)"
+    cname="${base#restart-}"
+    if ! docker inspect "$cname" >/dev/null 2>&1; then
+      log "PRUNE stamp=${base}: container '${cname}' no longer exists — removed stale stamp"
+      rm -f "$f"
+    fi
+  done
+}
+
 send_alert() {
   # $1=check-name $2=subject-suffix $3=body  (same dedupe as coolify-healthcheck)
   local name="$1" subject="$2" body="$3"
   local state_file="${STATE_DIR}/${name}.state"
-  local last_alert=0 last_status=""
+  local last_alert=0 last_status="" fail_since=0 last_autohealed=0 autoheal_count=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
     last_alert="${LAST_ALERT:-0}"; last_status="${STATUS:-}"
+    fail_since="${FAIL_SINCE:-0}"
+    last_autohealed="${LAST_AUTOHEALED:-0}"
+    autoheal_count="${AUTOHEAL_COUNT:-0}"
   fi
-  local is_recovery=0
-  [[ "$subject" == RECOVERED* || "$subject" == AUTOHEALED* ]] && is_recovery=1
-  if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
-    local elapsed_min=$(( (NOW - last_alert) / 60 ))
-    if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
-      return 0  # still failing, recently alerted — dedupe
+
+  if [[ "$subject" == AUTOHEALED* ]]; then
+    autoheal_count=$(( autoheal_count + 1 ))
+    if [[ "$last_autohealed" =~ ^[0-9]+$ && "$last_autohealed" -gt 0 ]]; then
+      local elapsed_autoheal=$(( NOW - last_autohealed ))
+      if (( elapsed_autoheal < AUTOHEALED_COOLDOWN_SEC )); then
+        log "AUTOHEALED check=${name}: alert suppressed (cooldown active: ${elapsed_autoheal}s < ${AUTOHEALED_COOLDOWN_SEC}s, count=${autoheal_count})"
+        printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\nLAST_AUTOHEALED=%s\nAUTOHEAL_COUNT=%s\n' \
+          "$last_autohealed" "$autoheal_count" > "$state_file"
+        return 0
+      fi
+    fi
+    # First autoheal in this window, or cooldown window expired
+    last_autohealed="$NOW"
+    if (( autoheal_count > 1 )); then
+      body="${body}"$'\n\n'"(Auto-heal events in cooldown window: ${autoheal_count})"
+    fi
+  elif [[ "$subject" == RECOVERED* ]]; then
+    # RECOVERED notification rate-limiting handled via mark_ok / RECOVER_NOTIFY_MIN_SEC
+    :
+  else
+    # FAIL alert dedupe
+    if [[ "$last_status" == "FAIL" ]]; then
+      local elapsed_min=$(( (NOW - last_alert) / 60 ))
+      if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
+        return 0  # still failing, recently alerted — dedupe
+      fi
     fi
   fi
+
   local full_subject="[relay-pg-dns-watchdog] ${subject} (${name})"
   local to_csv="${ALERT_TO// /,}"
   local to_header="${to_csv//,/, }"
@@ -157,25 +211,53 @@ send_alert() {
     log "WARN: no MTA (sendmail/msmtp) — alert for ${name} logged only"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
-  printf 'STATUS=%s\nLAST_ALERT=%s\n' \
-    "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
-    "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" > "$state_file"
+
+  local is_recovery=0
+  [[ "$subject" == RECOVERED* || "$subject" == AUTOHEALED* ]] && is_recovery=1
+  if [[ "$is_recovery" -eq 1 ]]; then
+    printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\nLAST_AUTOHEALED=%s\nAUTOHEAL_COUNT=%s\n' \
+      "$last_autohealed" "$autoheal_count" > "$state_file"
+  else
+    if [[ "${last_status:-}" != "FAIL" || -z "${FAIL_SINCE:-}" || "${FAIL_SINCE:-0}" -eq 0 ]]; then
+      fail_since="$NOW"
+    fi
+    printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\nLAST_AUTOHEALED=%s\nAUTOHEAL_COUNT=%s\n' \
+      "$NOW" "$fail_since" "$last_autohealed" "$autoheal_count" > "$state_file"
+  fi
 }
 
 mark_ok() {
   # $1=check-name — transitions FAIL→RECOVERED notice; silent otherwise
+  # Suppresses RECOVERED notice if outage lasted shorter than RECOVER_NOTIFY_MIN_SEC (t1273u/t1342u)
   local name="$1"
   local state_file="${STATE_DIR}/${name}.state"
-  local last_status=""
+  local last_status="" fail_since=0 last_autohealed=0 autoheal_count=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
     last_status="${STATUS:-}"
+    fail_since="${FAIL_SINCE:-0}"
+    last_autohealed="${LAST_AUTOHEALED:-0}"
+    autoheal_count="${AUTOHEAL_COUNT:-0}"
+  fi
+  if [[ "$last_autohealed" =~ ^[0-9]+$ && "$last_autohealed" -gt 0 ]] && (( NOW - last_autohealed >= AUTOHEALED_COOLDOWN_SEC )); then
+    autoheal_count=0
   fi
   if [[ "$last_status" == "FAIL" ]]; then
-    send_alert "$name" "RECOVERED" "Check '${name}' green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+    local dur=0
+    if [[ "$fail_since" =~ ^[0-9]+$ && "$fail_since" -gt 0 ]]; then
+      dur=$(( NOW - fail_since ))
+    fi
+    if [[ "$dur" -ge "$RECOVER_NOTIFY_MIN_SEC" ]]; then
+      send_alert "$name" "RECOVERED" "Check '${name}' green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ') (was FAIL for ${dur}s)."
+    else
+      log "OK check=${name}: recovered after ${dur}s (< RECOVER_NOTIFY_MIN_SEC=${RECOVER_NOTIFY_MIN_SEC}) — suppressing RECOVERED mail"
+      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\nLAST_AUTOHEALED=%s\nAUTOHEAL_COUNT=%s\n' \
+        "$last_autohealed" "$autoheal_count" > "$state_file"
+    fi
   else
-    printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
+    printf 'STATUS=OK\nLAST_ALERT=%s\nFAIL_SINCE=0\nLAST_AUTOHEALED=%s\nAUTOHEAL_COUNT=%s\n' \
+      "${LAST_ALERT:-0}" "$last_autohealed" "$autoheal_count" > "$state_file"
   fi
 }
 
@@ -485,18 +567,6 @@ probe_worker_progress() {
     logs="$(docker logs --tail 200 "$c" 2>&1 || true)"
   fi
 
-  if [[ "$c" == ses-ingress* ]]; then
-    last_batch="$(printf '%s\n' "$logs" | grep -oE 'received=[0-9]+ deleted=[0-9]+ failed=[0-9]+' | tail -n 1 || true)"
-    if [[ -n "$last_batch" ]]; then
-      if [[ "$last_batch" =~ deleted=0[[:space:]]+failed=[1-9] ]]; then
-        printf 'progress=FAIL(ses_ingress_batch_failed:%s)' "${last_batch// /,}"
-        return 4
-      fi
-      printf 'progress=ok(%s,ses_last=%s)' "$peer_out" "${last_batch// /,}"
-      return 0
-    fi
-  fi
-
   local tail_after_start="$logs"
   if printf '%s\n' "$logs" | grep -qE 'Starting (worker|.*ingress drain|recipient-list import worker|.*callback dispatcher)'; then
     tail_after_start="$(printf '%s\n' "$logs" | awk '
@@ -510,6 +580,27 @@ probe_worker_progress() {
     err_line="$(printf '%s\n' "$tail_after_start" | grep -E '(psycopg2|django\.db\.utils)\.(OperationalError|InterfaceError)' | tail -n 1 | tr -s '[:space:]' '_' | cut -c1-80)"
     printf 'progress=FAIL(worker_db_error_since_start:%s)' "$err_line"
     return 4
+  fi
+
+  if [[ "$c" == ses-ingress* ]]; then
+    last_batch="$(printf '%s\n' "$logs" | grep -oE 'received=[0-9]+ deleted=[0-9]+ failed=[0-9]+' | tail -n 1 || true)"
+    if [[ -n "$last_batch" ]]; then
+      if [[ "$last_batch" =~ deleted=0[[:space:]]+failed=[1-9] || "$last_batch" =~ failed=[1-9] ]]; then
+        local recent_deleted
+        recent_deleted="$(printf '%s\n' "$logs" | grep -oE 'received=[0-9]+ deleted=[0-9]+ failed=[0-9]+' | grep -v 'deleted=0' | wc -l)"
+        # Distinguish real connectivity failure (TCP probe, socket peers, or DB errors caught above)
+        # from per-message processing failures (deleted>0 recently or isolated failed=1).
+        # Per-message failures do NOT send FAIL and do NOT restart container (t1342u).
+        if (( recent_deleted > 0 )) || [[ "$last_batch" =~ failed=1([[:space:]]|$) ]]; then
+          printf 'progress=ok(%s,ses_per_msg_fail=%s)' "$peer_out" "${last_batch// /,}"
+          return 0
+        fi
+        printf 'progress=FAIL(ses_ingress_batch_failed:%s)' "${last_batch// /,}"
+        return 4
+      fi
+      printf 'progress=ok(%s,ses_last=%s)' "$peer_out" "${last_batch// /,}"
+      return 0
+    fi
   fi
 
   printf 'progress=ok(%s,logs=clean)' "$peer_out"
@@ -759,6 +850,8 @@ PG '${pg}' itself is healthy (pg_isready ok). If this repeats every cooldown, in
 for label in $PG_LABELS; do
   watch_pg "$label"
 done
+
+prune_stale_state_files
 
 if [[ "$FAILED" -ne 0 ]]; then
   log "CHECKS_FAILED"

@@ -124,4 +124,16 @@ require test "$(mail_count "$TMP/marker")" -eq 1
 require grep -q '^Subject: .* FAIL (content-aishl_home)' "$TMP/marker/mail"
 pass 'AISHL content mismatch with HTTP 200 still pages immediately'
 
+# Stale check pruning (t1342u): checks no longer in config (e.g. content-relay_dtcdev)
+# have their .state files pruned automatically.
+mkdir -p "$TMP/prune"
+touch "$TMP/prune/content-relay_dtcdev.state"
+touch "$TMP/prune/http-staleapp.state"
+run_check "$TMP/prune" good 1000000 0
+require test ! -f "$TMP/prune/content-relay_dtcdev.state"
+require test ! -f "$TMP/prune/http-staleapp.state"
+require test -f "$TMP/prune/http-aishl.state"
+require test -f "$TMP/prune/content-aishl_home.state"
+pass 'stale state files for removed checks (content-relay_dtcdev, http-staleapp) pruned automatically'
+
 echo "---- $PASS passed, 0 failed ----"
