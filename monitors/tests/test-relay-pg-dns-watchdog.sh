@@ -64,6 +64,12 @@ set -uo pipefail
 MODE="$(cat "${STUB_STATE_DIR}/mode" 2>/dev/null || echo healthy)"
 PG_NAME="mqimefrti7ratmaliirnikov"
 DEPS="ses-ingress-fjnzwomg worker-fjnzwomg provider-events-worker-fjnzwomg scheduler-fjnzwomg web-fjnzwomg"
+OLD="oascx5kjeimc0ivpttag9z3q-20261024T130608"
+NEW="oascx5kjeimc0ivpttag9z3q-20261024T133508"
+if [[ "$MODE" == retiring_* || "$MODE" == live_* || "$MODE" == removed_* || "$MODE" == restart_error ]]; then
+  DEPS="$OLD"
+  [[ "$MODE" == retiring_label || "$MODE" == retiring_compose || "$MODE" == live_other_service || "$MODE" == live_older_peer ]] && DEPS+=" $NEW"
+fi
 
 was_restarted() { [[ -f "${STUB_STATE_DIR}/restarted-$1" ]]; }
 
@@ -77,12 +83,32 @@ case "${1:-}" in
       echo "fake-shared-pg"
       exit 0
     fi
+    if [[ "$*" == *"label=coolify.name="* ]]; then
+      [[ "$MODE" == retiring_label || "$MODE" == live_older_peer ]] && printf '%s\n' "$OLD" "$NEW"
+      exit 0
+    fi
+    if [[ "$*" == *"label=com.docker.compose.project="* ]]; then
+      [[ "$MODE" == retiring_compose ]] && printf '%s\n' "$OLD" "$NEW"
+      # Same project, different service must not retire a live dependent.
+      [[ "$MODE" == live_other_service ]] && echo "$OLD"
+      exit 0
+    fi
     printf '%s\n' "$PG_NAME" $DEPS
     exit 0
     ;;
   restart)
     c="${2:-}"
     touch "${STUB_STATE_DIR}/restarted-${c}"
+    if [[ "$MODE" == removed_restart ]]; then
+      echo "Error response from daemon: No such container: $c" >&2
+      touch "${STUB_STATE_DIR}/removed"
+      exit 1
+    fi
+    if [[ "$MODE" == restart_error ]]; then
+      echo "Error response from daemon: restart failed" >&2
+      exit 1
+    fi
+    [[ "$MODE" == removed_after_restart ]] && touch "${STUB_STATE_DIR}/removed"
     exit 0
     ;;
   inspect)
@@ -94,11 +120,34 @@ case "${1:-}" in
         *) target="$1"; shift;;
       esac
     done
-    if [[ "$target" == *"gone"* || "$target" == "nonexistent"* ]]; then
+    if [[ "$target" == *"gone"* || "$target" == "nonexistent"* || ( "$target" == "$OLD" && -f "${STUB_STATE_DIR}/removed" ) ]]; then
       echo "error: no such object: $target" >&2
       exit 1
     fi
     case "$fmt" in
+      '{{.State.Status}}|'*)
+        status=running; running=true; networks=1
+        created=2026-10-24T13:06:08.000000000Z
+        coolify=""; project=""; service=""
+        if [[ "$target" == "$OLD" ]]; then
+          case "$MODE" in
+            retiring_stopped) status=exited; running=false;;
+            retiring_stopping) status=stopping;;
+            retiring_no_networks) networks=0;;
+            retiring_label|live_older_peer) coolify=relay;;
+            retiring_compose|live_other_service) project=relay; service=web;;
+          esac
+        fi
+        [[ "$target" == "$NEW" ]] && created=2026-10-24T13:35:15.677692498Z
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$status" "$running" "$networks" "$created" "$coolify" "$project" "$service"
+        ;;
+      '{{.Created}}|'*)
+        if [[ "$MODE" == live_older_peer ]]; then
+          echo '2026-10-24T12:00:00.000000000Z|true'
+        else
+          echo '2026-10-24T13:35:15.677692498Z|true'
+        fi
+        ;;
       *'NetworkSettings.Networks'*'IPAddress'*)
         # All PG targets resolve to the live relay IPs in these tests, so
         # synthetic healthy socket peers match for every label branch.
@@ -185,6 +234,7 @@ case "${1:-}" in
   exec)
     shift
     c="$1"; shift
+    printf '%s\n' "$c" >> "${STUB_STATE_DIR}/execs"
     cmd="$1"; shift
     # Record the psql/pg_isready database per container for T10 mapping proof.
     prev=""
@@ -200,6 +250,7 @@ case "${1:-}" in
       exit 0
     fi
     if [[ "$cmd" == "getent" ]]; then
+      [[ "$c" == "$OLD" ]] && exit 1
       printf '10.0.1.15 STREAM mqimefrti7ratmaliirnikov\nfd12:8ac:8b43::f STREAM mqimefrti7ratmaliirnikov\n'
       exit 0
     fi
@@ -212,6 +263,11 @@ case "${1:-}" in
       py_code="$2"
       if [[ "$py_code" == *"socket.getaddrinfo"* ]]; then
         printf '%s\n' "$c" >> "${STUB_STATE_DIR}/probes"
+        if [[ "$c" == "$OLD" && "$MODE" == removed_dns_wait ]]; then
+          touch "${STUB_STATE_DIR}/removed"
+          exit 2
+        fi
+        if [[ "$c" == "$OLD" && "$MODE" == live_dns ]]; then exit 2; fi
         if [[ "$MODE" == young* ]]; then exit 2; fi
         if [[ "$MODE" == dns_* && "$c" == ses-ingress-* ]] && ! was_restarted "$c"; then
           count=$(cat "${STUB_STATE_DIR}/dns-count" 2>/dev/null || echo 0)
@@ -226,7 +282,10 @@ case "${1:-}" in
         tcp6="${STUB_STATE_DIR}/tcp6-${c}"
         printf '  sl  local_address rem_address   st tx_queue rx_queue\n' > "$tcp4"
         printf '  sl  local_address                         remote_address                        st tx_queue rx_queue\n' > "$tcp6"
-        if [[ "$MODE" == "stale_peer" && "$c" == "ses-ingress-fjnzwomg" ]] && ! was_restarted "$c"; then
+        if [[ "$c" == "$OLD" ]]; then
+          # Incident fixture: v4=[]/v6=[], no established PG socket (peers=0).
+          [[ "$MODE" == removed_progress ]] && touch "${STUB_STATE_DIR}/removed"
+        elif [[ "$MODE" == "stale_peer" && "$c" == "ses-ingress-fjnzwomg" ]] && ! was_restarted "$c"; then
           # 10.0.1.2:5432 in little-endian hex = 0201000A:1538, state 01 (ESTABLISHED)
           printf '   0: 1001000A:9C40 0201000A:1538 01 00000000:00000000\n' >> "$tcp4"
         else
@@ -236,7 +295,11 @@ case "${1:-}" in
         patched_py="${py_code//\/proc\/1\/net\/tcp6/$tcp6}"
         patched_py="${patched_py//\/proc\/1\/net\/tcp/$tcp4}"
         /usr/bin/python3 -c "$patched_py" "$3" "$4"
-        exit $?
+        py_rc=$?
+        # The incident's docker exec failed with an empty peer summary; an
+        # otherwise healthy idle worker with peers=0 remains valid.
+        [[ "$c" == "$OLD" ]] && exit 1
+        exit "$py_rc"
       fi
       exit 0
     fi
@@ -527,6 +590,47 @@ if [[ -f "$mail_log" ]] \
 else
   fail "T14 alert mail format -- log=$(cat "$mail_log" 2>/dev/null || echo missing)"
 fi
+
+# Rolling-deploy incident on 2026-10-24 at 13:36:12Z, plus lifecycle races.
+for mode in retiring_label retiring_compose retiring_stopped retiring_stopping retiring_no_networks \
+  removed_restart removed_after_restart removed_dns_wait removed_progress \
+  live_peers_zero live_dns live_other_service live_older_peer restart_error; do
+  sdir="$TMP/state-$mode"
+  old=oascx5kjeimc0ivpttag9z3q-20261024T130608
+  mkdir -p "$sdir/var"
+  echo "$mode" > "$sdir/mode"
+  printf 'STATUS=OK\n' > "$sdir/var/dep-$old.state"
+  echo 1 > "$sdir/var/restart-$old.stamp"
+  set +e
+  out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent \
+    STATE_DIR="$sdir/var" LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 \
+    DNS_RECHECK_WAIT_SEC=0 ALERT_TO=test@example.com \
+    PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+  rc=$?
+  set -e
+  case "$mode" in
+    retiring_*)
+      if [[ "$rc" == 0 && "$out" == *"SKIP_RETIRING dep=$old reason="* \
+        && $(printf '%s\n' "$out" | grep -c "SKIP_RETIRING dep=$old ") == 1 \
+        && "$out" != *FAIL* && "$out" != *RESTART* && "$out" == *ALL_OK* \
+        && ! -f "$sdir/restarted-$old" && ! -e "$sdir/mail" ]] \
+        && ! grep -qx "$old" "$sdir/execs"; then
+        pass "$mode: retiring old deployment gets one skip, no probe/restart/failure/mail"
+      else fail "$mode (rc=$rc): $out"; fi;;
+    removed_*)
+      if [[ "$rc" == 0 && "$out" == *"PRUNE dep=$old"* && "$out" == *ALL_OK* \
+        && "$out" != *STILLFAIL* && "$out" != *ALERT* && ! -e "$sdir/mail" \
+        && ! -f "$sdir/var/dep-$old.state" && ! -f "$sdir/var/restart-$old.stamp" ]]; then
+        pass "$mode: mid-run removal prunes state/stamp without STILLFAIL or mail"
+      else fail "$mode (rc=$rc): $out"; fi;;
+    *)
+      if [[ "$rc" == 1 && "$out" == *"FAIL check=dep-$old"* \
+        && -f "$sdir/restarted-$old" && "$out" == *"ALERT check=dep-$old"* \
+        && -s "$sdir/mail/sent.log" && "$out" != *SKIP_RETIRING* ]]; then
+        pass "$mode: live failure past grace still fails, restarts and alerts"
+      else fail "$mode (rc=$rc): $out"; fi;;
+  esac
+done
 
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]

@@ -485,6 +485,56 @@ dependent_is_young() {
   return 1
 }
 
+prune_dependent_state() {
+  local c="$1" key
+  key="$(safe_name "$c")"
+  rm -f "${STATE_DIR}/dep-${key}.state" "${STATE_DIR}/restart-${key}.stamp"
+  log "PRUNE dep=${c} reason=no_such_container removed stale state"
+}
+
+declare -A RETIRING_DEPS=()
+dependent_is_retiring() {
+  # Re-read lifecycle/identity at each action boundary: Coolify may retire a
+  # container after docker ps, during a probe, or during a verification wait.
+  local c="$1" meta status running networks created coolify project service
+  local peers="" peer peer_meta peer_created peer_running reason=""
+  [[ -n "${RETIRING_DEPS[$c]:-}" ]] && return 0
+  if ! meta="$(docker inspect -f '{{.State.Status}}|{{.State.Running}}|{{len .NetworkSettings.Networks}}|{{.Created}}|{{with index .Config.Labels "coolify.name"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.service"}}{{.}}{{end}}' "$c" 2>/dev/null)"; then
+    reason=missing
+    prune_dependent_state "$c"
+  else
+    IFS='|' read -r status running networks created coolify project service <<< "$meta"
+    if [[ "$status" != running || "$running" != true ]]; then
+      reason="state_${status:-unknown}"
+    elif [[ "$networks" == 0 ]]; then
+      reason=no_networks
+    else
+      if [[ -n "$coolify" ]]; then
+        peers="$(docker ps --filter "label=coolify.name=${coolify}" --format '{{.Names}}' 2>/dev/null)"
+      fi
+      if [[ -n "$project" && -n "$service" ]]; then
+        peers+=" $(docker ps --filter "label=com.docker.compose.project=${project}" --filter "label=com.docker.compose.service=${service}" --format '{{.Names}}' 2>/dev/null)"
+      fi
+      created="$(date -d "$created" +%s%N 2>/dev/null)"
+      for peer in $peers; do
+        [[ "$peer" == "$c" ]] && continue
+        peer_meta="$(docker inspect -f '{{.Created}}|{{.State.Running}}' "$peer" 2>/dev/null)" || continue
+        IFS='|' read -r peer_created peer_running <<< "$peer_meta"
+        [[ "$peer_running" == true ]] || continue
+        peer_created="$(date -d "$peer_created" +%s%N 2>/dev/null)"
+        if [[ -n "$created" && -n "$peer_created" ]] && (( peer_created > created )); then
+          reason="newer_container_${peer}"
+          break
+        fi
+      done
+    fi
+  fi
+  [[ -n "$reason" ]] || return 1
+  RETIRING_DEPS[$c]="$reason"
+  log "SKIP_RETIRING dep=${c} reason=${reason}"
+  return 0
+}
+
 is_web_container() {
   # $1=container name — 0 if HTTP server (web-* / gunicorn / uvicorn), 1 if worker
   [[ "$1" == web-* ]] && return 0
@@ -665,7 +715,7 @@ check_pg_worker_progress() {
       [[ "$d" == scheduler-* ]] && { sched_c="$d"; break; }
     done
     hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
-    if [[ -n "$sched_c" ]] && dependent_is_young "$sched_c"; then
+    if [[ -n "$sched_c" ]] && { dependent_is_retiring "$sched_c" || dependent_is_young "$sched_c"; }; then
       : # Leave existing alert state untouched during startup.
     elif [[ "$hb_age" =~ ^-?[0-9]+$ ]]; then
       (( hb_age < 0 )) && hb_age=0
@@ -673,11 +723,13 @@ check_pg_worker_progress() {
         log "OK check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
         mark_ok "$hb_check"
       else
-        FAILED=1
         log "FAIL check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
         if [[ -n "$sched_c" ]] && restart_dependent "$sched_c"; then
           sleep "$RESTART_VERIFY_WAIT"
+          dependent_is_retiring "$sched_c" && return
           hb_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ticked_at)))::int, 999999) FROM relay_scheduler_heartbeat;" 2>/dev/null | tr -d '[:space:]')"
+          dependent_is_retiring "$sched_c" && return
+          FAILED=1
           if [[ "$hb_age" =~ ^-?[0-9]+$ ]] && (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
             log "HEALED check=${hb_check} scheduler=${sched_c} age=${hb_age}s after restart"
             send_alert "$hb_check" "AUTOHEALED" \
@@ -689,6 +741,9 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
               "Relay scheduler heartbeat on $(hostname) remains stale (age=${hb_age:-unknown}s > ${SCHEDULER_MAX_AGE_SEC}s) after restarting ${sched_c}."
           fi
         else
+          [[ "$?" -eq 2 ]] && return
+          [[ -n "$sched_c" ]] && dependent_is_retiring "$sched_c" && return
+          FAILED=1
           send_alert "$hb_check" "FAIL" \
             "Relay scheduler heartbeat on $(hostname) is stale (age=${hb_age}s > ${SCHEDULER_MAX_AGE_SEC}s); scheduler=${sched_c:-not-found} restart skipped (cooldown or DRY_RUN)."
         fi
@@ -728,20 +783,23 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
           if [[ "$qname" == "provider-events" && "$d" == provider-events-worker-* ]]; then qworker="$d"; break; fi
           if [[ "$qname" == "default" && "$d" == worker-* ]]; then qworker="$d"; break; fi
         done
-        if [[ -n "$qworker" ]] && dependent_is_young "$qworker"; then
+        if [[ -n "$qworker" ]] && { dependent_is_retiring "$qworker" || dependent_is_young "$qworker"; }; then
+          q_young=1
           continue
         fi
-        q_failed=1
-        FAILED=1
         log "FAIL check=${q_check} pg=${label} queue=${qname} ready=${qcnt} oldest_ready=${qage}s max=${TASK_QUEUE_MAX_READY_AGE_SEC}s worker=${qworker:-none}"
         if [[ -n "$qworker" ]] && restart_dependent "$qworker"; then
           sleep "$RESTART_VERIFY_WAIT"
+          dependent_is_retiring "$qworker" && { q_young=1; continue; }
           local new_age
           new_age="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
             SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
             FROM django_tasks_database_dbtaskresult
             WHERE status = 'READY' AND run_after <= NOW() AND queue_name = '${qname//\'/}';
           " 2>/dev/null | tr -d '[:space:]')"
+          dependent_is_retiring "$qworker" && { q_young=1; continue; }
+          q_failed=1
+          FAILED=1
           if [[ "$new_age" =~ ^-?[0-9]+$ ]] && (( new_age <= TASK_QUEUE_MAX_READY_AGE_SEC )); then
             log "HEALED check=${q_check} queue=${qname} worker=${qworker} oldest_ready=${new_age}s after restart"
             send_alert "$q_check" "AUTOHEALED" \
@@ -753,6 +811,10 @@ Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
               "Relay task queue '${qname}' on $(hostname) still has due READY task(s) stuck (oldest_ready=${new_age:-unknown}s > ${TASK_QUEUE_MAX_READY_AGE_SEC}s) after restarting ${qworker}."
           fi
         else
+          [[ "$?" -eq 2 ]] && { q_young=1; continue; }
+          [[ -n "$qworker" ]] && dependent_is_retiring "$qworker" && { q_young=1; continue; }
+          q_failed=1
+          FAILED=1
           send_alert "$q_check" "FAIL" \
             "Relay task queue '${qname}' on $(hostname) has ${qcnt} due READY task(s) stuck for ${qage}s (> ${TASK_QUEUE_MAX_READY_AGE_SEC}s); worker=${qworker:-not-found} restart skipped (cooldown or DRY_RUN)."
         fi
@@ -766,8 +828,9 @@ Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
 }
 
 restart_dependent() {
-  # $1=container — cooldown-gated docker restart; 0 if a restart happened now
-  local c="$1" stamp="${STATE_DIR}/restart-$(safe_name "$1").stamp" last=0
+  # 0=restarted, 1=cooldown/dry-run/error, 2=retired/removed (no alert).
+  local c="$1" stamp="${STATE_DIR}/restart-$(safe_name "$1").stamp" last=0 restart_out
+  dependent_is_retiring "$c" && return 2
   dependent_is_young "$c" && return 1
   [[ -f "$stamp" ]] && last="$(tr -d '[:space:]' < "$stamp")"
   last="${last:-0}"
@@ -780,7 +843,15 @@ restart_dependent() {
     return 1
   fi
   log "RESTART dep=${c}: restarting (stale DNS/conn/worker-progress remedy, t1205u/t1218u)"
-  if ! docker restart "$c" >/dev/null 2>&1; then
+  if ! restart_out="$(docker restart "$c" 2>&1)"; then
+    # Do not print arbitrary daemon output. A removal during this call is
+    # normal rolling-deploy cleanup, not a failed auto-heal.
+    if [[ "${restart_out,,}" == *"no such container"* ]]; then
+      prune_dependent_state "$c"
+      RETIRING_DEPS[$c]=missing
+      return 2
+    fi
+    dependent_is_retiring "$c" && return 2
     log "RESTART dep=${c}: docker restart FAILED"
     return 1
   fi
@@ -814,13 +885,14 @@ watch_pg() {
   for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
     [[ "$c" == "$pg" ]] && continue
     [[ "$c" =~ $DEPENDENT_EXCLUDE ]] && continue
+    container_has_env_key "$c" 'DATABASE_URL|POSTGRES_HOST' || continue
+    dependent_is_retiring "$c" && continue
     dep_nets="$(pg_container_networks "$c")"
     nets=""
     for n in $dep_nets; do
       [[ " $pg_nets " == *" $n "* ]] && nets="$nets $n"
     done
     [[ -z "${nets// /}" ]] && continue
-    container_has_env_key "$c" 'DATABASE_URL|POSTGRES_HOST' || continue
     deps="$deps $c"
   done
   if [[ -z "${deps// /}" ]]; then
@@ -829,6 +901,7 @@ watch_pg() {
   fi
 
   for c in $deps; do
+    dependent_is_retiring "$c" && continue
     dependent_is_young "$c" && continue
     target="$(parse_db_target "$(dep_env_block "$c")")"
     host="${target%% *}"; port="${target##* }"
@@ -845,12 +918,15 @@ watch_pg() {
       log "DNS_RECHECK dep=${c} initial_rc=2 wait=${DNS_RECHECK_WAIT_SEC}s"
       sleep "$DNS_RECHECK_WAIT_SEC"
       # A deploy/restart may have happened while waiting.
+      dependent_is_retiring "$c" && continue
       dependent_is_young "$c" && continue
       probe_from_container "$c" "$host" "$port"; rc=$?
       log "DNS_RECHECK dep=${c} rc=${rc} $(resolved_addrs "$c" "$host")"
     fi
+    dependent_is_retiring "$c" && continue
     if [[ "$rc" -eq 0 ]]; then
       if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
+        dependent_is_retiring "$c" && continue
         log "OK check=${dep_check} dep=${c} host=${host}:${port} $(resolved_addrs "$c" "$host") ${prog_out}"
         mark_ok "$dep_check"
         continue
@@ -866,10 +942,12 @@ watch_pg() {
       EXIT_CODE=2
       continue
     fi
-    FAILED=1
+    dependent_is_retiring "$c" && continue
     log "FAIL check=${dep_check} dep=${c} host=${host}:${port} rc=${rc} $(resolved_addrs "$c" "$host") ${prog_out}"
     if [[ "$host" != "$pgname" && "$host" != "$pg" ]] && ! name_known_to_docker "$host" "$pg"; then
       # Stale NAME (PG redeployed under a new uuid) — restart cannot fix.
+      dependent_is_retiring "$c" && continue
+      FAILED=1
       send_alert "$dep_check" "FAIL" \
         "${c} on $(hostname) references Postgres name '${host}' which docker DNS no longer resolves.
 pg-${label} is now container '${pg}' (name=${pgname}) and is healthy — the app env still points at the old uuid name.
@@ -879,7 +957,9 @@ No restart attempted (would not help)."
     fi
     if restart_dependent "$c"; then
       sleep "$RESTART_VERIFY_WAIT"
+      dependent_is_retiring "$c" && continue
       probe_from_container "$c" "$host" "$port" && rc=0 || rc=$?
+      dependent_is_retiring "$c" && continue
       if [[ "$rc" -eq 0 ]]; then
         if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
           rc=0
@@ -887,6 +967,8 @@ No restart attempted (would not help)."
           rc=4
         fi
       fi
+      dependent_is_retiring "$c" && continue
+      FAILED=1
       if [[ "$rc" -eq 0 ]]; then
         log "HEALED check=${dep_check} dep=${c}: connect+progress OK after restart (${prog_out})"
         send_alert "$dep_check" "AUTOHEALED" \
@@ -900,6 +982,9 @@ SES/SQS impact window: <1 min (watchdog cadence 1 min)."
 PG '${pg}' itself is healthy (pg_isready ok). Check docker network / iptables / app logs."
       fi
     else
+      [[ "$?" -eq 2 ]] && continue
+      dependent_is_retiring "$c" && continue
+      FAILED=1
       send_alert "$dep_check" "FAIL" \
         "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check (probe rc=${rc}, ${prog_out}); restart skipped (cooldown or DRY_RUN).
 PG '${pg}' itself is healthy (pg_isready ok). If this repeats every cooldown, investigate manually."
