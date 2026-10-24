@@ -22,8 +22,8 @@
 set -euo pipefail
 
 # Private PII dumps must never be world-readable, even briefly: newly created
-# files land 600 regardless of the caller's umask (existing files are
-# tightened separately, non-destructively).
+# files land 600 regardless of the caller's umask. Validated dumps are then
+# made readable by DUMP_GROUP for operator pulls.
 umask 077
 
 ENV_FILE="${COOLIFY_ENV_FILE:-${COOLIFY_PGDUMP_ENV_FILE:-/etc/coolify-pg-dump.env}}"
@@ -39,6 +39,7 @@ fail() { log "ERROR: $*"; exit 1; }
 
 # ---- config (overridable via env file) ----
 DUMP_DIR="${DUMP_DIR:-/var/backups/coolify-postgres}"
+DUMP_GROUP="${DUMP_GROUP:-alexey}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-pg-dump.lock}"
 LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-2}"
 STAMP="$(TZ=Europe/Berlin date '+%Y%m%dT%H%M%z')"
@@ -108,6 +109,10 @@ dump_one() {
   rm -f "${outfile}.err"
   local size; size="$(stat -c%s "$outfile" 2>/dev/null || stat -f%z "$outfile")"
   [[ "$size" -gt 1024 ]] || { log "ERROR: dump suspiciously small (${size}B) stack=${stack} db=${dbname}"; rm -f "$outfile"; return 1; }
+  # Grant operator access only after the dump is complete and validated.
+  # Handle failures explicitly: dump_one runs in an || list (errexit is off).
+  { chgrp -- "$DUMP_GROUP" "$outfile" && chmod 0640 "$outfile"; } \
+    || { log "ERROR: setting dump permissions failed stack=${stack} db=${dbname} group=${DUMP_GROUP}"; return 1; }
   local key="${S3_PREFIX}/${stack}/${dbname}/${DAY_PATH}/${dbname}-${stack}-${STAMP}.dump.gz"
   s3_put "$outfile" "$key" || { log "ERROR: S3 upload failed stack=${stack} db=${dbname}"; return 1; }
   log "dump ok stack=${stack} db=${dbname} size=${size}B s3=s3://${S3_BUCKET}/${key}"

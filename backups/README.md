@@ -40,6 +40,14 @@ Example: `s3://<BACKUP_BUCKET>/coolify/postgres/pg-shared/cmp/2026/10/23/cmp-pg-
 
 ## Retention
 
+Local app database dumps are created with `umask 077` (mode `0600`). After a
+successful dump and size check, the script sets the group to `DUMP_GROUP`
+(default `alexey`) and mode to `0640`, allowing operator `scp` pulls such as
+Hetzner's `website-contabo` job. The group must exist on the data node and the
+pulling user must belong to it. A permission change failure fails the dump run.
+Parent directories must also permit traversal by that user. Existing dumps
+are not changed by this step.
+
 | Location | Policy |
 |----------|--------|
 | S3 `coolify/postgres/` | **30 days** via bucket lifecycle (`s3-lifecycle.example.json`, t1143u) |
