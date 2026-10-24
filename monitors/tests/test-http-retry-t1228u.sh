@@ -24,6 +24,11 @@ if [[ $n -eq 1 ]]; then echo "curl: (28) Resolving timed out after 5001 millisec
 printf 200; exit 0
 C
 chmod +x "$TMP/stubbin/curl"
+cat > "$TMP/stubbin/docker" <<'D'
+#!/usr/bin/env bash
+exit 0
+D
+chmod +x "$TMP/stubbin/docker"
 export CURL_STUB_STATE="$TMP/cs"
 rm -rf "$CURL_STUB_STATE"
 set +e
@@ -44,6 +49,11 @@ cat > "$TMP/stubbin/curl" <<'C'
 echo "curl: (28) Resolving timed out after 5001 milliseconds" >&2; printf 000; exit 28
 C
 chmod +x "$TMP/stubbin/curl"
+cat > "$TMP/stubbin/docker" <<'D'
+#!/usr/bin/env bash
+exit 0
+D
+chmod +x "$TMP/stubbin/docker"
 set +e
 OUT2="$(
   PATH="$TMP/stubbin:$PATH" COOLIFY_HEALTHCHECK_ENV_FILE=/dev/null \

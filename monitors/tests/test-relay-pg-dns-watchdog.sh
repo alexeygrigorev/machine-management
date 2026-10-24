@@ -42,6 +42,18 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/stubbin"
 
+cat > "$TMP/stubbin/msmtp" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "${STUB_STATE_DIR:-/tmp}/mail"
+{
+  echo "ARGS: $*"
+  cat
+  printf '\n---\n'
+} >> "${STUB_STATE_DIR:-/tmp}/mail/sent.log"
+EOF
+chmod +x "$TMP/stubbin/msmtp"
+cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
+
 cat > "$TMP/stubbin/docker" <<'EOF'
 #!/usr/bin/env bash
 # Stub docker for relay-pg-dns-watchdog tests.
@@ -496,6 +508,25 @@ for mode in young_dns young_sql dns_transient dns_persistent dns_cooldown; do
       else fail "$mode (rc=$rc): $out"; fi;;
   esac
 done
+
+# ---- T14: Alert mail has From: DTC Alerts <alerts@dtcdev.click> and envelope alerts@dtcdev.click ----
+sdir_t14="$TMP/state-t14-$RANDOM"
+mkdir -p "$sdir_t14/var" "$sdir_t14/mail"
+printf '%s' "older_than_pg" > "$sdir_t14/mode"
+out_t14=""; set +e
+out_t14="$(STUB_STATE_DIR="$sdir_t14" RELAY_PG_DNS_WATCHDOG_ENV_FILE="/nonexistent" \
+  STATE_DIR="$sdir_t14/var" LOCK_FILE="$sdir_t14/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="dev@dtcdev.click" PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+mail_log="$sdir_t14/mail/sent.log"
+if [[ -f "$mail_log" ]] \
+  && grep -q '^From: DTC Alerts <alerts@dtcdev.click>$' "$mail_log" \
+  && grep -q -- '-a alerts' "$mail_log" \
+  && grep -q -- '-f alerts@dtcdev.click' "$mail_log"; then
+  pass "T14 alert mail From header and envelope sender match alerts@dtcdev.click"
+else
+  fail "T14 alert mail format -- log=$(cat "$mail_log" 2>/dev/null || echo missing)"
+fi
 
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]

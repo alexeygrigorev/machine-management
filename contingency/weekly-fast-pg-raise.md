@@ -56,7 +56,7 @@ Note: VM default `search.latencyOffset` ≈ 30s — wait briefly after push befo
 - Searches samples over `STALE_SECONDS` (`[691200s]`, equivalent to `[8d]` by
   default). Weekly push metrics disappear from instant-query lookback between
   runs; the range keeps successes visible throughout the existing stale window.
-- Email **only** `dev@dtcdev.click` via existing msmtp → SES (`noreply@datatalks.club`).
+- Email **only** `dev@dtcdev.click` via existing msmtp → SES (`alerts@dtcdev.click`).
 - Deduped to at most once per day while still failing; sends RECOVERED on clear.
 
 Read-only proof on contabo-a (queries real VM; sends no mail and changes no state):

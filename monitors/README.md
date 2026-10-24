@@ -55,7 +55,9 @@ The script uses `sendmail` (or `msmtp`) on the node. Without an MTA it
 
 1. `apt install msmtp-mta` (or equivalent) on the node.
 2. Configure SMTP out-of-band (`/etc/msmtprc`, root-only `600`) with real
-   relay credentials from the Drive secrets doc — never in git.
+   relay credentials from the Drive secrets doc — never in git. The monitors use
+   a dedicated msmtp account `alerts` sending `From: DTC Alerts <alerts@dtcdev.click>`
+   and envelope sender `alerts@dtcdev.click` via sandbox SES SMTP `email-smtp.us-east-1.amazonaws.com`.
 3. Force a failure (e.g. point one `APP_URLS` entry at a dead port) with
    isolated state and ops-only recipients, confirm transport acceptance,
    then restore the URL and healthy state.

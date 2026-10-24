@@ -19,7 +19,9 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
+ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
+ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
+ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 STALE_SECONDS="${STALE_SECONDS:-691200}"  # 8 days
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 STATE_DIR="${STATE_DIR:-/var/lib/dr-raise-stale-check}"
@@ -64,25 +66,50 @@ send_alert() {
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
+
+  local envelope_from from_header
+  local from_pat='<([^>]+)>'
+  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
+    envelope_from="${BASH_REMATCH[1]}"
+    from_header="$ALERT_FROM"
+  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
+    envelope_from="$ALERT_FROM"
+    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  else
+    envelope_from="$ALERT_FROM"
+    from_header="$ALERT_FROM"
+  fi
+
+  local msmtp_args=()
+  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
+
   local sent=no
   if command -v msmtp >/dev/null 2>&1; then
     if {
-      echo "From: ${ALERT_FROM}"
+      echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
-    } | msmtp -- "${to_args[@]}"; then
+    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}"; then
       sent=msmtp
     fi
   elif command -v sendmail >/dev/null 2>&1; then
+    local sendmail_args=("-t")
+    local sendmail_bin
+    sendmail_bin="$(command -v sendmail)"
+    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
+      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+    fi
+    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
     if {
-      echo "From: ${ALERT_FROM}"
+      echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
-    } | sendmail -t; then
+    } | sendmail "${sendmail_args[@]}"; then
       sent=sendmail
     fi
   fi

@@ -20,6 +20,7 @@ esac
 STUB
 cat > "$TMP/bin/msmtp" <<'STUB'
 #!/usr/bin/env bash
+echo "ARGS: $*" >> "$MAIL_LOG"
 cat >> "$MAIL_LOG"
 STUB
 chmod +x "$TMP/bin/"*
@@ -62,6 +63,8 @@ cmp "$MAIL_LOG" "$TMP/first-mail"
 run 0 FIXTURE=45436 DRY_RUN=0
 rg -q '^STATUS=OK$' "$STATE_DIR/stale.state"
 [[ "$(rg -c '^Subject:' "$MAIL_LOG")" == 2 ]]
+rg -q '^From: DTC Alerts <alerts@dtcdev.click>$' "$MAIL_LOG"
+rg -q 'ARGS: -a alerts -f alerts@dtcdev.click --' "$MAIL_LOG"
 rg -q 'Subject: .*RECOVERED' "$MAIL_LOG"
 cp "$MAIL_LOG" "$TMP/recovered-mail"
 run 0 FIXTURE=45436 DRY_RUN=0

@@ -114,7 +114,9 @@ HTTP_RETRY_SLEEP_SEC="${HTTP_RETRY_SLEEP_SEC:-1}"
 CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
+ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
+ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
+ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 # Suppress RECOVERED mail when the FAIL lasted shorter than this many seconds
 # (t1273u/t1274u: cut rapid FAIL→RECOVERED pair spam for one-tick flakes).
@@ -162,29 +164,54 @@ send_alert() {
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
-  if command -v sendmail >/dev/null 2>&1; then
+
+  local envelope_from from_header
+  local from_pat='<([^>]+)>'
+  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
+    envelope_from="${BASH_REMATCH[1]}"
+    from_header="$ALERT_FROM"
+  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
+    envelope_from="$ALERT_FROM"
+    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  else
+    envelope_from="$ALERT_FROM"
+    from_header="$ALERT_FROM"
+  fi
+
+  local msmtp_args=()
+  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
+
+  if command -v msmtp >/dev/null 2>&1; then
     if {
-      echo "From: ${ALERT_FROM}"
+      echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
-    } | sendmail -t 2>/dev/null; then
-      sent="sendmail"
-    else
-      log "WARN: sendmail failed for ${name}"
-    fi
-  elif command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${ALERT_FROM}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp -- "${to_args[@]}" 2>/dev/null; then
+    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
       sent="msmtp"
     else
       log "WARN: msmtp failed for ${name}"
+    fi
+  elif command -v sendmail >/dev/null 2>&1; then
+    local sendmail_args=("-t")
+    local sendmail_bin
+    sendmail_bin="$(command -v sendmail)"
+    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
+      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+    fi
+    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
+    if {
+      echo "From: ${from_header}"
+      echo "To: ${to_header}"
+      echo "Subject: ${full_subject}"
+      echo ""
+      printf '%s\n' "$body"
+    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
+      sent="sendmail"
+    else
+      log "WARN: sendmail failed for ${name}"
     fi
   else
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
@@ -546,6 +573,10 @@ check_aisl_q() {
 # do not. Removal stays a manual `docker rm` after inspection.
 check_created_containers() {
   local name="docker-created" ids
+  if [[ "${SKIP_CREATED_CHECK:-0}" == "1" ]]; then
+    log "SKIP check=${name} (SKIP_CREATED_CHECK=1)"
+    return
+  fi
   CREATED_GRACE_SEC="${CREATED_GRACE_SEC:-1800}"
   if ! command -v docker >/dev/null 2>&1; then
     log "WARN check=${name}: docker not found — skipping"

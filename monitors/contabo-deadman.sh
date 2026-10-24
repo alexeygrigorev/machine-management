@@ -56,7 +56,9 @@ DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 # Drills (DEADMAN_FORCE_FAIL) page ops only — never Alexey (t1273u/t1274u).
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-noreply@datatalks.club}"
+ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
+ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
+ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 
 command -v ssh >/dev/null 2>&1 || { log "ERROR: missing required binary: ssh"; exit 1; }
@@ -102,29 +104,54 @@ send_alert() {
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
-  if command -v sendmail >/dev/null 2>&1; then
+
+  local envelope_from from_header
+  local from_pat='<([^>]+)>'
+  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
+    envelope_from="${BASH_REMATCH[1]}"
+    from_header="$ALERT_FROM"
+  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
+    envelope_from="$ALERT_FROM"
+    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  else
+    envelope_from="$ALERT_FROM"
+    from_header="$ALERT_FROM"
+  fi
+
+  local msmtp_args=()
+  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
+
+  if command -v msmtp >/dev/null 2>&1; then
     if {
-      echo "From: ${ALERT_FROM}"
+      echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
       echo ""
       printf '%s\n' "$body"
-    } | sendmail -t 2>/dev/null; then
-      sent="sendmail"
-    else
-      log "WARN: sendmail failed for ${name}"
-    fi
-  elif command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${ALERT_FROM}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp -- "${to_args[@]}" 2>/dev/null; then
+    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
       sent="msmtp"
     else
       log "WARN: msmtp failed for ${name}"
+    fi
+  elif command -v sendmail >/dev/null 2>&1; then
+    local sendmail_args=("-t")
+    local sendmail_bin
+    sendmail_bin="$(command -v sendmail)"
+    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
+      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+    fi
+    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
+    if {
+      echo "From: ${from_header}"
+      echo "To: ${to_header}"
+      echo "Subject: ${full_subject}"
+      echo ""
+      printf '%s\n' "$body"
+    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
+      sent="sendmail"
+    else
+      log "WARN: sendmail failed for ${name}"
     fi
   else
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp (see install-contabo-deadman.sh)"

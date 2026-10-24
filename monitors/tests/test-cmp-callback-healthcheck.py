@@ -19,12 +19,15 @@ class CallbackHealthcheckTests(unittest.TestCase):
             mail = tmp / 'sendmail'
             mail.write_text('#!/bin/sh\ncat >> "$MAIL_FILE"\n')
             mail.chmod(0o755)
+            msmtp = tmp / 'msmtp'
+            msmtp.write_text('#!/bin/sh\ncat >> "$MAIL_FILE"\n')
+            msmtp.chmod(0o755)
             env = dict(os.environ, PATH=f'{tmp}:/usr/bin:/bin',
                        COOLIFY_HEALTHCHECK_ENV_FILE=str(tmp / 'absent'),
                        STATE_DIR=str(tmp / 'state'), LOCK_FILE=str(tmp / 'lock'),
                        PG_SHARED_CONTAINER='shared', PG_RELAY_CONTAINER='relay',
                        SKIP_PG_SHARED='1', SKIP_PG_RELAY='1', SKIP_DISK_CHECK='1',
-                       SKIP_BACKUP_CHECKS='1', APP_URLS='', CONTENT_CHECKS='',
+                       SKIP_BACKUP_CHECKS='1', SKIP_CREATED_CHECK='1', APP_URLS='', CONTENT_CHECKS='',
                        CHECK_CMP_CALLBACKS='1' if enabled else '0',
                        COUNTS=counts, DB_RC=str(db_rc), MAIL_FILE=str(tmp / 'mail'))
             result = subprocess.run(['bash', str(ROOT / 'monitors/coolify-healthcheck.sh')],
@@ -36,6 +39,7 @@ class CallbackHealthcheckTests(unittest.TestCase):
         rc, out, mail = self.run_check('147|0')
         self.assertEqual(rc, 1, out)
         self.assertIn('FAIL check=cmp-callbacks', out)
+        self.assertIn('From: DTC Alerts <alerts@dtcdev.click>', mail)
         self.assertIn('pending_older_30m=147', mail)
 
     def test_recent_failed_alerts(self):

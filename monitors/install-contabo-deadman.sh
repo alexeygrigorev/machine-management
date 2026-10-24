@@ -15,8 +15,8 @@
 #
 # Private msmtp setup (do this by hand, values stay in ~/.secrets):
 #   - Build ~/.msmtprc (chmod 600) with your SES SMTP host/port/user/pass and
-#     `from noreply@datatalks.club`, account default.
-#   - Test: `echo -e "Subject: deadman msmtp test\n\nok" | msmtp -a default -- dev@dtcdev.click`
+#     `from alerts@dtcdev.click`, account alerts.
+#   - Test: `echo -e "Subject: deadman msmtp test\n\nok" | msmtp -a alerts -- dev@dtcdev.click`
 #     (one test mail on the authorized alert path), then delete the test line.
 set -euo pipefail
 

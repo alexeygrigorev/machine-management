@@ -73,16 +73,18 @@ EOF
 chmod +x "$TMP/stubbin/ssh" "$TMP/stubbin/curl"
 cat > "$TMP/stubbin/sendmail" <<'EOF'
 #!/usr/bin/env bash
-# Capture recipients from To: header for drill recipient assertions.
+# Capture recipients and From header for drill recipient assertions.
 mkdir -p "$STUB_DM_MAILDIR"
 msg="$(cat)"
+from="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^From:/{print $2; exit}')"
 to="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^To:/{print $2; exit}')"
 subj="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^Subject:/{print $2; exit}')"
-printf '%s\t%s\n' "$to" "$subj" >> "$STUB_DM_MAILDIR/sent.tsv"
+printf '%s\t%s\t%s\t%s\n' "$from" "$to" "$subj" "$*" >> "$STUB_DM_MAILDIR/sent.tsv"
 [[ "${STUB_DM_MAIL_FAIL:-0}" == 1 ]] && exit 75
 exit 0
 EOF
 chmod +x "$TMP/stubbin/sendmail"
+cp "$TMP/stubbin/sendmail" "$TMP/stubbin/msmtp"
 
 run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
@@ -149,7 +151,8 @@ SD7="$(mktemp -d -p "$TMP")"
 out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 1)"; rc=$?; set -e
 mailf="$SD7/mail/sent.tsv"
 if [[ $rc -ne 0 && -f "$mailf" ]] \
-  && grep -q $'dev@dtcdev.click\t.*drill-forced' "$mailf" \
+  && grep -q $'DTC Alerts <alerts@dtcdev.click>\tdev@dtcdev.click\t.*drill-forced' "$mailf" \
+  && grep -q '\-a alerts.*\-f alerts@dtcdev\.click' "$mailf" \
   && ! grep -q 'alexey@datatalks.club' "$mailf" \
   && [[ "$out" == *'to=dev@dtcdev.click'* ]]; then
   pass "D7 drill recipients ops-only (no alexey@)"
@@ -158,7 +161,7 @@ else
 fi
 out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 0)"; rc=$?; set -e
 if [[ $rc -eq 0 && $(wc -l < "$mailf") -eq 2 ]] \
-  && grep -q $'dev@dtcdev.click\t.*RECOVERED.*drill-forced' "$mailf" \
+  && grep -q $'DTC Alerts <alerts@dtcdev.click>\tdev@dtcdev.click\t.*RECOVERED.*drill-forced' "$mailf" \
   && ! grep -q 'alexey@datatalks.club' "$mailf"; then
   pass "D7 recovery recipients also ops-only (no alexey@)"
 else

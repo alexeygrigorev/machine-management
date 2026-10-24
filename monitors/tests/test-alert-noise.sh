@@ -20,11 +20,13 @@ cat > "$TMP/bin/date" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == '+%s' ]]; then echo "$STUB_NOW"; else /bin/date "$@"; fi
 EOF
-cat > "$TMP/bin/sendmail" <<'EOF'
+cat > "$TMP/bin/msmtp" <<'EOF'
 #!/usr/bin/env bash
+echo "MSMTP_ARGS: $*" >> "$STUB_MAIL"
 cat >> "$STUB_MAIL"
 printf '\n---\n' >> "$STUB_MAIL"
 EOF
+cp "$TMP/bin/msmtp" "$TMP/bin/sendmail"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -89,6 +91,8 @@ require test "$(mail_count "$TMP/b")" -eq 2
 require grep -q '^Subject: .* FAIL (http-aishl)' "$TMP/b/mail"
 require grep -q '^Subject: .* FAIL (content-aishl_home)' "$TMP/b/mail"
 require test "$(grep -c '^To: alexey@datatalks.club, dev@dtcdev.click$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^From: DTC Alerts <alerts@dtcdev.click>$' "$TMP/b/mail")" -eq 2
+require grep -q '^MSMTP_ARGS: -a alerts -f alerts@dtcdev.click --' "$TMP/b/mail"
 pass 'contabo-b immediately pages both real recipients for AISHL HTTP/content 503'
 
 run_check "$TMP/b" fail 1000300 0
