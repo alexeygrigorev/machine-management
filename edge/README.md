@@ -53,3 +53,27 @@ DOCKER-USER keeps host `:8000` closed. GHA reaches Coolify via Traefik:
 - File: `edge/traefik/coolify-api-gha.yml` → `/data/coolify/proxy/dynamic/` on contabo-a
 - URL: `https://coolify.169.58.119.163.sslip.io` (LE cert; `/api` only)
 - GitHub env secret `COOLIFY_URL` for website / AISHL / CMP / relay `coolify-staging`
+
+## X-Origin-Verify rotation (Relay prod/dev, zero-downtime)
+
+Inventory (names/locations only, never values): CloudFront CustomHeaders
+`X-Origin-Verify` on `E3L9KUTE15WFJF` (`relay.datatalks.club`,
+origin `origin.relay.datatalks.club`) and `E35QPYDA1452SA`
+(`dev.relay.datatalks.club`, origin `origin.dev.relay.datatalks.club`);
+Contabo-b `/data/coolify/proxy/dynamic/origin-enforce.yml` allow routers
+`origin-relay-allow-*`, `origin-relaypub-allow-*` (prod) and
+`origin-relaydev-allow-*`, `origin-relaydevpub-allow-*` (dev), plus
+`origin-verify-canary.yml` (canary proof only); no app/env/Coolify env or
+monitor sends the header (monitors check public health only); prod-website
+`E1VNMGFFIXBOXX` and dev-website `E33FS79KPFSAOM` use distinct values.
+
+Procedure (operator box Hetzner RMTHZ, `aws --profile main-temp`):
+
+1. Backup: `ssh contabo-b 'sudo cp -a /data/coolify/proxy/dynamic/origin-enforce.yml /data/coolify/proxy/dynamic/origin-enforce.yml.bak-YYYYMMDD-rotate && sudo chmod 0600 ...bak...'` (0600 on host).
+2. Generate one new 48-char alnum value per side (prod, dev) into 0600 files, env vars only (never print/log/commit; e.g. `python3 -c "import secrets,string;..."`).
+3. Dual-accept first: edit each allow router to accept old OR new (`Header(old) || Header(new)`), keep deny routers, `install -m 0600`, wait 5s, check `docker logs coolify-proxy` for origin errors. Verify direct origin: no-header 403, old 200, new 200, wrong 403 on http+https for all four hostnames; public health 200.
+4. Switch CloudFront to new value (one distribution at a time, dev first): read-modify-write via ETag (`get-distribution-config` + `update-distribution`), or via Terraform (`taint random_password...` + apply). Verify public health 200, then direct origin with new 200.
+5. Single-accept only new: remove old `Header()` alternative, reinstall 0600, verify no-header 403, old 403, new 200, public 200. Keep host backups 0600.
+6. If distributions are Terraform-managed such that an out-of-band CloudFront change would conflict/drift (main/relay `random_password.origin_verify`, main/dev `random_password.relay_origin_verify`), STOP after step 3 and record the exact `update-distribution` / Terraform change for Alexey. Do not run the pending MAIN AWS terraform apply, DMARC or F10 gate.
+
+See `edge/origin-tls-enforce/README.md` for transport/rollback verification (`test-origin.sh`, `verify-rollback.py`, `verify_stability.py`). Rotation 2026-10-25 stopped at dual-accept pending Alexey: report `~/tmp/agent-reports/relay-origin-verify-rotation-2026-10-25.md`.
