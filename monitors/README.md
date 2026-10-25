@@ -91,11 +91,11 @@ once SMTP + log volume look healthy.
 | `coolify-healthcheck.sh` | the check (pg_isready + SELECT 1 + curl, deduped email alerts) |
 | `coolify-healthcheck.cron` | `*/5 * * * *` Europe/Berlin entry |
 | `coolify-healthcheck.env.example` | placeholders for `/etc/coolify-healthcheck.env` |
-| `install-coolify-healthcheck.sh` | operator-box installer (scp + cron, never overwrites env) |
+| `install-coolify-healthcheck.sh` | operator-box installer (backups + cron, migrates old shipped env defaults) |
 | `coolify-proxy-networks.sh` | **proxy-attachment pager (2026-10-25)**: FAILs when `coolify-proxy` misses a service network a `traefik.enable=true` container routes; dev@ ONLY, same dedupe/recover |
 | `coolify-proxy-networks.cron` | `*/5 * * * *` Europe/Berlin entry (pager; self-heal is the 2-min edge keeper) |
 | `coolify-proxy-networks.env.example` | placeholders for `/etc/coolify-proxy-networks.env` (dev@ only) |
-| `install-coolify-proxy-networks.sh` | operator-box installer (scp + cron, never overwrites env) |
+| `install-coolify-proxy-networks.sh` | operator-box installer (backups + cron, migrates old shipped env defaults) |
 
 ## Proxy attachment pager (2026-10-25 relay-dev/cmp-dev incident)
 
@@ -106,6 +106,24 @@ keeper (`edge/ensure-coolify-proxy-networks.sh --apply`, `*/2` cron) heals and
 declares them; this pager verifies independently and mails **dev@dtcdev.click
 ONLY** (same 60-min repeat / RECOVERED rules as the main check) when the proxy
 is still detached. It changes nothing and needs only docker + python3.
+
+State lives in `/var/lib/coolify-proxy-networks/`, outside the main check's
+pruned namespace. Old envs pointing at `/var/lib/coolify-healthcheck` are
+safely redirected into its `proxy-networks/` subdirectory until reinstalled.
+The installer migrates the old default state path and sender with backups,
+preserves recipients, and keeps `/etc/cron.d/coolify-proxy-networks` separate
+from the keeper's `/etc/cron.d/coolify-proxy-network-keep`.
+
+Mail uses the working healthcheck transport: msmtp account `alerts`, explicit
+envelope sender `alerts@dtcdev.click`, and `DTC Alerts` display name, with a
+sendmail fallback. Failed sends retain state for retry, including recovery. As in the main check,
+FAIL is immediate and RECOVERED is mailed for outages lasting at least 600 s
+(`RECOVER_NOTIFY_MIN_SEC`); shorter recoveries update state silently.
+Recipients are restricted to `dev@dtcdev.click`. An isolated drill can supply
+`COOLIFY_PROXY_NETWORKS_ENV_FILE` with its own state/lock, a nonexistent
+`PROXY_CONTAINER`, and `ALERT_SUBJECT_PREFIX='[DRILL coolify-proxy-networks]'`;
+then set the drill container back to `coolify-proxy` to verify recovery.
+This checks the real MTA without detaching an app or changing production state.
 
 Install: `./monitors/install-coolify-proxy-networks.sh [contabo-a] [contabo-b]`
 Test: `bash monitors/tests/test-coolify-proxy-networks.sh`

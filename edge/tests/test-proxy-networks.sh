@@ -200,13 +200,15 @@ if [[ "$T5_OK" == "1" ]]; then pass "T5 metrics installer preserves proxy nets +
 mkdir -p "$TMP/mstate"
 cat > "$TMP/stubbin/sendmail" <<'EOF'
 #!/usr/bin/env bash
+cat > /dev/null
 exit 0
 EOF
 chmod +x "$TMP/stubbin/sendmail"
+cp "$TMP/stubbin/sendmail" "$TMP/stubbin/msmtp"
 set +e
 STUB_PROXY_NETS="coolify" STUB_WANT_NET="qjnpmney8j8ehfuqcmzpjtzt" \
   COOLIFY_PROXY_NETWORKS_ENV_FILE=/nonexistent STATE_DIR="$TMP/mstate" LOCK_FILE="$TMP/mlock" \
-  ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
+  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$MONITOR" > "$TMP/m1.out" 2>&1; rc=$?
 set -e
 M1="$(cat "$TMP/m1.out"; echo; cat "$TMP/mstate"/proxy-networks.state 2>/dev/null || true)"
@@ -218,7 +220,7 @@ fi
 set +e
 STUB_PROXY_NETS="coolify qjnpmney8j8ehfuqcmzpjtzt" STUB_WANT_NET="qjnpmney8j8ehfuqcmzpjtzt" \
   COOLIFY_PROXY_NETWORKS_ENV_FILE=/nonexistent STATE_DIR="$TMP/mstate" LOCK_FILE="$TMP/mlock" \
-  ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
+  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$MONITOR" > "$TMP/m2.out" 2>&1; rc=$?
 set -e
 if [[ $rc -eq 0 && "$(cat "$TMP/m2.out")" == *"ALL_OK"* ]]; then
