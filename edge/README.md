@@ -98,7 +98,9 @@ Durable fix (this repo, versioned):
   NEXT recreate preserves them. `--check` is read-only for monitors.
 - `edge/install-proxy-network-keep.sh` + `edge/proxy-network-keep.cron` —
   installs the script to `/usr/local/sbin` and runs `--apply` every 2 min
-  (self-heal, no recreation).
+  (self-heal, no recreation). The cron is `/etc/cron.d/coolify-proxy-network-keep`,
+  distinct from the pager. Installation backs up existing files and runs
+  `--apply` once, appending evidence to `/var/log/coolify-proxy-networks.log`.
 - `edge/install-traefik-metrics.sh` now preserves attachments itself: before
   `docker compose up -d traefik` it declares current proxy networks in the
   compose file (via the keeper when installed, else inline), and re-runs
@@ -114,6 +116,7 @@ ssh contabo-b 'sudo /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply'
 ./monitors/install-coolify-proxy-networks.sh contabo-a contabo-b
 ./edge/tests/test-proxy-networks.sh
 bash monitors/tests/test-coolify-proxy-networks.sh
+python3 edge/tests/test-proxy-network-installers.py
 ```
 
 Do NOT `docker compose up -d traefik` on a live proxy outside Alexey's
