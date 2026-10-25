@@ -2,6 +2,14 @@
 # Enable Traefik Prometheus metrics on an INTERNAL entrypoint (f5d8e22b AC1).
 #
 # What it does per host (contabo-a, contabo-b):
+#   - PRESERVES coolify-proxy service-network attachments (2026-10-25
+#     relay-dev/cmp-dev incident): before recreating the proxy it declares
+#     every currently-attached non-coolify network in
+#     /data/coolify/proxy/docker-compose.yml (external: true + service
+#     attachment), so `docker compose up -d` no longer drops the ephemeral
+#     `docker network connect` state Coolify relies on for compose-service
+#     backends. After the recreate it re-runs the keeper (--apply) when
+#     installed. See edge/ensure-coolify-proxy-networks.sh.
 #   - patches /data/coolify/proxy/docker-compose.yml (root-owned, Coolify-managed):
 #     adds --metrics.prometheus=true + --entrypoints.metrics.address=:8082
 #     + --metrics.prometheus.entrypoint=metrics, publishes 8082 bound ONLY to
@@ -66,7 +74,48 @@ for bind in (f"127.0.0.1:8082:8082", f"{wg}:8082:8082"):
 open(path, "w").write(t)
 print("patched", path)
 PY
+# Durability (2026-10-25): declare current proxy attachments BEFORE recreate.
+# Prefer the versioned keeper when installed; fall back to an inline patch so
+# this installer alone never drops service networks again.
+if [[ -x /usr/local/sbin/ensure-coolify-proxy-networks.sh ]]; then
+  /usr/local/sbin/ensure-coolify-proxy-networks.sh --patch-compose-only || true
+else
+  python3 - "$F" <<'PY' || true
+import re, sys
+path = sys.argv[1]
+t = open(path).read()
+orig = t
+try:
+  import json, subprocess
+  cur = subprocess.run(["docker", "inspect", "coolify-proxy"],
+                       capture_output=True, text=True).stdout
+  nets = list((json.loads(cur)[0] if cur.strip().startswith("[") else json.loads(cur)).get("NetworkSettings", {}).get("Networks", {}).keys())
+except Exception as e:
+  print("WARN proxy-attachment preserve skipped:", e)
+  nets = []
+for net in nets:
+  if net in ("coolify", "bridge", "host", "none", ""):
+    continue
+  # Exact-line matches only (never a prefix of another network name).
+  if not re.search(rf"^  {re.escape(net)}:\s*$", t, re.M):
+    if "\nnetworks:\n" in t:
+      t = t.replace("\nnetworks:\n", f"\nnetworks:\n  {net}:\n    external: true\n", 1)
+  if not re.search(rf"^      - {re.escape(net)}\s*$", t, re.M):
+    m = re.search(r"^      - coolify\s*$", t, re.M)
+    if m:
+      t = t[:m.end()] + f"\n      - {net}" + t[m.end():]
+if t != orig:
+  open(path, "w").write(t)
+  print("preserved proxy attachments:", ",".join(nets))
+else:
+  print("proxy attachments already declared")
+PY
+fi
 cd /data/coolify/proxy && docker compose up -d traefik
+# Re-attach anything compose still dropped (no-op when the patch held).
+if [[ -x /usr/local/sbin/ensure-coolify-proxy-networks.sh ]]; then
+  /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply || true
+fi
 sleep 5
 curl -sS --max-time 10 http://127.0.0.1:8082/metrics | head -n 5
 echo "OK $HOSTNAME metrics live (internal only)"

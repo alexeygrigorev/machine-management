@@ -1,0 +1,8 @@
+# Self-heal: keep coolify-proxy on its routed service networks (every 2 min).
+# Runs edge/ensure-coolify-proxy-networks.sh --apply (idempotent connect +
+# declarative compose patch; no recreation, no restarts, no secrets).
+# The independent pager is monitors/coolify-proxy-networks (dev@ only).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Berlin
+*/2 * * * * root /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply >> /var/log/coolify-proxy-networks.log 2>&1

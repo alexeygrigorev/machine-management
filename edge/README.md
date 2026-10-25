@@ -77,3 +77,46 @@ Procedure (operator box Hetzner RMTHZ, `aws --profile main-temp`):
 6. If distributions are Terraform-managed such that an out-of-band CloudFront change would conflict/drift (main/relay `random_password.origin_verify`, main/dev `random_password.relay_origin_verify`), STOP after step 3 and record the exact `update-distribution` / Terraform change for Alexey. Do not run the pending MAIN AWS terraform apply, DMARC or F10 gate.
 
 See `edge/origin-tls-enforce/README.md` for transport/rollback verification (`test-origin.sh`, `verify-rollback.py`, `verify_stability.py`). Rotation 2026-10-25 stopped at dual-accept pending Alexey: report `~/tmp/agent-reports/relay-origin-verify-rotation-2026-10-25.md`.
+
+## Proxy network durability (2026-10-25 relay-dev/cmp-dev incident)
+
+`coolify-proxy` (Traefik) lost its ephemeral attachments to Coolify service
+networks on every recreate (proxy compose declares only `coolify`; service
+networks like relay-dev `t9uu…` / cmp-dev `qjnp…` are attached out-of-band by
+Coolify). After the 00:09 UTC metrics recreate, Traefik blackholed those
+backends (SYN into an unattached bridge → hang, curl 000) while
+`coolify`-network backends (prod rolling containers) stayed green. Manual
+`docker network connect` restored relay-dev but is not durable.
+
+Durable fix (this repo, versioned):
+
+- `edge/ensure-coolify-proxy-networks.sh` — idempotent reconciler (runs on the
+  node): discovers every running `traefik.enable=true` container's
+  `traefik.docker.network`, `docker network connect`s the missing ones (no
+  restart), and patches `/data/coolify/proxy/docker-compose.yml` to declare
+  them (`external: true` + service attachment, backup before write) so the
+  NEXT recreate preserves them. `--check` is read-only for monitors.
+- `edge/install-proxy-network-keep.sh` + `edge/proxy-network-keep.cron` —
+  installs the script to `/usr/local/sbin` and runs `--apply` every 2 min
+  (self-heal, no recreation).
+- `edge/install-traefik-metrics.sh` now preserves attachments itself: before
+  `docker compose up -d traefik` it declares current proxy networks in the
+  compose file (via the keeper when installed, else inline), and re-runs
+  `--apply` afterwards.
+- Pager: `monitors/coolify-proxy-networks.sh` (+ cron/env/installer) verifies
+  independently every 5 min and mails **dev@dtcdev.click ONLY** (same
+  dedupe/recover rules) when the proxy is still detached.
+
+```bash
+./edge/install-proxy-network-keep.sh contabo-a contabo-b
+ssh contabo-a 'sudo /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply'
+ssh contabo-b 'sudo /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply'
+./monitors/install-coolify-proxy-networks.sh contabo-a contabo-b
+./edge/tests/test-proxy-networks.sh
+bash monitors/tests/test-coolify-proxy-networks.sh
+```
+
+Do NOT `docker compose up -d traefik` on a live proxy outside Alexey's
+maintenance window — the recreate itself drops attachments until the compose
+patch lands, and the shared proxy serves prod. Prove recreate-safety on a
+throwaway replica (see the intake report), never on the live proxy.

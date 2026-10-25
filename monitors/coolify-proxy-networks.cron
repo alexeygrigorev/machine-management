@@ -1,0 +1,7 @@
+# Regression check: coolify-proxy service-network attachment (every 5 min).
+# Pages dev@ ONLY on detach (same dedupe/recover rules as the main check).
+# Self-heal lives in edge/proxy-network-keep.cron (every 2 min --apply).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Berlin
+*/5 * * * * root /usr/local/sbin/coolify-proxy-networks.sh >> /var/log/coolify-healthcheck.log 2>&1

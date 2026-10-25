@@ -92,6 +92,23 @@ once SMTP + log volume look healthy.
 | `coolify-healthcheck.cron` | `*/5 * * * *` Europe/Berlin entry |
 | `coolify-healthcheck.env.example` | placeholders for `/etc/coolify-healthcheck.env` |
 | `install-coolify-healthcheck.sh` | operator-box installer (scp + cron, never overwrites env) |
+| `coolify-proxy-networks.sh` | **proxy-attachment pager (2026-10-25)**: FAILs when `coolify-proxy` misses a service network a `traefik.enable=true` container routes; dev@ ONLY, same dedupe/recover |
+| `coolify-proxy-networks.cron` | `*/5 * * * *` Europe/Berlin entry (pager; self-heal is the 2-min edge keeper) |
+| `coolify-proxy-networks.env.example` | placeholders for `/etc/coolify-proxy-networks.env` (dev@ only) |
+| `install-coolify-proxy-networks.sh` | operator-box installer (scp + cron, never overwrites env) |
+
+## Proxy attachment pager (2026-10-25 relay-dev/cmp-dev incident)
+
+`coolify-proxy` loses ephemeral `docker network connect` attachments on every
+recreate (the proxy compose declares only `coolify`; Coolify service networks
+like relay-dev `t9uu…` / cmp-dev `qjnp…` are attached out-of-band). The edge
+keeper (`edge/ensure-coolify-proxy-networks.sh --apply`, `*/2` cron) heals and
+declares them; this pager verifies independently and mails **dev@dtcdev.click
+ONLY** (same 60-min repeat / RECOVERED rules as the main check) when the proxy
+is still detached. It changes nothing and needs only docker + python3.
+
+Install: `./monitors/install-coolify-proxy-networks.sh [contabo-a] [contabo-b]`
+Test: `bash monitors/tests/test-coolify-proxy-networks.sh`
 
 
 ## Host roles (do not regress)
