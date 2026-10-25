@@ -53,6 +53,19 @@ DEADMAN_URLS="${DEADMAN_URLS:-courses_api=https://courses.datatalks.club/api/hea
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 
+# --- latency probes (f5d8e22b AC2: off-Contabo TTFB/total into VM) ---
+# Same 7 URLs as healthcheck (service label for p95 per service). Hetzner has
+# no WireGuard to 10.100.0.1, so push goes via SSH to contabo-a by default.
+LATENCY_PROBES="${LATENCY_PROBES:-cmp_home=https://courses.datatalks.club/::cmp cmp_course=https://courses.datatalks.club/ml-zoomcamp-2026/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website}"
+LATENCY_PUSH_ENABLED="${LATENCY_PUSH_ENABLED:-1}"
+LATENCY_PUSH_URL="${LATENCY_PUSH_URL:-http://10.100.0.1:8429/api/v1/import/prometheus}"
+LATENCY_PUSH_SSH_HOST="${LATENCY_PUSH_SSH_HOST:-contabo-a}"
+LATENCY_PUSH_TIMEOUT="${LATENCY_PUSH_TIMEOUT:-10}"
+LATENCY_TTFB_WARN_SEC="${LATENCY_TTFB_WARN_SEC:-3}"
+LATENCY_TTFB_RECOVER_SEC="${LATENCY_TTFB_RECOVER_SEC:-2.5}"
+LATENCY_SUSTAIN_SEC="${LATENCY_SUSTAIN_SEC:-600}"
+LATENCY_ALERT_TO="${LATENCY_ALERT_TO:-dev@dtcdev.click}"
+
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 # Drills (DEADMAN_FORCE_FAIL) page ops only — never Alexey (t1273u/t1274u).
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
@@ -258,6 +271,127 @@ check_url() {
   rm -f "$body_file"
 }
 
+send_latency_alert() {
+  # Latency pages go ONLY to LATENCY_ALERT_TO (dev@), never ALERT_TO.
+  local probe="$1" subject="$2" body="$3"
+  local name="latency-${probe}"
+  local state_file="${STATE_DIR}/${name}.state"
+  local last_alert=0 last_status="" first_exceed=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    last_alert="${LAST_ALERT:-0}"; last_status="${STATUS:-}"; first_exceed="${FIRST_EXCEED:-0}"
+  fi
+  local is_recovery=0
+  [[ "$subject" == RECOVERED* ]] && is_recovery=1
+  if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
+    local elapsed_min=$(( (NOW - last_alert) / 60 ))
+    if [[ "$elapsed_min" -lt 60 ]]; then
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' "$last_alert" "$first_exceed" > "$state_file"
+      return 0
+    fi
+  fi
+  send_alert "$name" "$subject" "$body" "$LATENCY_ALERT_TO"
+  if [[ -f "$state_file" ]]; then
+    if [[ "$is_recovery" -eq 1 ]]; then
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    else
+      local cur_alert=0
+      # shellcheck disable=SC1090
+      source "$state_file" || true
+      cur_alert="${LAST_ALERT:-$NOW}"
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' "$cur_alert" "${first_exceed:-$NOW}" > "$state_file"
+    fi
+  fi
+}
+
+LATENCY_METRICS_FILE=""
+latency_metrics_init() { LATENCY_METRICS_FILE="$(mktemp)" || return 1; }
+latency_metrics_emit() {
+  local probe="$1" service="$2" uhost="$3" status="$4" ttfb="$5" total="$6"
+  {
+    printf 'probe_ttfb_seconds{probe="%s",service="%s",url_host="%s",status="%s",host="%s"} %s\n' \
+      "$probe" "$service" "$uhost" "$status" "hetzner" "$ttfb"
+    printf 'probe_total_seconds{probe="%s",service="%s",url_host="%s",status="%s",host="%s"} %s\n' \
+      "$probe" "$service" "$uhost" "$status" "hetzner" "$total"
+  } >> "$LATENCY_METRICS_FILE"
+}
+latency_metrics_push() {
+  [[ "${LATENCY_PUSH_ENABLED:-1}" == "1" ]] || return 0
+  [[ -s "${LATENCY_METRICS_FILE:-}" ]] || return 0
+  # Try direct push, else via SSH to contabo-a (Hetzner has no WG route).
+  if curl -sS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
+      "$LATENCY_PUSH_URL" -o /dev/null 2>/dev/null; then
+    log "OK latency-push: direct push ok ($(grep -c '^probe_' "$LATENCY_METRICS_FILE") series)"
+  elif [[ -n "${LATENCY_PUSH_SSH_HOST:-}" ]]; then
+    if timeout "$LATENCY_PUSH_TIMEOUT" ssh -o BatchMode=yes -o ConnectTimeout=5 \
+        "$LATENCY_PUSH_SSH_HOST" "curl -sS --max-time 10 --data-binary @- '$LATENCY_PUSH_URL' -o /dev/null" \
+        < "$LATENCY_METRICS_FILE" 2>/dev/null; then
+      log "OK latency-push: pushed via SSH ${LATENCY_PUSH_SSH_HOST}"
+    else
+      log "WARN latency-push: direct + SSH push failed (metrics in log only)"
+    fi
+  else
+    log "WARN latency-push: push failed (metrics in log only)"
+  fi
+  rm -f "$LATENCY_METRICS_FILE"
+  LATENCY_METRICS_FILE=""
+}
+probe_latency() {
+  local probe="$1" url="$2" service="$3"
+  local uhost status ttfb total rc out
+  uhost="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' | sed -E 's#[:/].*##')"
+  out="$(curl -sS -L -o /dev/null -w '%{http_code} %{time_starttransfer} %{time_total}' \
+    --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    status="000"; ttfb="-1"; total="-1"
+    log "WARN latency probe=${probe} service=${service} url_host=${uhost}: curl rc=${rc}"
+  else
+    status="$(echo "$out" | awk '{print $1}')"
+    ttfb="$(echo "$out" | awk '{print $2}')"
+    total="$(echo "$out" | awk '{print $3}')"
+    [[ "$ttfb" =~ ^[0-9.]+$ ]] || ttfb="-1"
+    [[ "$total" =~ ^[0-9.]+$ ]] || total="-1"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status="000"
+    log "OK latency probe=${probe} service=${service} url_host=${uhost} status=${status} ttfb=${ttfb}s total=${total}s"
+  fi
+  if [[ -n "${LATENCY_METRICS_FILE:-}" ]]; then
+    latency_metrics_emit "$probe" "$service" "$uhost" "$status" "$ttfb" "$total"
+  fi
+  local state_file="${STATE_DIR}/latency-${probe}.state"
+  local last_status="" first_exceed=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    last_status="${STATUS:-}"; first_exceed="${FIRST_EXCEED:-0}"
+  fi
+  local is_slow=0 is_recovered=0
+  if [[ "$ttfb" != "-1" ]] && awk "BEGIN{exit !( $ttfb > $LATENCY_TTFB_WARN_SEC )}"; then
+    is_slow=1
+  fi
+  if [[ "$ttfb" != "-1" ]] && awk "BEGIN{exit !( $ttfb < $LATENCY_TTFB_RECOVER_SEC )}"; then
+    is_recovered=1
+  fi
+  if [[ "$is_slow" -eq 1 ]]; then
+    [[ "$first_exceed" -gt 0 ]] || first_exceed="$NOW"
+    printf 'STATUS=%s\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' \
+      "${last_status:-PENDING}" "${LAST_ALERT:-0}" "$first_exceed" > "$state_file"
+    local sustained=$(( NOW - first_exceed ))
+    if [[ "$sustained" -ge "$LATENCY_SUSTAIN_SEC" ]]; then
+      log "FAIL latency probe=${probe}: TTFB ${ttfb}s sustained ${sustained}s"
+      send_latency_alert "$probe" "FAIL" "Slowness (deadman vantage): probe '${probe}' (${service} ${uhost}) TTFB ${ttfb}s > ${LATENCY_TTFB_WARN_SEC}s sustained ${sustained}s."
+      FAILED=1
+    fi
+  else
+    if [[ "$last_status" == "FAIL" && "$is_recovered" -eq 1 ]]; then
+      send_latency_alert "$probe" "RECOVERED" "Slowness recovered (deadman vantage): probe '${probe}' TTFB ${ttfb}s."
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    elif [[ "$last_status" != "FAIL" ]]; then
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    fi
+  fi
+}
+
 # ---- run ----
 if [[ "$DEADMAN_FORCE_FAIL" == "1" ]]; then
   log "FAIL check=drill-forced: DEADMAN_FORCE_FAIL=1 (safe mail-path drill, no production impact; ops-only recipients)"
@@ -288,6 +422,23 @@ if [[ -n "${DEADMAN_URLS:-}" ]]; then
 else
   log "WARN: DEADMAN_URLS is empty — no external probes configured"
 fi
+
+latency_metrics_init || log "WARN latency: mktemp failed"
+if [[ -n "${LATENCY_PROBES:-}" ]]; then
+  # shellcheck disable=SC2086
+  for entry in $LATENCY_PROBES; do
+    probe="${entry%%=*}"; rest="${entry#*=}"
+    url="${rest%%::*}"; service="${rest#*::}"
+    if [[ -z "$probe" || -z "$url" || -z "$service" || "$url" == "$rest" || "$service" == "$rest" ]]; then
+      log "WARN: skipping malformed LATENCY_PROBES entry: ${entry}"
+      continue
+    fi
+    probe_latency "$probe" "$url" "$service"
+  done
+else
+  log "WARN: LATENCY_PROBES is empty — no TTFB/total metrics recorded"
+fi
+latency_metrics_push
 
 if [[ "$FAILED" -ne 0 ]]; then
   log "CHECKS_FAILED"

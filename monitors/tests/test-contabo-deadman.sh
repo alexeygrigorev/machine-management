@@ -52,20 +52,24 @@ echo "$(date -u -d '60 seconds ago' '+%Y-%m-%dT%H:%M:%SZ') ALL_OK"; exit 0
 EOF
 cat > "$TMP/stubbin/curl" <<'EOF'
 #!/usr/bin/env bash
-# Stub curl: honors -o <file>, prints code. URL = last arg.
+# Stub curl: honors -o <file>, prints "code ttfb total" (latency) or code.
+# URL = last arg. -L flag ignored (redirect-follow is a no-op in stub).
 out=""; url=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o) out="$2"; shift 2;;
     -w|--connect-timeout|--max-time) shift 2;;
+    -L) shift;;
     -*) shift;;
     *) url="$1"; shift;;
   esac
 done
 case "$url" in
-  *good*) printf '{ "STATUS": "OK" }' > "$out"; echo "200"; exit 0;;
-  *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; echo "200"; exit 0;;
-  *wrong*) printf '<html>edge default backend</html>' > "$out"; echo "200"; exit 0;;
+  *slow*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 5.00 5.20"; exit 0;;
+  *fast*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 0.20 0.30"; exit 0;;
+  *good*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 0.20 0.30"; exit 0;;
+  *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; echo "200 0.20 0.30"; exit 0;;
+  *wrong*) printf '<html>edge default backend</html>' > "$out"; echo "200 0.20 0.30"; exit 0;;
   *down*) echo "curl: (7) connect failed" >&2; echo ""; exit 7;;
   *) echo "stub curl: unknown url $url" >&2; exit 99;;
 esac
@@ -93,6 +97,8 @@ run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   DEADMAN_HOSTS="$1" \
   DEADMAN_URLS="$2" \
   DEADMAN_FORCE_FAIL="$4" \
+  LATENCY_PROBES="" \
+  LATENCY_PUSH_ENABLED=0 \
   ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
   ALERT_OPS_TO="dev@dtcdev.click" \
   STUB_DM_MAILDIR="$3/mail" \
@@ -259,6 +265,42 @@ if [[ "$out" == *'OK check=ext-svc'* ]]; then
   pass "D14 large content marker match consumes pipe (no SIGPIPE false alarm)"
 else
   fail "D14 large marker -- $out"
+fi
+
+# ---- D15-D16: latency probes (f5d8e22b: TTFB/total + dev-only slowness) ----
+run_dm_lat() { # $1=latency_probes $2=sustain $3=state-dir
+  CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
+  STATE_DIR="$3" \
+  LOCK_FILE="$3.lock" \
+  DEADMAN_HOSTS="node-a" \
+  DEADMAN_URLS='svc=https://example.test/good::"status":"ok"' \
+  DEADMAN_FORCE_FAIL=0 \
+  LATENCY_PROBES="$1" LATENCY_SUSTAIN_SEC="$2" LATENCY_PUSH_ENABLED=0 \
+  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
+  ALERT_OPS_TO="dev@dtcdev.click" LATENCY_ALERT_TO="dev@dtcdev.click" \
+  STUB_DM_MAILDIR="$3/mail" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+}
+# NOTE: stub curl maps *slow* -> 5s TTFB; *good/fast* -> 0.2s. See stubbin/curl.
+SD15="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm_lat 'p1=https://example.test/fast::cmp' 0 "$SD15")"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'latency probe=p1'* && "$out" == *'ttfb=0.20'* ]]; then
+  pass "D15 fast latency records TTFB/total, no page"
+else
+  fail "D15 fast latency (rc=$rc) -- $out"
+fi
+SD16="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm_lat 'p1=https://example.test/slow::cmp' 0 "$SD16")"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL latency probe=p1'* ]]; then
+  to_line="$(cat "$SD16/mail/sent.tsv" 2>/dev/null | tail -n 1 || true)"
+  if [[ "$to_line" == *'dev@dtcdev.click'* && "$to_line" != *'alexey@'* ]]; then
+    pass "D16 slow latency FAILs dev-only (sustain=0 drill)"
+  else
+    fail "D16 slow recipient not dev-only -- $to_line -- $out"
+  fi
+else
+  fail "D16 slow latency (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

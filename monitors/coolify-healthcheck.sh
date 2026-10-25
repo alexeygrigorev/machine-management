@@ -149,6 +149,26 @@ RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
 # checks (127.0.0.1 / 10.100.0.x). Set on contabo-a; leave 0 on contabo-b.
 SKIP_PUBLIC_HTTP_CHECKS="${SKIP_PUBLIC_HTTP_CHECKS:-0}"
 
+# --- latency probes (f5d8e22b: TTFB + total per URL into VictoriaMetrics) ---
+# Space-separated name=url::service triples. Probe list covers AC2:
+# CMP home + one course page, AISHL home + one content page, Relay /health,
+# website home + /events/past. Service label groups PromQL p95 per service
+# (cmp, aisl, relay, website). TTFB/total recorded even on HTTP 4xx/5xx
+# (status label preserves the code); curl transport failures record -1.
+LATENCY_PROBES="${LATENCY_PROBES:-cmp_home=https://courses.datatalks.club/::cmp cmp_course=https://courses.datatalks.club/ml-zoomcamp-2026/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website}"
+LATENCY_PUSH_ENABLED="${LATENCY_PUSH_ENABLED:-1}"
+# Contabo hosts reach VM over WireGuard; Hetzner deadman overrides via SSH.
+LATENCY_PUSH_URL="${LATENCY_PUSH_URL:-http://10.100.0.1:8429/api/v1/import/prometheus}"
+LATENCY_PUSH_TIMEOUT="${LATENCY_PUSH_TIMEOUT:-10}"
+# Slowness alert (AC3 probe leg): TTFB > 3s sustained >=10min -> mail ONLY to
+# LATENCY_ALERT_TO (default dev@dtcdev.click) from alerts@dtcdev.click, with
+# RECOVERED, max 1 repeat/hour, hysteresis (fire 3.0s, recover 2.5s).
+LATENCY_TTFB_WARN_SEC="${LATENCY_TTFB_WARN_SEC:-3}"
+LATENCY_TTFB_RECOVER_SEC="${LATENCY_TTFB_RECOVER_SEC:-2.5}"
+LATENCY_SUSTAIN_SEC="${LATENCY_SUSTAIN_SEC:-600}"
+LATENCY_ALERT_TO="${LATENCY_ALERT_TO:-dev@dtcdev.click}"
+LATENCY_STATE_SUFFIX="${LATENCY_STATE_SUFFIX:-latency}"
+
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: missing required binary: flock"; exit 1; }
 
@@ -442,6 +462,140 @@ check_content() {
   rm -f "$body_file"
 }
 
+# Latency probes (f5d8e22b AC2+AC3): TTFB + total per URL into VictoriaMetrics.
+# Metrics (Prometheus exposition, pushed to LATENCY_PUSH_URL):
+#   probe_ttfb_seconds{probe,service,url_host,status,host}
+#   probe_total_seconds{probe,service,url_host,status,host}
+# url_host is the URL authority only (no query string / PII). status is the
+# HTTP code or "000" on transport failure (values -1).
+LATENCY_METRICS_FILE=""
+latency_metrics_init() {
+  LATENCY_METRICS_FILE="$(mktemp)" || return 1
+}
+latency_metrics_emit() {
+  # $1=probe $2=service $3=url_host $4=status $5=ttfb $6=total
+  local probe="$1" service="$2" uhost="$3" status="$4" ttfb="$5" total="$6"
+  local hname
+  hname="$(hostname)"
+  {
+    printf 'probe_ttfb_seconds{probe="%s",service="%s",url_host="%s",status="%s",host="%s"} %s\n' \
+      "$probe" "$service" "$uhost" "$status" "$hname" "$ttfb"
+    printf 'probe_total_seconds{probe="%s",service="%s",url_host="%s",status="%s",host="%s"} %s\n' \
+      "$probe" "$service" "$uhost" "$status" "$hname" "$total"
+  } >> "$LATENCY_METRICS_FILE"
+}
+latency_metrics_push() {
+  [[ "${LATENCY_PUSH_ENABLED:-1}" == "1" ]] || return 0
+  [[ -s "${LATENCY_METRICS_FILE:-}" ]] || return 0
+  [[ -n "${LATENCY_PUSH_URL:-}" ]] || { log "WARN latency-push: LATENCY_PUSH_URL empty, skipping"; return 0; }
+  if curl -sS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
+      "$LATENCY_PUSH_URL" -o /dev/null 2>/dev/null; then
+    log "OK latency-push: pushed $(grep -c '^probe_' "$LATENCY_METRICS_FILE") series to VM"
+  else
+    log "WARN latency-push: push to VM failed (metrics kept in log only)"
+  fi
+  rm -f "$LATENCY_METRICS_FILE"
+  LATENCY_METRICS_FILE=""
+}
+send_latency_alert() {
+  # $1=probe $2=subject-suffix $3=body — always to LATENCY_ALERT_TO only.
+  local probe="$1" subject="$2" body="$3"
+  local name="latency-${probe}-${LATENCY_STATE_SUFFIX}"
+  local state_file="${STATE_DIR}/${name}.state"
+  local last_alert=0 last_status="" first_exceed=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    last_alert="${LAST_ALERT:-0}"; last_status="${STATUS:-}"; first_exceed="${FIRST_EXCEED:-0}"
+  fi
+  local is_recovery=0
+  [[ "$subject" == RECOVERED* ]] && is_recovery=1
+  if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
+    local elapsed_min=$(( (NOW - last_alert) / 60 ))
+    if [[ "$elapsed_min" -lt 60 ]]; then
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' "$last_alert" "$first_exceed" > "$state_file"
+      return 0
+    fi
+  fi
+  local saved_to="$ALERT_TO"
+  ALERT_TO="$LATENCY_ALERT_TO"
+  send_alert "$name" "$subject" "$body"
+  ALERT_TO="$saved_to"
+  # send_alert wrote state under latency name with FAIL_SINCE; preserve FIRST_EXCEED.
+  if [[ -f "$state_file" ]]; then
+    if [[ "$is_recovery" -eq 1 ]]; then
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    else
+      local cur_alert=0
+      # shellcheck disable=SC1090
+      source "$state_file" || true
+      cur_alert="${LAST_ALERT:-$NOW}"
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' "$cur_alert" "${first_exceed:-$NOW}" > "$state_file"
+    fi
+  fi
+}
+probe_latency() {
+  # $1=probe $2=url $3=service — measures TTFB/total, emits metrics, alerts on sustained slowness.
+  local probe="$1" url="$2" service="$3"
+  local uhost status ttfb total rc out
+  uhost="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' | sed -E 's#[:/].*##')"
+  out="$(curl -sS -L -o /dev/null -w '%{http_code} %{time_starttransfer} %{time_total}' \
+    --connect-timeout "$HTTP_CONNECT_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    status="000"; ttfb="-1"; total="-1"
+    log "WARN latency probe=${probe} service=${service} url_host=${uhost}: curl rc=${rc} detail='$(echo "$out" | head -c 160)'"
+  else
+    status="$(echo "$out" | awk '{print $1}')"
+    ttfb="$(echo "$out" | awk '{print $2}')"
+    total="$(echo "$out" | awk '{print $3}')"
+    [[ "$ttfb" =~ ^[0-9.]+$ ]] || ttfb="-1"
+    [[ "$total" =~ ^[0-9.]+$ ]] || total="-1"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status="000"
+    log "OK latency probe=${probe} service=${service} url_host=${uhost} status=${status} ttfb=${ttfb}s total=${total}s"
+  fi
+  if [[ -n "${LATENCY_METRICS_FILE:-}" ]]; then
+    latency_metrics_emit "$probe" "$service" "$uhost" "$status" "$ttfb" "$total"
+  fi
+  # Slowness leg (AC3): TTFB > warn sustained >= SUSTAIN_SEC -> FAIL (dev@ only).
+  # Hysteresis: recover only when TTFB < recover threshold (transport fail = no recover).
+  local state_file="${STATE_DIR}/latency-${probe}-${LATENCY_STATE_SUFFIX}.state"
+  local last_status="" first_exceed=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    last_status="${STATUS:-}"; first_exceed="${FIRST_EXCEED:-0}"
+  fi
+  local is_slow=0 is_recovered=0
+  if [[ "$ttfb" != "-1" ]] && awk "BEGIN{exit !( $ttfb > $LATENCY_TTFB_WARN_SEC )}"; then
+    is_slow=1
+  fi
+  if [[ "$ttfb" != "-1" ]] && awk "BEGIN{exit !( $ttfb < $LATENCY_TTFB_RECOVER_SEC )}"; then
+    is_recovered=1
+  fi
+  if [[ "$is_slow" -eq 1 ]]; then
+    [[ "$first_exceed" -gt 0 ]] || first_exceed="$NOW"
+    printf 'STATUS=%s\nLAST_ALERT=%s\nFIRST_EXCEED=%s\n' \
+      "${last_status:-PENDING}" "${LAST_ALERT:-0}" "$first_exceed" > "$state_file"
+    local sustained=$(( NOW - first_exceed ))
+    if [[ "$sustained" -ge "$LATENCY_SUSTAIN_SEC" ]]; then
+      log "FAIL latency probe=${probe}: TTFB ${ttfb}s > ${LATENCY_TTFB_WARN_SEC}s sustained ${sustained}s"
+      send_latency_alert "$probe" "FAIL" "Slowness: probe '${probe}' (${service} ${uhost}) TTFB ${ttfb}s > ${LATENCY_TTFB_WARN_SEC}s sustained ${sustained}s (threshold ${LATENCY_SUSTAIN_SEC}s). Total ${total}s status ${status}."
+      FAILED=1
+    else
+      log "WARN latency probe=${probe}: TTFB ${ttfb}s above threshold, sustained ${sustained}s (< ${LATENCY_SUSTAIN_SEC}s) — no page yet"
+    fi
+  else
+    if [[ "$last_status" == "FAIL" && "$is_recovered" -eq 1 ]]; then
+      log "OK latency probe=${probe}: TTFB ${ttfb}s recovered (< ${LATENCY_TTFB_RECOVER_SEC}s)"
+      send_latency_alert "$probe" "RECOVERED" "Slowness recovered: probe '${probe}' (${service} ${uhost}) TTFB ${ttfb}s < ${LATENCY_TTFB_RECOVER_SEC}s."
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    elif [[ "$last_status" == "FAIL" ]]; then
+      log "OK latency probe=${probe}: TTFB ${ttfb}s below fire threshold but above recover (${LATENCY_TTFB_RECOVER_SEC}s) — holding FAIL (hysteresis)"
+    else
+      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    fi
+  fi
+}
 
 check_disk() {
   local name="disk-root" used_pct
@@ -692,6 +846,33 @@ else
   log "WARN: CONTENT_CHECKS is empty — no content-marker checks configured (status-only APP_URLS miss wrong-content incidents)"
 fi
 
+# Latency probes (AC2): always run (even when SKIP_PUBLIC_HTTP_CHECKS=1 the
+# probes still record metrics; slowness pages come only from contabo-b to
+# avoid dual pages — contabo-a sets LATENCY_ALERT_ONLY_METRICS=1).
+latency_metrics_init || log "WARN latency: mktemp failed, metrics in log only"
+if [[ -n "${LATENCY_PROBES:-}" ]]; then
+  # shellcheck disable=SC2086
+  for entry in $LATENCY_PROBES; do
+    probe="${entry%%=*}"; rest="${entry#*=}"
+    url="${rest%%::*}"; service="${rest#*::}"
+    if [[ -z "$probe" || -z "$url" || -z "$service" || "$url" == "$rest" || "$service" == "$rest" ]]; then
+      log "WARN: skipping malformed LATENCY_PROBES entry: ${entry} (want name=url::service)"
+      continue
+    fi
+    if [[ "${LATENCY_ALERT_ONLY_METRICS:-0}" == "1" ]]; then
+      # Metrics-only mode (contabo-a): record TTFB/total, skip slowness paging.
+      _saved_sustain="$LATENCY_SUSTAIN_SEC"
+      LATENCY_SUSTAIN_SEC=999999999
+      probe_latency "$probe" "$url" "$service"
+      LATENCY_SUSTAIN_SEC="$_saved_sustain"
+    else
+      probe_latency "$probe" "$url" "$service"
+    fi
+  done
+else
+  log "WARN: LATENCY_PROBES is empty — no TTFB/total metrics recorded"
+fi
+latency_metrics_push
 
 if [[ "${SKIP_DISK_CHECK:-0}" == "1" ]]; then
   log "SKIP check=disk-root (SKIP_DISK_CHECK=1)"
@@ -721,7 +902,7 @@ prune_stale_checks() {
   valid_checks["aisl-q"]=1
   valid_checks["cmp-callbacks"]=1
 
-  local pair app entry db stack
+  local pair app entry db stack probe rest
   if [[ -n "${APP_URLS:-}" ]]; then
     for pair in $APP_URLS; do
       app="${pair%%=*}"
@@ -732,6 +913,12 @@ prune_stale_checks() {
     for entry in $CONTENT_CHECKS; do
       app="${entry%%=*}"
       [[ -n "$app" ]] && valid_checks["content-${app}"]=1
+    done
+  fi
+  if [[ -n "${LATENCY_PROBES:-}" ]]; then
+    for entry in $LATENCY_PROBES; do
+      probe="${entry%%=*}"
+      [[ -n "$probe" ]] && valid_checks["latency-${probe}-${LATENCY_STATE_SUFFIX}"]=1
     done
   fi
   if [[ -n "${EXPECT_DBS:-}" ]]; then

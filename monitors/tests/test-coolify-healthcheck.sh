@@ -90,8 +90,11 @@ run_check() { # $1=envfile -> prints output, returns script rc
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/lock-$RANDOM" \
   APP_URLS="" \
+  LATENCY_PROBES="" \
+  LATENCY_PUSH_ENABLED=0 \
   SKIP_DISK_CHECK=1 \
   SKIP_BACKUP_CHECKS=1 \
+  SKIP_CREATED_CHECK=1 \
   CHECK_CMP_CALLBACKS=0 \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
@@ -173,7 +176,9 @@ run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
   LOCK_FILE="$TMP/clock-$RANDOM" \
   APP_URLS="" \
   CONTENT_CHECKS="$1" \
-  SKIP_DISK_CHECK=1 SKIP_BACKUP_CHECKS=1 CHECK_CMP_CALLBACKS=0 \
+  LATENCY_PROBES="" \
+  LATENCY_PUSH_ENABLED=0 \
+  SKIP_DISK_CHECK=1 SKIP_BACKUP_CHECKS=1 CHECK_CMP_CALLBACKS=0 SKIP_CREATED_CHECK=1 \
   PATH="$TMP/cbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
@@ -272,7 +277,7 @@ run_ops() { # uses $STUB2_* env; $1=CHECK_AISL_Q value
   COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/olock-$RANDOM" \
-  APP_URLS="" CONTENT_CHECKS="" \
+  APP_URLS="" CONTENT_CHECKS="" LATENCY_PROBES="" LATENCY_PUSH_ENABLED=0 \
   PATH="$TMP/dbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
@@ -331,6 +336,72 @@ if [[ $rc -ne 0 && "$out" == *'FAIL check=aisl-q'* && "$out" == *'no local pg-sh
   pass "T17 aisl-q without container FAILs loud"
 else
   fail "T17 aisl-q misconfig (rc=$rc) -- $out"
+fi
+
+# ---- T18-T20: latency probes (f5d8e22b: TTFB/total + slowness hysteresis) ----
+mkdir -p "$TMP/lbin"
+cat > "$TMP/lbin/curl" <<'EOF'
+#!/usr/bin/env bash
+# Stub curl for latency: honors -w format, prints "code ttfb total".
+# Slow when URL contains "slow", fail when URL contains "down".
+url="${@: -1}"
+if [[ "$url" == *down* ]]; then echo "curl: (7) failed" >&2; exit 7; fi
+if [[ "$url" == *slow* ]]; then echo "200 5.00 5.20"; exit 0; fi
+echo "200 0.20 0.30"; exit 0
+EOF
+chmod +x "$TMP/lbin/curl"
+cat > "$TMP/lbin/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$TMP/lbin/docker"
+cat > "$TMP/lbin/msmtp" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; exit 0
+EOF
+chmod +x "$TMP/lbin/msmtp"
+cat > "$TMP/lbin/sendmail" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; exit 0
+EOF
+chmod +x "$TMP/lbin/sendmail"
+run_latency() { # $1=LATENCY_PROBES $2=extra env assignments
+  local statedir envf="$TMP/env-lat" rc out
+  statedir="$(mktemp -d -p "$TMP")"
+  printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'SKIP_DISK_CHECK=1' \
+    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.com' > "$envf"
+  # shellcheck disable=SC2086
+  out="$(env COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
+  STATE_DIR="$statedir" \
+  LOCK_FILE="$TMP/llock-$RANDOM" \
+  APP_URLS="" CONTENT_CHECKS="" LATENCY_PROBES="$1" LATENCY_PUSH_ENABLED=0 \
+  $2 \
+  PATH="$TMP/lbin:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1)"; rc=$?
+  printf '%s\n' "$out"
+  echo "STATE_DIR=$statedir"
+  return "$rc"
+}
+# T18: fast probes record TTFB/total, no slowness page
+out=""; set +e; out="$(run_latency 'p1=https://127.0.0.1/fast::cmp' 'LATENCY_SUSTAIN_SEC=600')"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'latency probe=p1'* && "$out" == *'ttfb=0.20'* ]]; then
+  pass "T18 fast latency records TTFB/total, no page"
+else
+  fail "T18 fast latency (rc=$rc) -- $out"
+fi
+# T19: slow probe below sustain -> WARN only, no FAIL page yet
+out=""; set +e; out="$(run_latency 'p1=https://127.0.0.1/slow::cmp' 'LATENCY_SUSTAIN_SEC=600')"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'above threshold'* && "$out" != *'FAIL latency probe=p1'* ]]; then
+  pass "T19 slow below sustain WARNs without paging"
+else
+  fail "T19 slow sustain (rc=$rc) -- $out"
+fi
+# T20: slow probe with sustain=0 -> FAIL pages immediately (drill path)
+out=""; set +e; out="$(run_latency 'p1=https://127.0.0.1/slow::cmp' 'LATENCY_SUSTAIN_SEC=0')"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL latency probe=p1'* ]]; then
+  pass "T20 slow with sustain=0 FAILs (drill)"
+else
+  fail "T20 slow immediate (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
