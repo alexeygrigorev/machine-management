@@ -79,6 +79,10 @@ trap cleanup EXIT
 
 AWS_ARGS=(); [[ -n "$S3_ENDPOINT_URL" ]] && AWS_ARGS+=(--endpoint-url "$S3_ENDPOINT_URL")
 
+# Container hygiene: --rm plus agent.session label when AGENT_SESSION_ID is set.
+LABEL_ARGS=()
+if [[ -n "${AGENT_SESSION_ID:-}" ]]; then LABEL_ARGS+=(--label "agent.session=${AGENT_SESSION_ID}"); fi
+
 # ---- resolve objects (latest overall, or under --date) ----
 if [[ -n "$DATE_PATH" ]]; then LQ="--prefix ${S3_PREFIX}/${HOST_ID}/${DATE_PATH}/";
 else LQ="--prefix ${S3_PREFIX}/${HOST_ID}/"; fi
@@ -105,7 +109,7 @@ T_DL="$(date +%s)"; log "phase download: $((T_DL-T0))s"
 # ---- verify dump integrity (no data printed) ----
 gzip -t "$WORKDIR/cp.dump.gz" || fail "gzip integrity failed"
 gunzip -c "$WORKDIR/cp.dump.gz" >"$WORKDIR/cp.dump"
-TOC_LINES="$(docker run --rm -v "$WORKDIR:/w:ro" "$PG_IMAGE" pg_restore --list /w/cp.dump 2>/dev/null | wc -l | tr -d ' ')"
+TOC_LINES="$(docker run --rm "${LABEL_ARGS[@]}" -v "$WORKDIR:/w:ro" "$PG_IMAGE" pg_restore --list /w/cp.dump 2>/dev/null | wc -l | tr -d ' ')"
 [[ "$TOC_LINES" -gt 100 ]] || fail "TOC suspiciously small ($TOC_LINES lines)"
 log "dump ok: TOC lines=$TOC_LINES"
 
@@ -127,7 +131,7 @@ T_BUN="$(date +%s)"; log "phase bundle-verify: $((T_BUN-T_DL))s"
 
 # ---- throwaway Postgres (loopback only) + restore ----
 docker pull "$PG_IMAGE" >/dev/null 2>&1 || log "WARN: pull skipped/failed, using cached image"
-docker run -d --name "$CNAME" --restart=no -v "$CVOL:/var/lib/postgresql/data" \
+docker run -d --rm "${LABEL_ARGS[@]}" --name "$CNAME" --restart=no -v "$CVOL:/var/lib/postgresql/data" \
   -p "127.0.0.1:${PORT}:5432" -e POSTGRES_USER=coolify -e POSTGRES_PASSWORD=drill \
   "$PG_IMAGE" >/dev/null || fail "throwaway postgres start failed"
 BIND="$(docker port "$CNAME" 5432 2>/dev/null)"
