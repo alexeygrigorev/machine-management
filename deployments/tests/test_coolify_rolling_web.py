@@ -124,14 +124,19 @@ class RollingTests(unittest.TestCase):
             ('PATCH', '/api/v1/applications/native'), ('POST', '/api/v1/deploy?uuid=native')])
 
     def test_new_release_cannot_copy_development_database_or_send_policy(self):
-        self.config['destination_environment'] = ['DATABASE_URL', 'RELAY_TRANSACTIONAL_DRY_RUN']
+        self.config['destination_environment'] = [
+            'DATABASE_URL', 'DEPLOY_EXPECTED_DATABASE', 'DEPLOY_EXPECTED_ROLE',
+            'RELAY_TRANSACTIONAL_DRY_RUN']
         self.env.extend([
             {'key': 'DATABASE_URL', 'value': 'production-database'},
+            {'key': 'DEPLOY_EXPECTED_DATABASE', 'value': 'website'},
+            {'key': 'DEPLOY_EXPECTED_ROLE', 'value': 'website_app'},
             {'key': 'RELAY_TRANSACTIONAL_DRY_RUN', 'value': '0'},
         ])
         def development(config):
             return 'ghcr.io/org/web:20261023-130000-123abcd', {
                 'SECRET': 'private', 'DATABASE_URL': 'development-database',
+                'DEPLOY_EXPECTED_DATABASE': 'website_dev', 'DEPLOY_EXPECTED_ROLE': 'website_dev',
                 'RELAY_TRANSACTIONAL_DRY_RUN': '1', 'VERSION': 'new-release'}
         self.assertEqual(rolling.reconcile(self.config, self.call, development, True), 'deployed')
         env_write = next(data for method, path, data in self.writes if path.endswith('/envs/bulk'))

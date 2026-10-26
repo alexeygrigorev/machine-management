@@ -59,6 +59,8 @@
       "rollout_mode": "git-commit",
       "destination_environment": [
         "DATABASE_URL",
+        "DEPLOY_EXPECTED_DATABASE",
+        "DEPLOY_EXPECTED_ROLE",
         "RELAY_TRANSACTIONAL_DRY_RUN",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",

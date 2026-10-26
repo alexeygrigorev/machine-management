@@ -93,7 +93,7 @@ not delete credentials. Explicit credential retirement is a separate task.
 Failures produce only a name and exception class, never API bodies or values.
 
 The website's `destination_environment` also protects its production database
-URL, transactional dry-run policy, Relay configuration, settings module, and
+URL, expected migration database/role, transactional dry-run policy, Relay configuration, settings module, and
 media reader credentials when the same keys exist on the development source.
 These values are managed on the native
 production Application through Coolify's normal encrypted environment path.
@@ -102,6 +102,9 @@ otherwise reconciliation fails before any environment/image write or deployment.
 fill missing destination credentials. Keep Website development dry-run enabled
 and production dry-run disabled under the approved policy, without copying
 the development database URL.
+For Website production, `DEPLOY_EXPECTED_DATABASE=website` and
+`DEPLOY_EXPECTED_ROLE=website_app` must agree with the production connection.
+Development's preflight identity must never overwrite these assertions.
 `destination_environment_optional` prevents source values from filling or
 overwriting optional production identity settings and AWS session tokens.
 In particular, a source session token must never be paired with the destination's
