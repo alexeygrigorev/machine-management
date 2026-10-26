@@ -193,12 +193,29 @@ marker — data node only), `host/firewall-{ufw,iptables-v4,iptables-v6}.txt`
 backup-copies sibling schedule — no duplicate schedule here).
 
 The passphrase lives in `/etc/coolify-cp-backup.pass` (600) on the nodes and
-the operator box (`~/tmp/secrets/` + `~/.secrets/`). Off-host escrow: AWS
-Secrets Manager, MAIN account, eu-west-1, secret
-`dr/coolify-cp-backup-gpg-passphrase` (2026-10-24, t1378u; decrypt of the latest
-contabo-a/b bundles verified with the escrowed copy). The ACME edge-tls
-passphrase is escrowed in `dr/acme-backup-gpg-passphrase`. S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
+the operator box (`~/tmp/secrets/` + `~/.secrets/`). Off-host escrows (names
+only, never values in git): AWS Secrets Manager, MAIN account, eu-west-1,
+secret `dr/coolify-cp-backup-gpg-passphrase` (2026-10-24, t1378u; decrypt of
+the latest contabo-a/b bundles verified with the escrowed copy) AND AWS SSM
+Parameter Store, SANDBOX account 817685572750, eu-west-1, SecureString
+`/dr-escrow/coolify-cp-backup-gpg-passphrase` (2026-10-26, t1468u decision;
+decrypt of the 2026-10-26 contabo-a bundle verified with the escrowed copy).
+The ACME edge-tls passphrase is escrowed in `dr/acme-backup-gpg-passphrase`
+(MAIN Secrets Manager) and `/dr-escrow/acme-backup-gpg-passphrase` (SANDBOX
+SSM SecureString). S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
 copies 7 d.
+
+Escrow-copy restore drill (passphrase from SANDBOX SSM, never the Hetzner file):
+
+```bash
+./contingency/dr-escrow-restore-drill.sh \
+  --cp-bundle <coolify-cp-bundle-...tar.gz.gpg> --acme-bundle <acme-...json.gpg>
+# → fetches both passphrases from SSM /dr-escrow/* (SecureString), decrypts,
+#   verifies cp filenames (coolify.env + ssh-keys/) and the acme letsencrypt
+#   block (counts only), prints DRILL_OK. Use --cp-pass-file/--acme-pass-file
+#   only for the Hetzner-copy script test. Region/param names overridable via
+#   --region/--cp-param/--acme-param (env: DR_ESCROW_REGION/_CP_PARAM/_ACME_PARAM).
+```
 
 Isolated restore drill (operator box only, never on a CP host —
 `contingency/coolify-cp-restore.sh` refuses live `coolify-db` / `/data/coolify`,
