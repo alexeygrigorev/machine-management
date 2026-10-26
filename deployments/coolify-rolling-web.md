@@ -92,6 +92,21 @@ The follower preserves native-only variables; source variable removal does
 not delete credentials. Explicit credential retirement is a separate task.
 Failures produce only a name and exception class, never API bodies or values.
 
+The website's `destination_environment` also protects its production database
+URL, transactional dry-run policy, Relay configuration, settings module, and
+media reader credentials when the same keys exist on the development source.
+These values are managed on the native
+production Application through Coolify's normal encrypted environment path.
+Each required value must already be nonempty and runtime-enabled there;
+otherwise reconciliation fails before any environment/image write or deployment. Source values never
+fill missing destination credentials. Keep Website development dry-run enabled
+and production dry-run disabled under the approved policy, without copying
+the development database URL.
+`destination_environment_optional` prevents source values from filling or
+overwriting optional production identity settings and AWS session tokens.
+In particular, a source session token must never be paired with the destination's
+permanent media reader key. Optional values may be absent at the destination.
+
 ## Native Application settings
 
 The first three Applications use `Docker Image`, with the source container's

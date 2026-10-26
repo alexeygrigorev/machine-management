@@ -57,6 +57,24 @@
       "ssh_host": "contabo-a",
       "image": "dtc-website",
       "rollout_mode": "git-commit",
+      "destination_environment": [
+        "DATABASE_URL",
+        "RELAY_TRANSACTIONAL_DRY_RUN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "RELAY_API_KEY",
+        "RELAY_BASE_URL",
+        "DJANGO_SETTINGS_MODULE"
+      ],
+      "destination_environment_optional": [
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "RELAY_WEBHOOK_SECRET",
+        "DTC_ENVIRONMENT",
+        "CANONICAL_ORIGIN",
+        "DJANGO_ALLOWED_HOSTS",
+        "DJANGO_CSRF_TRUSTED_ORIGINS"
+      ],
       "environment": {
         "GUNICORN_CMD_ARGS": "--threads 4",
         "ROLLING_APP_URL": "http://127.0.0.1:8000/health/ready"

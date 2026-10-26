@@ -134,6 +134,18 @@ def reconcile(config, call, state=source_state, apply=False):
     env_records = call('GET', app_path + '/envs')
     current_env = {e['key']: e.get('value') or '' for e in env_records
                    if not e.get('is_preview')}
+    # A development release can supply code without supplying production's
+    # database, credentials or send policy. These values belong to the native
+    # destination's normal secrets/configuration path, never the source stack.
+    env = dict(env)
+    runtime_env = {e['key']: e.get('value') or '' for e in env_records
+                   if not e.get('is_preview') and e.get('is_runtime', True)}
+    for key in config.get('destination_environment', []):
+        if not runtime_env.get(key):
+            raise ValueError('Destination environment is incomplete; keep current public release')
+        env.pop(key, None)
+    for key in config.get('destination_environment_optional', []):
+        env.pop(key, None)
     build_flags = {e['key']: bool(e.get('is_buildtime')) for e in env_records if not e.get('is_preview')}
     changed_env = {k: v for k, v in env.items() if current_env.get(k) != v}
     tag = image.rsplit(':', 1)[1]

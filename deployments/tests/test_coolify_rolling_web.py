@@ -123,6 +123,52 @@ class RollingTests(unittest.TestCase):
         self.assertEqual([w[:2] for w in self.writes], [
             ('PATCH', '/api/v1/applications/native'), ('POST', '/api/v1/deploy?uuid=native')])
 
+    def test_new_release_cannot_copy_development_database_or_send_policy(self):
+        self.config['destination_environment'] = ['DATABASE_URL', 'RELAY_TRANSACTIONAL_DRY_RUN']
+        self.env.extend([
+            {'key': 'DATABASE_URL', 'value': 'production-database'},
+            {'key': 'RELAY_TRANSACTIONAL_DRY_RUN', 'value': '0'},
+        ])
+        def development(config):
+            return 'ghcr.io/org/web:20261023-130000-123abcd', {
+                'SECRET': 'private', 'DATABASE_URL': 'development-database',
+                'RELAY_TRANSACTIONAL_DRY_RUN': '1', 'VERSION': 'new-release'}
+        self.assertEqual(rolling.reconcile(self.config, self.call, development, True), 'deployed')
+        env_write = next(data for method, path, data in self.writes if path.endswith('/envs/bulk'))
+        self.assertEqual(env_write['data'], [
+            {'key': 'VERSION', 'value': 'new-release', 'is_literal': True,
+             'is_runtime': True, 'is_buildtime': False}])
+        self.assertEqual(self.writes[-1][1], '/api/v1/deploy?uuid=native')
+
+    def test_missing_destination_secret_blocks_all_promotion_writes(self):
+        self.config['destination_environment'] = ['AWS_SECRET_ACCESS_KEY']
+        def new(config):
+            return 'ghcr.io/org/web:20261023-130000-123abcd', {'AWS_SECRET_ACCESS_KEY': 'source-secret'}
+        for record in [None, {'key': 'AWS_SECRET_ACCESS_KEY', 'value': ''},
+                       {'key': 'AWS_SECRET_ACCESS_KEY', 'value': 'preview-only', 'is_preview': True},
+                       {'key': 'AWS_SECRET_ACCESS_KEY', 'value': 'build-only', 'is_runtime': False}]:
+            with self.subTest(record=record):
+                self.env = [] if record is None else [record]
+                with self.assertRaisesRegex(ValueError, 'Destination environment is incomplete'):
+                    rolling.reconcile(self.config, self.call, new, True)
+                self.assertEqual(self.writes, [])
+
+    def test_source_tokens_and_relay_identity_never_reach_destination(self):
+        self.config['destination_environment'] = ['RELAY_API_KEY', 'RELAY_BASE_URL']
+        self.config['destination_environment_optional'] = [
+            'AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'RELAY_WEBHOOK_SECRET']
+        self.env.extend([
+            {'key': 'RELAY_API_KEY', 'value': 'production-key', 'is_runtime': True},
+            {'key': 'RELAY_BASE_URL', 'value': 'production-relay', 'is_runtime': True}])
+        def development(config):
+            return 'ghcr.io/org/web:20261023-130000-123abcd', {
+                'SECRET': 'private', 'RELAY_API_KEY': 'development-key',
+                'RELAY_BASE_URL': 'development-relay', 'AWS_SESSION_TOKEN': 'source-session',
+                'AWS_SECURITY_TOKEN': 'source-security', 'RELAY_WEBHOOK_SECRET': 'source-webhook'}
+        self.assertEqual(rolling.reconcile(self.config, self.call, development, True), 'deployed')
+        self.assertEqual([path for _, path, _ in self.writes], [
+            '/api/v1/applications/native', '/api/v1/deploy?uuid=native'])
+
     def test_git_website_follows_only_the_healthy_source_commit(self):
         config = {**self.config, 'image': 'dtc-website', 'rollout_mode': 'git-commit'}
         self.app.update(build_pack='dockerfile', git_commit_sha='a' * 40)
