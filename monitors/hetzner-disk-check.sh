@@ -13,8 +13,14 @@
 #      free <DISK_CRIT_FREE_PCT (8).
 #   2. Inode free: WARN when free <INODE_WARN_FREE_PCT (10),
 #      CRIT when free <INODE_CRIT_FREE_PCT (5).
-#   3. Fill trend: linear trend from stored samples (last FILL_WINDOW_H=6h);
-#      CRIT when the disk fills within FILL_CRIT_H=24h at the current rate.
+#   3. Fill trend: least-squares trend from stored samples (last FILL_WINDOW_H=6h)
+#      predicts fill within FILL_CRIT_H=24h AND the recent
+#      FILL_CONFIRM_WINDOW_H=1h window independently predicts the same.
+#      The confirmation window rejects one-off step changes (bulk moves,
+#      retentions, re-mounts): a step-then-flat pattern keeps the long-window
+#      slope steep for hours while the recent window is flat, so no page.
+#      Sustained growth stays negative in both windows and still pages.
+#      Static space/inode thresholds below are unchanged by this gate.
 #
 # Alerting: real findings page ALERT_TO (default
 # alexey@datatalks.club,dev@dtcdev.click). Drills route to ALERT_OPS_TO
@@ -55,6 +61,11 @@ INODE_CRIT_FREE_PCT="${INODE_CRIT_FREE_PCT:-5}"
 FILL_WINDOW_H="${FILL_WINDOW_H:-6}"
 FILL_CRIT_H="${FILL_CRIT_H:-24}"
 FILL_MIN_SPAN_SEC="${FILL_MIN_SPAN_SEC:-1800}"
+# Recent-window confirmation for the fill trend: must independently predict
+# fill within FILL_CRIT_H, else the long-window slope is treated as a stale
+# one-off step change and does not page.
+FILL_CONFIRM_WINDOW_H="${FILL_CONFIRM_WINDOW_H:-1}"
+FILL_CONFIRM_MIN_SPAN_SEC="${FILL_CONFIRM_MIN_SPAN_SEC:-1800}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
@@ -227,25 +238,45 @@ record_sample() {
 }
 
 fill_hours() {
-  # $1=sanitized $2=avail_now -> prints hours-to-full or empty when unknown/rising
+  # $1=sanitized $2=avail_now -> prints hours-to-full or empty.
+  # Least-squares slope over the long window, CONFIRMED by an independent
+  # least-squares slope over the recent window; both must predict fill within
+  # FILL_CRIT_H. Prints the long-window estimate. Empty when unknown, rising,
+  # or unconfirmed (one-off step change followed by flat usage).
   local s="$1" avail_now="$2"
   local f="${SAMPLE_DIR}/${s}.log"
   [[ -f "$f" ]] || return 0
   local window_sec=$(( FILL_WINDOW_H * 3600 ))
-  awk -v now="$NOW" -v win="$window_sec" -v minspan="$FILL_MIN_SPAN_SEC" \
+  local cwindow_sec=$(( FILL_CONFIRM_WINDOW_H * 3600 ))
+  awk -v now="$NOW" -v win="$window_sec" -v cwin="$cwindow_sec" \
+      -v minspan="$FILL_MIN_SPAN_SEC" -v cminspan="$FILL_CONFIRM_MIN_SPAN_SEC" \
       -v avail_now="$avail_now" -v crit_h="$FILL_CRIT_H" '
-    $1 >= (now - win) && $1 <= now && $2 ~ /^[0-9]+$/ {
-      if (n == 0) { t0 = $1; a0 = $2 }
-      t1 = $1; a1 = $2; n++
+    $1 <= now && $2 ~ /^[0-9]+$/ {
+      dt = $1 - now   # <= 0; small magnitude, safe for LS sums
+      if ($1 >= (now - win)) {
+        n++; st += dt; sa += $2; stt += dt*dt; sta += dt*$2
+        if (n == 1 || $1 < t0) t0 = $1
+        if (n == 1 || $1 > t1) t1 = $1
+      }
+      if ($1 >= (now - cwin)) {
+        m++; ct += dt; ca += $2; ctt += dt*dt; cta += dt*$2
+        if (m == 1 || $1 < ct0) ct0 = $1
+        if (m == 1 || $1 > ct1) ct1 = $1
+      }
     }
     END {
-      if (n < 2) exit 0
-      span = t1 - t0
-      if (span < minspan) exit 0
-      rate = (a1 - a0) / span   # bytes/sec; negative = filling
-      if (rate >= 0) exit 0
+      if (n < 2 || m < 2) exit 0
+      if ((t1 - t0) < minspan) exit 0
+      if ((ct1 - ct0) < cminspan) exit 0
+      denom = n*stt - st*st
+      cdenom = m*ctt - ct*ct
+      if (denom == 0 || cdenom == 0) exit 0
+      rate = (n*sta - st*sa) / denom          # bytes/sec; negative = filling
+      crate = (m*cta - ct*ca) / cdenom        # recent-window slope
+      if (rate >= 0 || crate >= 0) exit 0
       hours = (avail_now / (-rate)) / 3600
-      if (hours <= crit_h + 0.0001) printf "%.1f", hours
+      chours = (avail_now / (-crate)) / 3600
+      if (hours <= crit_h + 0.0001 && chours <= crit_h + 0.0001) printf "%.1f", hours
     }' "$f"
 }
 
@@ -307,7 +338,7 @@ check_mount() {
   local fill_h
   fill_h="$(fill_hours "$(sanitize_mount "$mp")" "$avail" || true)"
   if [[ -n "$fill_h" ]]; then
-    level="CRIT"; reason="${reason:+$reason; }fills within ${fill_h}h at 6h trend (threshold ${FILL_CRIT_H}h)"
+    level="CRIT"; reason="${reason:+$reason; }fills within ${fill_h}h at ${FILL_WINDOW_H}h trend confirmed by ${FILL_CONFIRM_WINDOW_H}h window (threshold ${FILL_CRIT_H}h)"
   fi
 
   local avail_gb size_gb

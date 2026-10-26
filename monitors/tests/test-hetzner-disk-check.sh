@@ -37,6 +37,7 @@ check_grep "$SCRIPT" 'storagebox' "T2i storagebox report-only present"
 check_grep "$SCRIPT" 'DISK_DRILL' "T2j drill mode present"
 check_grep "$REPO/monitors/hetzner-disk-check.cron" '/usr/local/sbin/hetzner-disk-check.sh' "T2k cron points at stable path"
 check_grep "$REPO/monitors/install-node-exporter.sh" '127.0.0.1:9100' "T2l node_exporter loopback-only"
+check_grep "$SCRIPT" 'FILL_CONFIRM_WINDOW_H="${FILL_CONFIRM_WINDOW_H:-1}"' "T2m recent-window confirmation default"
 
 # ---- stub bin ----
 TMP="$(mktemp -d)"
@@ -214,13 +215,18 @@ else
   fail "T6 storagebox (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
 fi
 
-# ---- T7: fill trend -> CRIT even when free% looks healthy ----
+# ---- T7: sustained fill trend -> CRIT even when free% looks healthy ----
+# Recent-window confirmation is required, so the fixture must keep declining
+# through the last hour (a step long ago + flat now must NOT page: see T11).
 ST7="$(mkstate)"; mkdir -p "$ST7/samples"
 write_vals \
   "/|ext4|$((100*GB))|$((40*GB))|29097984|20604622|/dev/nvme0n1p3"
 now="$(date +%s)"; sixh=$(( now - 6*3600 )); threeh=$(( now - 3*3600 ))
+oneh=$(( now - 3600 )); halfh=$(( now - 1800 ))
 printf '%s %s %s\n' "$sixh" "$((80*GB))" "$((100*GB))" > "$ST7/samples/root.log"
 printf '%s %s %s\n' "$threeh" "$((60*GB))" "$((100*GB))" >> "$ST7/samples/root.log"
+printf '%s %s %s\n' "$oneh" "$((47*GB))" "$((100*GB))" >> "$ST7/samples/root.log"
+printf '%s %s %s\n' "$halfh" "$((44*GB))" "$((100*GB))" >> "$ST7/samples/root.log"
 cat > "$TMP/envT7" <<EOF
 DISK_MOUNTS="/"
 ALERT_TO=prod-a@example.test
@@ -307,6 +313,65 @@ if [[ "$rc10a" -ne 0 && "$rc10b" -ne 0 && "$last_alert" == "0" \
   pass "T10 failed send retries immediately (no 4h mute)"
 else
   fail "T10 failed-send retry (rc=$rc10a/$rc10b last=$last_alert) -- $out10a || $out10b"
+fi
+
+echo "---- T11/T12: step-then-flat vs sustained growth (t91e8a710) ----"
+# T11 replays the RMTHZ /data false CRIT: a one-off bulk move drops free
+# space in a single step, then usage is flat. Long-window slope is still
+# steep, but the recent window is flat -> must NOT page.
+ST11="$(mkstate)"; mkdir -p "$ST11/samples"
+write_vals \
+  "/data|ext4|$((100*GB))|$((40*GB))|31260672|26582009|/dev/nvme1n1"
+now="$(date +%s)"
+for h in 6 5 4 3; do
+  printf '%s %s %s\n' "$(( now - h*3600 ))" "$((80*GB))" "$((100*GB))" >> "$ST11/samples/data.log"
+done
+for m in 120 90 60 30; do
+  printf '%s %s %s\n' "$(( now - m*60 ))" "$((40*GB))" "$((100*GB))" >> "$ST11/samples/data.log"
+done
+cat > "$TMP/envT11" <<EOF
+DISK_MOUNTS="/data"
+ALERT_TO=prod-a@example.test
+ALERT_OPS_TO=ops@example.test
+RECOVER_NOTIFY_MIN_SEC=0
+FILL_WINDOW_H=6
+FILL_CRIT_H=24
+EOF
+: > "$MAILBOX"; run_iso "$ST11" "$TMP/envT11"
+out="$(cat "$LAST_OUT")"; rc="$(cat "$LAST_RC")"
+if [[ "$rc" -eq 0 && "$out" == *ALL_OK* && "$out" != *fills\ within* && ! -s "$MAILBOX" ]]; then
+  pass "T11 step-then-flat does not page (no fill CRIT, no mail)"
+else
+  fail "T11 step-then-flat (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
+fi
+
+# T12: sustained growth through both windows -> must still page CRIT.
+ST12="$(mkstate)"; mkdir -p "$ST12/samples"
+write_vals \
+  "/data|ext4|$((100*GB))|$((40*GB))|31260672|26582009|/dev/nvme1n1"
+now="$(date +%s)"
+printf '%s %s %s\n' "$(( now - 6*3600 ))" "$((80*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 5*3600 ))" "$((73*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 4*3600 ))" "$((67*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 3*3600 ))" "$((60*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 2*3600 ))" "$((53*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 3600 ))" "$((47*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+printf '%s %s %s\n' "$(( now - 1800 ))" "$((44*GB))" "$((100*GB))" >> "$ST12/samples/data.log"
+cat > "$TMP/envT12" <<EOF
+DISK_MOUNTS="/data"
+ALERT_TO=prod-a@example.test
+ALERT_OPS_TO=ops@example.test
+RECOVER_NOTIFY_MIN_SEC=0
+FILL_WINDOW_H=6
+FILL_CRIT_H=24
+EOF
+: > "$MAILBOX"; run_iso "$ST12" "$TMP/envT12"
+out="$(cat "$LAST_OUT")"; rc="$(cat "$LAST_RC")"
+if [[ "$rc" -ne 0 && "$out" == *fills\ within* && "$out" == *FAIL*check=disk-data* ]] \
+  && grep -q 'prod-a@example.test' "$MAILBOX"; then
+  pass "T12 sustained growth still pages CRIT"
+else
+  fail "T12 sustained growth (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
