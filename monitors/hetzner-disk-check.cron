@@ -1,0 +1,15 @@
+# Hetzner host-local disk check — user-crontab entry for the Hetzner box.
+#
+# The disk check MUST run on Hetzner itself (it pages for Hetzner disks).
+# Install (once, as your normal user — no root needed):
+#   ./monitors/install-hetzner-disk-check.sh
+# which appends the line below to your crontab if missing.
+#
+# Cadence: EVERY 5 MINUTES (Europe/Berlin wall clock via TZ prefix is not
+# portable in user crontabs; the script logs UTC timestamps).
+# The cron entry points at the STABLE installed copy
+# (/usr/local/sbin/hetzner-disk-check.sh) — never at a worktree path, so the
+# pager survives worktree retirement. Re-run install-hetzner-disk-check.sh
+# after pulling script updates.
+
+# */5 * * * * /usr/local/sbin/hetzner-disk-check.sh >> /home/alexey/.local/state/hetzner-disk-check/cron.log 2>&1

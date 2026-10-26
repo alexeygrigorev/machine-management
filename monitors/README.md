@@ -96,6 +96,11 @@ once SMTP + log volume look healthy.
 | `coolify-proxy-networks.cron` | `*/5 * * * *` Europe/Berlin entry (pager; self-heal is the 2-min edge keeper) |
 | `coolify-proxy-networks.env.example` | placeholders for `/etc/coolify-proxy-networks.env` (dev@ only) |
 | `install-coolify-proxy-networks.sh` | operator-box installer (backups + cron, migrates old shipped env defaults) |
+| `hetzner-disk-check.sh` | **Hetzner host-local disk pager (t1493u)**: every real mount (`/ /boot /data`; tmpfs/overlay/squashfs excluded; sshfs storagebox report-only, never paged) with free% (WARN <15 / CRIT <8), inode free% (WARN <10 / CRIT <5) and fills-within-24h linear trend (6h samples); prod `ALERT_TO`, drills `ALERT_OPS_TO` (dev@) only, 4h dedupe, one RECOVERED |
+| `hetzner-disk-check.cron` | user-crontab `*/5 * * * *` entry pointing at the stable `/usr/local/sbin` copy |
+| `hetzner-disk-check.env.example` | placeholders for `~/.hetzner-disk-check.env` (defaults are the prod values) |
+| `install-hetzner-disk-check.sh` | Hetzner installer (stable path + user cron + live run; run on RMTHZ as your user) |
+| `install-node-exporter.sh` | Hetzner node_exporter (apt, pinned to `127.0.0.1:9100` only, never public) |
 
 ## Proxy attachment pager (2026-10-25 relay-dev/cmp-dev incident)
 
@@ -303,3 +308,18 @@ receive separate Relay messages. A rejected send does not advance dedupe state.
 `dev@dtcdev.click`, without querying VictoriaMetrics or changing monitor state.
 The Relay self-monitors (`relay-pg-dns-watchdog`, `coolify-healthcheck`, and
 `contabo-deadman`) retain their independent direct SES SMTP transport.
+
+## Hetzner host-local disk + node_exporter (t1493u)
+
+Hetzner (RMTHZ) pages for its own disks from user cron (`*/5`, stable
+`/usr/local/sbin/hetzner-disk-check.sh`, state under
+`~/.local/state/hetzner-disk-check/`). Thresholds: free WARN <15% / CRIT <8%,
+inode free WARN <10% / CRIT <5%, plus CRIT when the 6h linear trend fills the
+disk within 24h. The first real WARN on `/` (~12% free) is expected and
+correct — do not raise thresholds to hide it. Repeat at most every 4h, one
+RECOVERED (flap-guarded). Prove the mail path with
+`DISK_DRILL=1 /usr/local/sbin/hetzner-disk-check.sh` (dev@ only), then run
+normally to clear. `install-node-exporter.sh` pins node_exporter to
+`127.0.0.1:9100` for the follow-up vmalert intake; verify with
+`curl -s 127.0.0.1:9100/metrics | grep node_filesystem_avail_bytes` and confirm
+no non-loopback `:9100` listener (`ss -tln | grep :9100`).
