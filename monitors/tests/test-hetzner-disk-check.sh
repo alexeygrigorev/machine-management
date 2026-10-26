@@ -38,6 +38,8 @@ check_grep "$SCRIPT" 'DISK_DRILL' "T2j drill mode present"
 check_grep "$REPO/monitors/hetzner-disk-check.cron" '/usr/local/sbin/hetzner-disk-check.sh' "T2k cron points at stable path"
 check_grep "$REPO/monitors/install-node-exporter.sh" '127.0.0.1:9100' "T2l node_exporter loopback-only"
 check_grep "$SCRIPT" 'FILL_CONFIRM_WINDOW_H="${FILL_CONFIRM_WINDOW_H:-1}"' "T2m recent-window confirmation default"
+check_grep "$SCRIPT" 'step-robust' "T2n step-robust gate present"
+check_grep "$SCRIPT" 'DISK_NOW' "T2o DISK_NOW replay override present"
 
 # ---- stub bin ----
 TMP="$(mktemp -d)"
@@ -108,6 +110,8 @@ write_vals() { printf '%s\n' "$@" > "$TMP/vals"; }
 GB=$((1073741824))
 
 # run_iso <state-name> <envfile> : runs script, writes $LAST_OUT/$LAST_RC
+# run_iso_at <state-name> <envfile> : same, but DISK_NOW comes from the env
+# file (fixture replay); record_sample appends only when due, same as prod.
 run_iso() {
   local st="$1" envf="$2"
   mkdir -p "$st/samples"
@@ -372,6 +376,49 @@ if [[ "$rc" -ne 0 && "$out" == *fills\ within* && "$out" == *FAIL*check=disk-dat
   pass "T12 sustained growth still pages CRIT"
 else
   fail "T12 sustained growth (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
+fi
+
+echo "---- T13: RMTHZ 2026-10-26 regression replay 17:50Z-19:00Z (t91e8a710) ----"
+# Real samples from RMTHZ ~/.local/state/hetzner-disk-check/samples/data.log
+# (bulk move 17:45-17:50Z, then flat). Replay the full check at every 5-min
+# tick 17:50Z-19:00Z with DISK_NOW pinned: none may CRIT, none may mail.
+# Fixture is a verbatim copy of the production samples (timestamps + bytes).
+FIXTURE="$REPO/monitors/tests/fixtures/hetzner-disk-data-20261026.log"
+if [[ ! -f "$FIXTURE" ]]; then
+  fail "T13 fixture missing: $FIXTURE"
+else
+  t13_fail=0
+  # 17:50Z=1793037001 .. 19:00Z=1793041201 step 300s (15 ticks)
+  for tick in 1793037001 1793037301 1793037601 1793037901 1793038201 1793038501 1793038801 1793039101 1793039401 1793039701 1793040001 1793040301 1793040601 1793040901 1793041201; do
+    # avail at tick = last fixture sample <= tick, else last fixture avail (flat hold)
+    avail_at_tick="$(awk -v t="$tick" '$1<=t{a=$2} END{print a}' "$FIXTURE")"
+    if [[ -z "$avail_at_tick" ]]; then avail_at_tick="$(tail -n 1 "$FIXTURE" | awk '{print $2}')"; fi
+    size_at_tick="$(awk -v t="$tick" '$1<=t{s=$3} END{print s}' "$FIXTURE")"
+    if [[ -z "$size_at_tick" ]]; then size_at_tick="$(tail -n 1 "$FIXTURE" | awk '{print $3}')"; fi
+    ST13="$(mkstate)"; mkdir -p "$ST13/samples"
+    cp "$FIXTURE" "$ST13/samples/data.log"
+    write_vals "/data|ext4|${size_at_tick}|${avail_at_tick}|31260672|26582009|/dev/nvme1n1"
+    cat > "$TMP/envT13" <<EOF
+DISK_MOUNTS="/data"
+ALERT_TO=prod-a@example.test
+ALERT_OPS_TO=ops@example.test
+RECOVER_NOTIFY_MIN_SEC=0
+FILL_WINDOW_H=6
+FILL_CRIT_H=24
+DISK_NOW=${tick}
+EOF
+    : > "$MAILBOX"; run_iso "$ST13" "$TMP/envT13"
+    out="$(cat "$LAST_OUT")"; rc="$(cat "$LAST_RC")"
+    if [[ "$rc" -eq 0 && "$out" == *ALL_OK* && "$out" != *fills\ within* && ! -s "$MAILBOX" ]]; then
+      : # tick green
+    else
+      fail "T13 tick $tick CRIT or mail (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
+      t13_fail=1
+    fi
+  done
+  if [[ "$t13_fail" -eq 0 ]]; then
+    pass "T13 RMTHZ step-then-flat replay 17:50Z-19:00Z: zero CRITs (15/15 ticks green)"
+  fi
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

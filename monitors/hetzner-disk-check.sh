@@ -14,13 +14,20 @@
 #   2. Inode free: WARN when free <INODE_WARN_FREE_PCT (10),
 #      CRIT when free <INODE_CRIT_FREE_PCT (5).
 #   3. Fill trend: least-squares trend from stored samples (last FILL_WINDOW_H=6h)
-#      predicts fill within FILL_CRIT_H=24h AND the recent
-#      FILL_CONFIRM_WINDOW_H=1h window independently predicts the same.
-#      The confirmation window rejects one-off step changes (bulk moves,
-#      retentions, re-mounts): a step-then-flat pattern keeps the long-window
-#      slope steep for hours while the recent window is flat, so no page.
-#      Sustained growth stays negative in both windows and still pages.
+#      predicts fill within FILL_CRIT_H=24h, gated to reject one-off step
+#      changes (bulk moves, retentions, re-mounts):
+#        - no step in the window: the recent FILL_CONFIRM_WINDOW_H=1h window
+#          must independently predict fill within FILL_CRIT_H;
+#        - step in the window (single 5-min drop > max(2GiB, 0.5% size) and
+#          >50% of the window total drop): the tail AFTER the last such drop
+#          must independently predict fill within FILL_CRIT_H with at least
+#          FILL_CONFIRM_MIN_SPAN_SEC span, else no page.
+#      A step-then-flat pattern therefore never pages (tail is flat or too
+#      short), while sustained growth (no step, both windows steep) still
+#      pages, including growth that resumes after a step (tail steep).
 #      Static space/inode thresholds below are unchanged by this gate.
+#      DISK_NOW (epoch seconds) overrides the clock; used only by tests to
+#      replay fixtures at fixed ticks.
 #
 # Alerting: real findings page ALERT_TO (default
 # alexey@datatalks.club,dev@dtcdev.click). Drills route to ALERT_OPS_TO
@@ -86,7 +93,10 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || { log "WARN: another disk-check run is in progress (lock: $LOCK_FILE); skipping"; exit 0; }
 
 FAILED=0
-NOW="$(date +%s)"
+# DISK_NOW overrides the clock for deterministic fixture replay in tests.
+# Production never sets it.
+NOW="${DISK_NOW:-$(date +%s)}"
+case "$NOW" in ''|*[!0-9]*) NOW="$(date +%s)";; esac
 
 send_to() {
   # $1=to_csv $2=check-name $3=subject-suffix $4=body
@@ -238,45 +248,111 @@ record_sample() {
 }
 
 fill_hours() {
-  # $1=sanitized $2=avail_now -> prints hours-to-full or empty.
-  # Least-squares slope over the long window, CONFIRMED by an independent
-  # least-squares slope over the recent window; both must predict fill within
-  # FILL_CRIT_H. Prints the long-window estimate. Empty when unknown, rising,
-  # or unconfirmed (one-off step change followed by flat usage).
-  local s="$1" avail_now="$2"
+  # $1=sanitized $2=avail_now [$3=size_now] -> prints hours-to-full or empty.
+  # Long-window LSQ must predict fill within FILL_CRIT_H, AND:
+  #   - no step discontinuity: recent-window LSQ must also predict fill;
+  #   - step discontinuity: tail AFTER the last outlier drop must predict
+  #     fill with span >= FILL_CONFIRM_MIN_SPAN_SEC.
+  # A drop is an outlier step when it exceeds max(2GiB, 0.5% size,
+  # 5x median interval drop) and dominates the window total (>50%). This
+  # keeps sustained growth (many similar drops) from looking like a step,
+  # while a one-off bulk move (one huge drop, flat tail) never confirms.
+  # Prints the long-window estimate. Empty when unknown, rising, or rejected
+  # as a one-off step change followed by flat usage.
+  local s="$1" avail_now="$2" size_now="${3:-0}"
   local f="${SAMPLE_DIR}/${s}.log"
   [[ -f "$f" ]] || return 0
+  [[ "$size_now" =~ ^[0-9]+$ ]] || size_now=0
   local window_sec=$(( FILL_WINDOW_H * 3600 ))
   local cwindow_sec=$(( FILL_CONFIRM_WINDOW_H * 3600 ))
   awk -v now="$NOW" -v win="$window_sec" -v cwin="$cwindow_sec" \
       -v minspan="$FILL_MIN_SPAN_SEC" -v cminspan="$FILL_CONFIRM_MIN_SPAN_SEC" \
-      -v avail_now="$avail_now" -v crit_h="$FILL_CRIT_H" '
-    $1 <= now && $2 ~ /^[0-9]+$/ {
-      dt = $1 - now   # <= 0; small magnitude, safe for LS sums
-      if ($1 >= (now - win)) {
-        n++; st += dt; sa += $2; stt += dt*dt; sta += dt*$2
-        if (n == 1 || $1 < t0) t0 = $1
-        if (n == 1 || $1 > t1) t1 = $1
-      }
+      -v avail_now="$avail_now" -v size_now="$size_now" -v crit_h="$FILL_CRIT_H" '
+    $1 <= now && $2 ~ /^[0-9]+$/ && $1 >= (now - win) {
+      # window samples (1-indexed); keep time order via later sort
+      n++; wt[n] = $1; wa[n] = $2
       if ($1 >= (now - cwin)) {
-        m++; ct += dt; ca += $2; ctt += dt*dt; cta += dt*$2
+        m++; cdt = $1 - now; ct_sum += cdt; ca_sum += $2
+        ctt_sum += cdt*cdt; cta_sum += cdt*$2
         if (m == 1 || $1 < ct0) ct0 = $1
         if (m == 1 || $1 > ct1) ct1 = $1
       }
     }
     END {
-      if (n < 2 || m < 2) exit 0
+      if (n < 2) exit 0
+      # insertion sort window by time (n<=200)
+      for (i = 2; i <= n; i++) {
+        kt = wt[i]; ka = wa[i]; j = i - 1
+        while (j >= 1 && wt[j] > kt) { wt[j+1] = wt[j]; wa[j+1] = wa[j]; j-- }
+        wt[j+1] = kt; wa[j+1] = ka
+      }
+      t0 = wt[1]; t1 = wt[n]
       if ((t1 - t0) < minspan) exit 0
-      if ((ct1 - ct0) < cminspan) exit 0
+      st = 0; sa = 0; stt = 0; sta = 0
+      for (i = 1; i <= n; i++) {
+        dt = wt[i] - now
+        st += dt; sa += wa[i]; stt += dt*dt; sta += dt*wa[i]
+      }
       denom = n*stt - st*st
-      cdenom = m*ctt - ct*ct
-      if (denom == 0 || cdenom == 0) exit 0
+      if (denom == 0) exit 0
       rate = (n*sta - st*sa) / denom          # bytes/sec; negative = filling
-      crate = (m*cta - ct*ca) / cdenom        # recent-window slope
-      if (rate >= 0 || crate >= 0) exit 0
+      if (rate >= 0) exit 0
       hours = (avail_now / (-rate)) / 3600
-      chours = (avail_now / (-crate)) / 3600
-      if (hours <= crit_h + 0.0001 && chours <= crit_h + 0.0001) printf "%.1f", hours
+      if (hours > crit_h + 0.0001) exit 0
+      # ---- step discontinuity detection (outlier drop) ----
+      step_floor = 2147483648                # 2 GiB floor
+      if (size_now + 0 > 0) {
+        rel = size_now * 0.005               # 0.5% of filesystem size
+        if (rel > step_floor) step_floor = rel
+      }
+      nd = n - 1
+      for (i = 1; i <= nd; i++) drops[i] = wa[i] - wa[i+1]
+      # sort a copy for the median
+      for (i = 1; i <= nd; i++) sd[i] = drops[i]
+      for (i = 2; i <= nd; i++) {
+        kd = sd[i]; j = i - 1
+        while (j >= 1 && sd[j] > kd) { sd[j+1] = sd[j]; j-- }
+        sd[j+1] = kd
+      }
+      if (nd % 2 == 1) med = sd[int((nd+1)/2)]
+      else med = (sd[nd/2] + sd[nd/2+1]) / 2
+      thr = step_floor
+      if (med > 0 && 5*med > thr) thr = 5*med
+      total = wa[1] - wa[n]                  # >0 means net filling
+      maxdrop = drops[1]
+      for (i = 2; i <= nd; i++) if (drops[i] > maxdrop) maxdrop = drops[i]
+      last_large = 0
+      for (i = 2; i <= n; i++) {
+        if ((wa[i-1] - wa[i]) > thr) last_large = i
+      }
+      is_step = (last_large > 0 && total > 0 && maxdrop > thr && maxdrop > 0.5 * total)
+      if (!is_step) {
+        # no step: require recent-window confirmation (existing gate)
+        if (m < 2) exit 0
+        if ((ct1 - ct0) < cminspan) exit 0
+        cdenom = m*ctt_sum - ct_sum*ct_sum
+        if (cdenom == 0) exit 0
+        crate = (m*cta_sum - ct_sum*ca_sum) / cdenom
+        if (crate >= 0) exit 0
+        chours = (avail_now / (-crate)) / 3600
+        if (chours <= crit_h + 0.0001) printf "%.1f", hours
+        exit 0
+      }
+      # step: require tail AFTER the last outlier drop to confirm growth
+      tn = n - last_large + 1
+      if (tn < 2) exit 0
+      if ((wt[n] - wt[last_large]) < cminspan) exit 0
+      tst = 0; tsa = 0; tstt = 0; tsta = 0
+      for (i = last_large; i <= n; i++) {
+        dt = wt[i] - now
+        tst += dt; tsa += wa[i]; tstt += dt*dt; tsta += dt*wa[i]
+      }
+      tdenom = tn*tstt - tst*tst
+      if (tdenom == 0) exit 0
+      trate = (tn*tsta - tst*tsa) / tdenom
+      if (trate >= 0) exit 0
+      thours = (avail_now / (-trate)) / 3600
+      if (thours <= crit_h + 0.0001) printf "%.1f", hours
     }' "$f"
 }
 
@@ -336,9 +412,9 @@ check_mount() {
     reason="${reason:+$reason; }inode free ${inode_free_pct}% < warn ${INODE_WARN_FREE_PCT}%"
   fi
   local fill_h
-  fill_h="$(fill_hours "$(sanitize_mount "$mp")" "$avail" || true)"
+  fill_h="$(fill_hours "$(sanitize_mount "$mp")" "$avail" "$size" || true)"
   if [[ -n "$fill_h" ]]; then
-    level="CRIT"; reason="${reason:+$reason; }fills within ${fill_h}h at ${FILL_WINDOW_H}h trend confirmed by ${FILL_CONFIRM_WINDOW_H}h window (threshold ${FILL_CRIT_H}h)"
+    level="CRIT"; reason="${reason:+$reason; }fills within ${fill_h}h at ${FILL_WINDOW_H}h trend step-robust (threshold ${FILL_CRIT_H}h)"
   fi
 
   local avail_gb size_gb
