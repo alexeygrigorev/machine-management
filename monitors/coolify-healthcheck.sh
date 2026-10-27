@@ -123,6 +123,10 @@ HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
 HTTP_CONNECT_TIMEOUT="${HTTP_CONNECT_TIMEOUT:-10}"
 HTTP_RETRIES="${HTTP_RETRIES:-2}"
 HTTP_RETRY_SLEEP_SEC="${HTTP_RETRY_SLEEP_SEC:-1}"
+# curl 35 (SSL connect error / Recv failure: Connection reset by peer) and 56
+# (recv failure) are retried exactly ONCE after a short sleep before FAIL.
+# A second 35/56 still FAILs and alerts as usual.
+HTTP_RESET_RETRY_SLEEP_SEC="${HTTP_RESET_RETRY_SLEEP_SEC:-5}"
 
 # Space-separated name=url::marker triples for CONTENT-marker checks.
 # The URL must return 2xx/3xx AND its body must contain the marker.
@@ -372,7 +376,7 @@ curl_http_code() {
   # $1=url  $2=extra curl args for body sink, e.g. empty or "-o /tmp/x"
   # Uses global HTTP_* knobs. Echoes code to stdout; returns curl rc.
   local url="$1"; shift
-  local attempt=1 max=$((HTTP_RETRIES + 1)) code rc err
+  local attempt=1 max=$((HTTP_RETRIES + 1)) code rc err reset_retried=0
   while true; do
     err="$(mktemp)"
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout "$HTTP_CONNECT_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$@" "$url" 2>"$err")" && rc=0 || rc=$?
@@ -387,6 +391,15 @@ curl_http_code() {
       rm -f "$err"
       sleep "$HTTP_RETRY_SLEEP_SEC"
       attempt=$((attempt + 1))
+      continue
+    fi
+    # Transient: TLS/recv reset (35/56). Retry exactly once.
+    if [[ ( "$rc" -eq 35 || "$rc" -eq 56 ) && "$reset_retried" -eq 0 ]]; then
+      log "WARN check=http-retry: url=${url} rc=${rc} detail=$(tr -d 
+ <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s" >&2
+      rm -f "$err"
+      reset_retried=1
+      sleep "$HTTP_RESET_RETRY_SLEEP_SEC"
       continue
     fi
     # Final failure: surface curl stderr + code (often 000)
@@ -423,7 +436,7 @@ check_content() {
   local name="content-${1}" url="$2" marker="$3" code rc body_file
   body_file="$(mktemp)" || { log "FAIL check=${name}: mktemp failed"; FAILED=1; return; }
   # Same transient DNS retry as check_http (t1228u).
-  local attempt=1 max=$((HTTP_RETRIES + 1)) err
+  local attempt=1 max=$((HTTP_RETRIES + 1)) err reset_retried=0
   while true; do
     err="$(mktemp)"
     code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout "$HTTP_CONNECT_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$url" 2>"$err")" && rc=0 || rc=$?
@@ -437,6 +450,14 @@ check_content() {
       rm -f "$err"
       sleep "$HTTP_RETRY_SLEEP_SEC"
       attempt=$((attempt + 1))
+      continue
+    fi
+    if [[ ( "$rc" -eq 35 || "$rc" -eq 56 ) && "$reset_retried" -eq 0 ]]; then
+      log "WARN check=content-retry: url=${url} rc=${rc} detail=$(tr -d 
+ <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s"
+      rm -f "$err"
+      reset_retried=1
+      sleep "$HTTP_RESET_RETRY_SLEEP_SEC"
       continue
     fi
     detail="$(tr -d '
