@@ -335,6 +335,7 @@ case "${1:-}" in
         exit 0
       fi
       if [[ "$sql" == *"GROUP BY queue_name"* ]]; then
+        [[ "$MODE" == backlog_fail ]] && { echo "ERROR: column \"enqueued_at\" does not exist" >&2; exit 1; }
         if [[ "$MODE" == queue_stuck* || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
           echo "provider-events|4|360"
         fi
@@ -841,6 +842,36 @@ if [[ "$out" == *"ALERT check=warn-dep-$PE"*"via=no"* && "$out" == *"WARN check=
 else
   fail "B1-o undelivered WARN -- $out -- $(ls "$sdir/var")"
 fi
+# B1-p: next run, mail works and the error has left the logs: the pending
+# notice is still delivered (low priority) and then marked sent.
+rm -f "$sdir/logs-$PE"
+set +e
+out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out" == *"ALERT check=warn-dep-$PE"*"priority=low via=msmtp"* && -f "$sdir/var/warn-dep-$PE.key" \
+  && ! -f "$sdir/var/warn-dep-$PE.pending" ]] && grep -q 'deadlock_detected' "$sdir/mail/sent.log"; then
+  pass "B1-p pending WARN delivered on a later run after the error left the log window"
+else
+  fail "B1-p pending WARN retry -- $out -- $(ls "$sdir/var")"
+fi
+
+# B1-q: the start of a no-success stretch is remembered across runs, so a
+# deadlock that scrolled out of the --tail window still counts for grace.
+run_b since_seed "" PROGRESS_SQL_CHECKS=0
+echo "$(( $(date +%s) - 900 ))" > "$B_DIR/var/pending-dep-$PE.since"
+echo "$(ts_ago 30) django.db.utils.OperationalError: deadlock detected" > "$B_DIR/logs-$PE"
+set +e
+out="$(STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$B_DIR/var" \
+  LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com PROGRESS_SQL_CHECKS=0 \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ -f "$B_DIR/restarted-$PE" && "$out" == *"handled_db_error_no_progress:"*"age=9"* ]]; then
+  pass "B1-q persisted no-success stretch start drives the grace (restart after 900s)"
+else
+  fail "B1-q persisted since -- $out"
+fi
 
 # B2-k: queue-stuck and heartbeat AUTOHEALED mails carry pre/post lines.
 for mode in queue_stuck hb_stale; do
@@ -872,6 +903,24 @@ if [[ "$out" == *"FAIL check=progress-task-queues"*"worker=none"* && ! -f "$sdir
   pass "B1-m stuck relay queue does not restart the relay_dev worker; still alerts"
 else
   fail "B1-m queue worker db match -- $out"
+fi
+
+# B1-r: backlog query fails -> no SQL coverage: a handled deadlock past grace
+# is restarted (not deferred to a blind check), and the queue check is not
+# marked OK.
+B_LOG="$TMP/deadlock-only.log"
+B_DIR="$TMP/state-b-backlog-fail"; mkdir -p "$B_DIR/var"; echo backlog_fail > "$B_DIR/mode"; cp "$B_LOG" "$B_DIR/logs-$PE"
+set +e
+out="$(STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$B_DIR/var" \
+  LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ -f "$B_DIR/restarted-$PE" && "$out" == *"handled_db_error_no_progress:"* \
+  && "$out" == *"WARN check=progress-task-queues pg=pg-relay: ready-backlog query failed"* \
+  && "$out" != *"OK check=progress-task-queues"* ]]; then
+  pass "B1-r failing backlog query: no deferral to a blind SQL check, queue check not marked OK"
+else
+  fail "B1-r backlog query failure -- $out"
 fi
 
 # B1-l: real-failure classes unchanged (stale peer, older than PG, DNS miss,

@@ -139,10 +139,10 @@ prune_stale_state_files() {
       rm -f "$f" "${STATE_DIR}/restart-${cname}.stamp"
     fi
   done
-  for f in "$STATE_DIR"/warn-dep-*.state "$STATE_DIR"/warn-dep-*.key; do
+  for f in "$STATE_DIR"/warn-dep-*.state "$STATE_DIR"/warn-dep-*.key "$STATE_DIR"/warn-dep-*.pending "$STATE_DIR"/pending-dep-*.since; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"; base="${base%.*}"
-    cname="${base#warn-dep-}"
+    cname="${base#warn-dep-}"; cname="${cname#pending-dep-}"
     if ! docker inspect "$cname" >/dev/null 2>&1; then
       log "PRUNE check=${base}: container '${cname}' no longer exists — removed stale state"
       rm -f "$f"
@@ -741,6 +741,13 @@ parse_db_name() {
 # (empty when that SQL check is disabled or the table does not exist).
 LABEL_PG=""
 QUEUE_SQL_DB=""
+# The ready-backlog query of progress-task-queues; also run by watch_pg to
+# decide whether that check really covers a database.
+QUEUE_BACKLOG_SQL="
+      SELECT queue_name || '|' || COUNT(*) || '|' || COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
+      FROM django_tasks_database_dbtaskresult
+      WHERE status = 'READY' AND run_after <= NOW()
+      GROUP BY queue_name;"
 
 worker_queue_sql_covered() {
   # $1=dep $2=target pg container $3=dep database. 0 when the SQL ready-backlog
@@ -793,9 +800,9 @@ probe_worker_progress() {
   # --timestamps: classify_db_errors needs the time of each DB error and of
   # the last successful unit of work (ordering + handled-error grace).
   if [[ -n "$dep_iso" && "$dep_iso" != "0001-01-01"* ]]; then
-    logs="$(docker logs --timestamps --since "$dep_iso" --tail 200 "$c" 2>&1 || true)"
+    logs="$(docker logs --timestamps --since "$dep_iso" --tail 500 "$c" 2>&1 || true)"
   else
-    logs="$(docker logs --timestamps --tail 200 "$c" 2>&1 || true)"
+    logs="$(docker logs --timestamps --tail 500 "$c" 2>&1 || true)"
   fi
 
   local tail_after_start="$logs"
@@ -821,8 +828,20 @@ probe_worker_progress() {
       db_note="db_error_recovered=${err_cls}:${err_text}@${err_ts:-unknown},later_success=${ok_ts:-unknown}"
       ;;
     handled_pending)
-      local err_epoch=0 err_age=-1
+      local err_epoch=0 err_age=-1 since_file stored=0 ok_epoch=0
       [[ -n "$first_ts" ]] && err_epoch="$(date -d "$first_ts" +%s 2>/dev/null || echo 0)"
+      [[ -n "$ok_ts" && "$ok_ts" != none ]] && ok_epoch="$(date -d "$ok_ts" +%s 2>/dev/null || echo 0)"
+      # Remember when this no-success stretch began: older errors can leave
+      # the --tail window while new ones keep arriving. Ignored when it
+      # predates the current container start (new lifecycle).
+      since_file="${STATE_DIR}/pending-dep-$(safe_name "$c").since"
+      [[ -f "$since_file" ]] && stored="$(tr -cd '0-9' < "$since_file")"
+      stored="${stored:-0}"
+      if (( stored > 0 && stored >= dep_epoch && stored >= ok_epoch )) && (( err_epoch == 0 || stored < err_epoch )); then
+        err_epoch="$stored"
+      elif (( err_epoch > 0 )); then
+        printf '%s\n' "$err_epoch" > "$since_file"
+      fi
       (( err_epoch > 0 )) && err_age=$(( $(date +%s) - err_epoch ))
       if worker_queue_sql_covered "$c" "$target_pg" "$dep_db"; then
         # No task since the handled error: the SQL ready-backlog check
@@ -839,6 +858,7 @@ probe_worker_progress() {
       fi
       ;;
   esac
+  [[ "${verdict:-clean}" == handled_pending ]] || rm -f "${STATE_DIR}/pending-dep-$(safe_name "$c").since"
   [[ -n "$db_note" ]] && peer_out="${peer_out},${db_note}"
 
   if [[ "$c" == ses-ingress* ]]; then
@@ -935,14 +955,10 @@ Post-restart result: not restarted (cooldown, DRY_RUN or no scheduler container)
   local has_tasks
   has_tasks="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   if [[ "$has_tasks" == "t" ]]; then
-    local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0 q_young=0
-    q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
-      SELECT queue_name || '|' || COUNT(*) || '|' || COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(enqueued_at, run_after))))::int, 0)
-      FROM django_tasks_database_dbtaskresult
-      WHERE status = 'READY' AND run_after <= NOW()
-      GROUP BY queue_name;
-    " 2>/dev/null)" || {
+    local q_rows last_pe_ok q_check="progress-task-queues" q_failed=0 q_young=0 q_unknown=0
+    q_rows="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "$QUEUE_BACKLOG_SQL" 2>/dev/null)" || {
       q_rows=""
+      q_unknown=1
       log "WARN check=${q_check} pg=${label}: ready-backlog query failed; queue progress unknown this run"
     }
     last_pe_ok="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
@@ -1019,7 +1035,7 @@ Post-restart result: not restarted (cooldown, DRY_RUN or no worker container)"
         fi
       fi
     done <<< "$q_rows"
-    if (( q_failed == 0 && q_young == 0 )); then
+    if (( q_failed == 0 && q_young == 0 && q_unknown == 0 )); then
       log "OK check=${q_check} pg=${label} stuck_ready=0 max_age=${TASK_QUEUE_MAX_READY_AGE_SEC}s last_provider_event_ok=${last_pe_ok:-none}"
       mark_ok "$q_check"
     fi
@@ -1074,24 +1090,56 @@ warn_handled_db_error() {
   # serialization failure) or a DB error followed by later successful work:
   # no restart (AC-B1), but log a WARN line and send a low-priority notice
   # once per distinct error (keyed by the error's log timestamp + text).
-  local c="$1" prog="$2" note key warn_check key_file last_key=""
+  # The notice is written to a .pending file first, so an undelivered or
+  # rate-limited one is retried by flush_pending_warns even after the error
+  # has left the log window.
+  local c="$1" prog="$2" note key warn_check pending last_key="" prev_note=""
   note="$(printf '%s' "$prog" | grep -oE '(handled_db_error|db_error_recovered)=[^)]*' | head -n 1)"
   [[ -n "$note" ]] || return 0
   log "WARN check=dep-$(safe_name "$c") dep=${c}: DB error seen but worker not restarted (${note})"
   warn_check="warn-dep-$(safe_name "$c")"
   key="$(printf '%s' "$note" | sed -E 's/,(later_success|deferred_to|grace)=.*$//')"
-  key_file="${STATE_DIR}/${warn_check}.key"
-  [[ -f "$key_file" ]] && last_key="$(cat "$key_file" 2>/dev/null)"
+  pending="${STATE_DIR}/${warn_check}.pending"
+  [[ -f "${STATE_DIR}/${warn_check}.key" ]] && last_key="$(cat "${STATE_DIR}/${warn_check}.key" 2>/dev/null)"
   [[ "$key" == "$last_key" ]] && return 0
+  if [[ -f "$pending" ]]; then
+    # An unsent older notice is folded into the new one, not dropped.
+    [[ "$(sed -n 1p "$pending")" == "$key" ]] || prev_note="$(sed -n 3p "$pending")"
+  fi
+  printf '%s\n%s\n%s\n%s\n%s\n' "$key" "$c" "$note" "$prog" "$prev_note" > "$pending"
+  send_pending_warn "$pending"
+}
+
+declare -A WARN_TRIED=()
+send_pending_warn() {
+  # $1=pending file (lines: key, container, note, progress, earlier unsent note)
+  # At most one delivery attempt per pending file per run.
+  local pending="$1" key c note prog prev warn_check extra=""
+  [[ -n "${WARN_TRIED[$pending]:-}" ]] && return 0
+  WARN_TRIED[$pending]=1
+  { IFS= read -r key; IFS= read -r c; IFS= read -r note; IFS= read -r prog; IFS= read -r prev; } < "$pending"
+  [[ -n "${key:-}" && -n "${c:-}" ]] || { rm -f "$pending"; return 0; }
+  warn_check="warn-dep-$(safe_name "$c")"
+  [[ -n "${prev:-}" ]] && extra=$'\n'"Earlier unsent notice: ${prev}"
   if send_alert "$warn_check" "WARN handled DB error" \
     "${c} on $(hostname) logged a database error that the watchdog does NOT treat as a stale connection, so the container was not restarted (low priority; no action needed unless this repeats).
 
 Observed: ${note}
-Progress check: ${prog}
+Progress check: ${prog}${extra}
 
 Handled per-task errors (deadlock, serialization failure) abort one task; the worker keeps processing. If no later task succeeds, the SQL ready-backlog check (progress-task-queues) or the ${HANDLED_DB_ERROR_GRACE_SEC}s no-progress grace still restarts the worker." "low"; then
-    printf '%s\n' "$key" > "$key_file"
+    printf '%s\n' "$key" > "${STATE_DIR}/${warn_check}.key"
+    rm -f "$pending"
   fi
+}
+
+flush_pending_warns() {
+  # Retry low-priority notices that earlier runs could not send.
+  local f
+  for f in "$STATE_DIR"/warn-dep-*.pending; do
+    [[ -f "$f" ]] || continue
+    send_pending_warn "$f"
+  done
 }
 
 watch_pg() {
@@ -1124,7 +1172,7 @@ watch_pg() {
     # query would make progress-task-queues blind, so handled errors must
     # then fall back to the grace/no-progress restart.
     if [[ "$(docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')" == "t" ]] \
-      && docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT COUNT(*) FROM django_tasks_database_dbtaskresult WHERE status = 'READY' AND run_after <= NOW();" >/dev/null 2>&1; then
+      && docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "$QUEUE_BACKLOG_SQL" >/dev/null 2>&1; then
       QUEUE_SQL_DB="$label_db"
     fi
   fi
@@ -1263,6 +1311,7 @@ for label in $PG_LABELS; do
   watch_pg "$label"
 done
 
+flush_pending_warns
 prune_stale_state_files
 
 if [[ "$FAILED" -ne 0 ]]; then
