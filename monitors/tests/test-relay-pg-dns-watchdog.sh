@@ -842,6 +842,20 @@ if [[ "$out" == *"ALERT check=warn-dep-$PE"*"via=no"* && "$out" == *"WARN check=
 else
   fail "B1-o undelivered WARN -- $out -- $(ls "$sdir/var")"
 fi
+# B1-o2: a second, different undelivered error keeps the first one.
+printf '%s\n' "2026-10-27T10:44:00.000000000Z django.db.utils.OperationalError: could not serialize access due to concurrent update" \
+  "2026-10-27T10:44:05.000000000Z Task id=55555555-5555-4555-8555-555555555555 path=x state=SUCCESSFUL" >> "$sdir/logs-$PE"
+set +e
+STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/nomta-bin:/usr/bin:/bin" bash "$SCRIPT" >/dev/null 2>&1
+set -e
+if grep -q 'could_not_serialize' "$sdir/var/warn-dep-$PE.pending" && grep -q 'deadlock_detected' "$sdir/var/warn-dep-$PE.pending"; then
+  pass "B1-o2 newer undelivered notice folds in the older one"
+else
+  fail "B1-o2 pending accumulation -- $(cat "$sdir/var/warn-dep-$PE.pending" 2>/dev/null)"
+fi
+
 # B1-p: next run, mail works and the error has left the logs: the pending
 # notice is still delivered (low priority) and then marked sent.
 rm -f "$sdir/logs-$PE"
@@ -851,7 +865,8 @@ out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
 set -e
 if [[ "$out" == *"ALERT check=warn-dep-$PE"*"priority=low via=msmtp"* && -f "$sdir/var/warn-dep-$PE.key" \
-  && ! -f "$sdir/var/warn-dep-$PE.pending" ]] && grep -q 'deadlock_detected' "$sdir/mail/sent.log"; then
+  && ! -f "$sdir/var/warn-dep-$PE.pending" ]] && grep -q 'deadlock_detected' "$sdir/mail/sent.log" \
+  && grep -q 'could_not_serialize' "$sdir/mail/sent.log"; then
   pass "B1-p pending WARN delivered on a later run after the error left the log window"
 else
   fail "B1-p pending WARN retry -- $out -- $(ls "$sdir/var")"

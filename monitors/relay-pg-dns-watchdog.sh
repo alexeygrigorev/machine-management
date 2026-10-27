@@ -1103,8 +1103,14 @@ warn_handled_db_error() {
   [[ -f "${STATE_DIR}/${warn_check}.key" ]] && last_key="$(cat "${STATE_DIR}/${warn_check}.key" 2>/dev/null)"
   [[ "$key" == "$last_key" ]] && return 0
   if [[ -f "$pending" ]]; then
-    # An unsent older notice is folded into the new one, not dropped.
-    [[ "$(sed -n 1p "$pending")" == "$key" ]] || prev_note="$(sed -n 3p "$pending")"
+    # Unsent older notices are folded into the new one, never dropped.
+    local old_key old_note old_prev
+    { IFS= read -r old_key; IFS= read -r _; IFS= read -r old_note; IFS= read -r _; IFS= read -r old_prev; } < "$pending"
+    prev_note="${old_prev:-}"
+    if [[ "${old_key:-}" != "$key" && -n "${old_note:-}" ]]; then
+      prev_note="${prev_note:+${prev_note}; }${old_note}"
+    fi
+    prev_note="$(printf '%s' "$prev_note" | tail -c 1500)"
   fi
   printf '%s\n%s\n%s\n%s\n%s\n' "$key" "$c" "$note" "$prog" "$prev_note" > "$pending"
   send_pending_warn "$pending"
