@@ -102,9 +102,9 @@ TEARDOWN=1 bash ~/git/machine-management/contingency/weekly-fast-pg-raise.sh
   running` and exited 0 without doing anything.
 - **Contended run** (a second instance while one holds the lock): logs
   `SKIP: another weekly raise is running (lock contended on ...)` and exits
-  **75** (`EX_TEMPFAIL`). It never pushes metrics and never touches
-  `last_success.env`, so a no-op is distinguishable from `done
-  result=pass` (exit 0).
+  **75** (`EX_TEMPFAIL`). It exits before the raise/push stages, so it never
+  pushes metrics and `last_success.env` is untouched — a no-op is
+  distinguishable from `done result=pass` (exit 0).
 
 ## Seed from t1118u (2026-10-22)
 

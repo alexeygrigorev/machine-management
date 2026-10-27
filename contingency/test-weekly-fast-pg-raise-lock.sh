@@ -24,6 +24,7 @@ ok()   { pass=$((pass+1)); printf 'ok %s\n' "$*"; }
 bad()  { fail=$((fail+1)); printf 'FAIL %s\n' "$*"; }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/weekly-raise-lock-test.XXXXXX")"
+HOLDER_PID=""
 cleanup() { kill "$HOLDER_PID" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
@@ -79,7 +80,7 @@ EOF
 chmod +x "$RAISE_STUB" "$PUSH_STUB"
 
 # --- extract installed cron command line ---
-CRON_LINE="$(grep -v '^[#[:space:]]*$' "$CRON_FILE" | grep -v '^SHELL=' | grep -v '^PATH=' | grep -v '^CRON_TZ=' | tail -n 1)"
+CRON_LINE="$(grep -v -e '^#' -e '^[[:space:]]*$' "$CRON_FILE" | grep -v '^SHELL=' | grep -v '^PATH=' | grep -v '^CRON_TZ=' | tail -n 1)"
 CMD="$(echo "$CRON_LINE" | awk '{for(i=7;i<=NF;i++) printf "%s ", $i; print ""}')"
 LOGFILE="$(echo "$CMD" | sed -n 's/.*>> *\([^ ]*\).*/\1/p')"
 RUN="$(echo "$CMD" | sed 's/ *>>.*//; s/ *2>&1.*//')"
