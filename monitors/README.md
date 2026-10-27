@@ -206,13 +206,14 @@ watchdog now verifies all three layers before logging `ALL_OK`:
      successful unit of work (`state=SUCCESSFUL`, or an ingress batch with
      `deleted>=1`):
      - connection-class (`InterfaceError`, connection refused/closed, could
-       not translate host name, server closed the connection, ...) or
-       unrecognised `OperationalError` **after** the last success -> restart;
+       not translate host name, server closed the connection, ...) **after**
+       the last success -> restart;
      - handled per-task errors (`DeadlockDetected` / `SerializationFailure`)
-       after the last success -> no restart; deferred to
-       `progress-task-queues` when that SQL check covers the worker's queue
-       and database, else restart only after `HANDLED_DB_ERROR_GRACE_SEC`
-       (default `300`s) without progress;
+       or an unrecognised `OperationalError` after the last success -> no
+       immediate restart; deferred to `progress-task-queues` when that SQL
+       check covers the worker's queue and database (and its query runs),
+       else restart once `HANDLED_DB_ERROR_GRACE_SEC` (default `300`s) pass
+       since the first such error without progress;
      - any DB error followed by a later success -> no restart.
      Each non-restart case logs `WARN check=dep-...` and sends one
      low-priority mail (`WARN handled DB error`, `X-Priority: 5`,

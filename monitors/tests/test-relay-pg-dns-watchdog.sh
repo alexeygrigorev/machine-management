@@ -785,24 +785,61 @@ else
   fail "B1-h retry lines (rc=$B_RC) -- $B_OUT"
 fi
 { echo "2026-10-27T10:50:00.000000000Z Task id=22222222-2222-4222-8222-222222222222 path=mailing.tasks.process_ses_webhook_event state=FAILED"
-  echo "2026-10-27T10:50:00.000000000Z $CONN_ERR"
+  echo "2026-10-27T10:50:00.000000000Z psycopg2.OperationalError: connection to server at \"mqimefrti7ratmaliirnikov\" (10.0.1.2), port 5432 failed: Connection refused"
   echo "2026-10-27T10:50:05.000000000Z Task id=33333333-3333-4333-8333-333333333333 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL"; } > "$TMP/conn-then-ok.log"
 run_b conn_then_success "$TMP/conn-then-ok.log"
-if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"db_error_recovered=conn:"* \
+if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"db_error_recovered=conn:"*"@2026-10-27T10:50:00.000000000Z,later_success=2026-10-27T10:50:05"* \
   && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
   pass "B1-i connection error followed by later SUCCESSFUL task: no restart, WARN + low-priority mail"
 else
   fail "B1-i conn then success (rc=$B_RC) -- $B_OUT"
 fi
 
-# B1-j: an unrecognised OperationalError after the last success keeps the
-# conservative restart (only deadlock/serialization are downgraded).
+# B1-j: an unrecognised (non-connection) OperationalError after the last
+# success goes through the no-progress logic: deferred to the SQL queue check
+# when covered (no restart, WARN); restarted past grace when not covered.
 { cat "$FIXTURE"; echo "2026-10-27T10:43:25.000000000Z django.db.utils.OperationalError: could not open file \"base/16384/2619\": Permission denied"; } > "$TMP/other.log"
 run_b other_after_success "$TMP/other.log"
-if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"worker_db_error_since_start:"* ]]; then
-  pass "B1-j unrecognised OperationalError after last success still restarts"
+if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"handled_db_error=other:"*"deferred_to=progress-task-queues"* \
+  && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
+  pass "B1-j unrecognised OperationalError on a queue-checked worker: deferred to SQL queue check, WARN"
 else
-  fail "B1-j other error (rc=$B_RC) -- $B_OUT"
+  fail "B1-j other error covered (rc=$B_RC) -- $B_OUT"
+fi
+run_b other_uncovered "$TMP/other.log" PROGRESS_SQL_CHECKS=0
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"handled_db_error_no_progress:"* ]]; then
+  pass "B1-j2 unrecognised OperationalError, no queue check, past grace: no-progress restart"
+else
+  fail "B1-j2 other error uncovered (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-n: repeated deadlocks with no success between: grace counts from the
+# FIRST one, so a fresh deadlock every minute cannot postpone the restart.
+{ echo "$(ts_ago 900) Task id=44444444-4444-4444-8444-444444444444 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL"
+  echo "$(ts_ago 600) django.db.utils.OperationalError: deadlock detected"
+  echo "$(ts_ago 30) django.db.utils.OperationalError: deadlock detected"; } > "$TMP/deadlock-repeat.log"
+run_b deadlock_repeat "$TMP/deadlock-repeat.log" PROGRESS_SQL_CHECKS=0
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"handled_db_error_no_progress:"*"age=6"* ]]; then
+  pass "B1-n repeated deadlocks: grace measured from the first one after the last success"
+else
+  fail "B1-n repeated deadlocks (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-o: a WARN notice that could not be delivered stays pending (no key
+# stored), so it is retried once mail works again.
+sdir="$TMP/state-b-nomta"; mkdir -p "$sdir/var" "$TMP/nomta-bin"; echo healthy > "$sdir/mode"
+cp "$FIXTURE" "$sdir/logs-$PE"; cp "$TMP/stubbin/docker" "$TMP/nomta-bin/docker"
+# Failing MTA stub (never fall through to a real MTA on the test host).
+printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 75\n' > "$TMP/nomta-bin/msmtp"; chmod +x "$TMP/nomta-bin/msmtp"
+set +e
+out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/nomta-bin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out" == *"ALERT check=warn-dep-$PE"*"via=no"* && "$out" == *"WARN check=dep-$PE"* && ! -f "$sdir/var/warn-dep-$PE.key" ]]; then
+  pass "B1-o undelivered WARN notice is not marked sent (retried later)"
+else
+  fail "B1-o undelivered WARN -- $out -- $(ls "$sdir/var")"
 fi
 
 # B2-k: queue-stuck and heartbeat AUTOHEALED mails carry pre/post lines.

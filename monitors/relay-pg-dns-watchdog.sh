@@ -163,7 +163,8 @@ send_alert() {
   # $1=check-name $2=subject-suffix $3=body  (same dedupe as coolify-healthcheck)
   # $4=priority: "normal" (default) or "low" (adds X-Priority: 5 / Importance:
   # low headers; used for WARN notices that need no action).
-  # Returns 1 only when a WARN notice was rate-limited (caller retries later).
+  # Returns 1 only when a WARN notice was rate-limited or not delivered
+  # (caller keeps it pending and retries on a later run).
   local name="$1" subject="$2" body="$3" priority="${4:-normal}"
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status="" fail_since=0 last_autohealed=0 autoheal_count=0
@@ -273,6 +274,8 @@ send_alert() {
   log "ALERT check=${name} subject='${full_subject}' priority=${priority} via=${sent} to=${ALERT_TO}"
 
   if [[ "$subject" == WARN* ]]; then
+    # Not delivered: keep the notice pending so a later run retries it.
+    [[ "$sent" == "no" ]] && return 1
     printf 'STATUS=WARN\nLAST_ALERT=%s\nFAIL_SINCE=0\nLAST_AUTOHEALED=0\nAUTOHEAL_COUNT=0\n' "$NOW" > "$state_file"
     return 0
   fi
@@ -659,13 +662,14 @@ sys.exit(0)
 classify_db_errors() {
   # stdin: worker log lines (optionally `docker logs --timestamps` prefixed)
   # after the latest startup banner. Echoes one line:
-  #   <verdict>|<class>|<error_ts>|<error_line>|<last_success_ts>
+  #   <verdict>|<class>|<error_ts>|<error_line>|<last_success_ts>|<first_pending_ts>
   # verdicts:
   #   clean           no DB exception lines
-  #   conn            a connection-class or unrecognised DB error came AFTER the
-  #                   last successful unit of work -> restart (unchanged policy)
-  #   handled_pending only handled per-task errors (DeadlockDetected /
-  #                   SerializationFailure) after the last success
+  #   conn            a connection-class DB error came AFTER the last
+  #                   successful unit of work -> restart (unchanged policy)
+  #   handled_pending only non-connection DB errors (handled DeadlockDetected /
+  #                   SerializationFailure, or an unrecognised OperationalError)
+  #                   after the last success -> the no-progress logic decides
   #   recovered       every DB error is followed by a later success
   # Successful unit of work: db_worker `state=SUCCESSFUL`, or an SQS ingress
   # batch with deleted>=1 (messages are durably enqueued before delete).
@@ -688,24 +692,28 @@ classify_db_errors() {
       } else if (line ~ /InterfaceError/ || low ~ /could not translate host name|name or service not known|temporary failure in name resolution|connection refused|server closed the connection|connection already closed|connection is closed|connection to server|could not connect|connection timed out|timeout expired|terminating connection|connection reset|no route to host|network is unreachable|ssl syscall error|ssl connection has been closed|could not receive data from server|could not send data to server|database system is (starting up|shutting down|in recovery mode)|remaining connection slots|too many clients/) {
         cls = "conn"
       } else {
-        # Unrecognised OperationalError: keep the conservative pre-AC-B1
-        # behaviour (restart unless later work succeeded).
+        # Unrecognised OperationalError: not proven connection-class; handled
+        # like a per-task error (restart only via the no-progress logic).
         cls = "other"
       }
       n++; e_nr[n] = NR; e_cls[n] = cls; e_ts[n] = ts; e_line[n] = line
     }
     END {
-      if (n == 0) { print "clean||||" ok_ts; exit }
-      pick = 0; hpick = 0
+      if (n == 0) { print "clean||||" ok_ts "|"; exit }
+      pick = 0; hpick = 0; first_ts = ""; first_seen = 0
       for (i = 1; i <= n; i++) {
         if (e_nr[i] < last_ok) continue
-        if (e_cls[i] == "handled") hpick = i; else pick = i
+        if (e_cls[i] == "conn") { pick = i; continue }
+        hpick = i
+        # Grace runs from the FIRST non-connection error after the last
+        # success, so repeated deadlocks cannot keep resetting it.
+        if (!first_seen) { first_seen = 1; first_ts = e_ts[i] }
       }
       if (pick) { v = "conn" }
       else if (hpick) { v = "handled_pending"; pick = hpick }
       else { v = "recovered"; pick = n }
       gsub(/\|/, "/", e_line[pick])
-      printf "%s|%s|%s|%s|%s\n", v, e_cls[pick], e_ts[pick], e_line[pick], (ok_ts == "" ? "none" : ok_ts)
+      printf "%s|%s|%s|%s|%s|%s\n", v, e_cls[pick], e_ts[pick], e_line[pick], (ok_ts == "" ? "none" : ok_ts), first_ts
     }
   '
 }
@@ -800,9 +808,10 @@ probe_worker_progress() {
   fi
   # DB errors after the latest startup banner (AC-B1, 2026-10-27 deadlock
   # false positive). See classify_db_errors for the verdicts.
-  local db_note="" verdict err_cls err_ts err_text ok_ts
-  IFS='|' read -r verdict err_cls err_ts err_text ok_ts < <(printf '%s\n' "$tail_after_start" | classify_db_errors)
-  err_text="$(printf '%s' "${err_text:-}" | tr -s '[:space:]' '_' | cut -c1-80)"
+  local db_note="" verdict err_cls err_ts err_text ok_ts first_ts
+  IFS='|' read -r verdict err_cls err_ts err_text ok_ts first_ts < <(printf '%s\n' "$tail_after_start" | classify_db_errors)
+  # Parens/commas would break the progress=...(a,b) summary and the WARN key.
+  err_text="$(printf '%s' "${err_text:-}" | tr -s '[:space:](),' '_' | cut -c1-80)"
   case "${verdict:-clean}" in
     conn)
       printf 'progress=FAIL(worker_db_error_since_start:%s)' "$err_text"
@@ -813,7 +822,7 @@ probe_worker_progress() {
       ;;
     handled_pending)
       local err_epoch=0 err_age=-1
-      [[ -n "$err_ts" ]] && err_epoch="$(date -d "$err_ts" +%s 2>/dev/null || echo 0)"
+      [[ -n "$first_ts" ]] && err_epoch="$(date -d "$first_ts" +%s 2>/dev/null || echo 0)"
       (( err_epoch > 0 )) && err_age=$(( $(date +%s) - err_epoch ))
       if worker_queue_sql_covered "$c" "$target_pg" "$dep_db"; then
         # No task since the handled error: the SQL ready-backlog check
@@ -825,7 +834,7 @@ probe_worker_progress() {
       else
         # No queue check covers this loop and no progress within the grace
         # window (or unknown error time): treat as no progress.
-        printf 'progress=FAIL(handled_db_error_no_progress:%s@%s,age=%ss)' "$err_text" "${err_ts:-unknown}" "$err_age"
+        printf 'progress=FAIL(handled_db_error_no_progress:%s@%s,first_since_success=%s,age=%ss)' "$err_text" "${err_ts:-unknown}" "${first_ts:-unknown}" "$err_age"
         return 4
       fi
       ;;
@@ -932,7 +941,10 @@ Post-restart result: not restarted (cooldown, DRY_RUN or no scheduler container)
       FROM django_tasks_database_dbtaskresult
       WHERE status = 'READY' AND run_after <= NOW()
       GROUP BY queue_name;
-    " 2>/dev/null || true)"
+    " 2>/dev/null)" || {
+      q_rows=""
+      log "WARN check=${q_check} pg=${label}: ready-backlog query failed; queue progress unknown this run"
+    }
     last_pe_ok="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "
       SELECT COALESCE(TO_CHAR(MAX(finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), 'none')
       FROM django_tasks_database_dbtaskresult
@@ -1108,7 +1120,11 @@ watch_pg() {
   if [[ "$PROGRESS_SQL_CHECKS" == "1" ]]; then
     local label_db
     label_db="$(pg_db_for_label "$label")"
-    if [[ "$(docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')" == "t" ]]; then
+    # Coverage only when the ready-backlog query itself runs: a failing
+    # query would make progress-task-queues blind, so handled errors must
+    # then fall back to the grace/no-progress restart.
+    if [[ "$(docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')" == "t" ]] \
+      && docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT COUNT(*) FROM django_tasks_database_dbtaskresult WHERE status = 'READY' AND run_after <= NOW();" >/dev/null 2>&1; then
       QUEUE_SQL_DB="$label_db"
     fi
   fi
