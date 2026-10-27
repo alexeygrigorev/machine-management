@@ -35,6 +35,29 @@ fi
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# Split a "url::marker" rest-string on the LAST '::' outside IPv6 brackets:
+# http://[::1]/health::ok must split before the marker's '::', not inside
+# [::1] (8138f287: the old first-'::' split probed url "http://[").
+split_url_rest() {
+  # $1=rest; sets __split_url and __split_marker ("" when no separator found)
+  local rest="$1" i n cut=-1 bracket=0
+  n=${#rest}
+  for ((i = 0; i < n - 1; i++)); do
+    case "${rest:i:1}" in
+      '[') bracket=1 ;;
+      ']') bracket=0 ;;
+      ':') if [[ "$bracket" -eq 0 && "${rest:i+1:1}" == ":" ]]; then cut=$i; fi ;;
+    esac
+  done
+  if [[ "$cut" -ge 0 ]]; then
+    __split_url="${rest:0:cut}"
+    __split_marker="${rest:cut+2}"
+  else
+    __split_url="$rest"
+    __split_marker=""
+  fi
+}
+
 # ---- config (overridable via env file) ----
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/contabo-deadman}"
 LOCK_FILE="${LOCK_FILE:-$HOME/.local/state/contabo-deadman.lock}"
@@ -340,7 +363,12 @@ latency_metrics_push() {
 probe_latency() {
   local probe="$1" url="$2" service="$3"
   local uhost status ttfb total rc out
-  uhost="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' | sed -E 's#[:/].*##')"
+  uhost="${url#*://}"; uhost="${uhost%%/*}"
+  if [[ "$uhost" == "["*"]"* ]]; then
+    uhost="${uhost%%]*}]"
+  else
+    uhost="${uhost%%:*}"
+  fi
   out="$(curl -sS -L -o /dev/null -w '%{http_code} %{time_starttransfer} %{time_total}' \
     --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
   if [[ "$rc" -ne 0 ]]; then
@@ -412,7 +440,7 @@ if [[ -n "${DEADMAN_URLS:-}" ]]; then
   # shellcheck disable=SC2086
   for entry in $DEADMAN_URLS; do
     app="${entry%%=*}"; rest="${entry#*=}"
-    url="${rest%%::*}"; marker="${rest#*::}"
+    split_url_rest "$rest"; url="$__split_url"; marker="$__split_marker"
     if [[ -z "$app" || -z "$url" || -z "$marker" || "$url" == "$rest" || "$marker" == "$rest" ]]; then
       log "WARN: skipping malformed DEADMAN_URLS entry: ${entry} (want name=url::marker)"
       continue
@@ -428,7 +456,7 @@ if [[ -n "${LATENCY_PROBES:-}" ]]; then
   # shellcheck disable=SC2086
   for entry in $LATENCY_PROBES; do
     probe="${entry%%=*}"; rest="${entry#*=}"
-    url="${rest%%::*}"; service="${rest#*::}"
+    split_url_rest "$rest"; url="$__split_url"; service="$__split_marker"
     if [[ -z "$probe" || -z "$url" || -z "$service" || "$url" == "$rest" || "$service" == "$rest" ]]; then
       log "WARN: skipping malformed LATENCY_PROBES entry: ${entry}"
       continue

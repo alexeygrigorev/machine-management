@@ -70,6 +70,7 @@ case "$url" in
   *good*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 0.20 0.30"; exit 0;;
   *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; echo "200 0.20 0.30"; exit 0;;
   *wrong*) printf '<html>edge default backend</html>' > "$out"; echo "200 0.20 0.30"; exit 0;;
+  *dash*) printf 'all-ok' > "$out"; echo "200 0.20 0.30"; exit 0;;
   *down*) echo "curl: (7) connect failed" >&2; echo ""; exit 7;;
   *) echo "stub curl: unknown url $url" >&2; exit 99;;
 esac
@@ -301,6 +302,34 @@ if [[ $rc -ne 0 && "$out" == *'FAIL latency probe=p1'* ]]; then
   fi
 else
   fail "D16 slow latency (rc=$rc) -- $out"
+fi
+
+# ---- D17-D19: url::marker split on LAST '::' outside IPv6 brackets (8138f287) ----
+# D17: IPv6 literal URL survives the split (old code probed 'http://[').
+out=""; set +e; out="$(run_dm 'node-a' 'svc=http://[::1]/good::"status":"ok"' "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=ext-svc'* ]]; then
+  pass "D17 IPv6 literal URL survives url::marker split"
+else
+  fail "D17 IPv6 split (rc=$rc) -- $out"
+fi
+
+# D18: IPv6 latency probe keeps url + service + bracketed url_host (old code
+# fetched 'http://[' with service '1]/fast::cmp' and logged ttfb=-1).
+SD18="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm_lat 'p1=http://[::1]/fast::cmp' 0 "$SD18")"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'latency probe=p1 service=cmp'* \
+  && "$out" == *'url_host=[::1]'* && "$out" == *'ttfb=0.20'* ]]; then
+  pass "D18 IPv6 latency probe splits on last '::' with sane url_host"
+else
+  fail "D18 IPv6 latency (rc=$rc) -- $out"
+fi
+
+# D19: dash-leading marker ('-ok', leaked FAIL mail #1) parses as the marker.
+out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/dash::-ok' "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *'OK check=ext-svc'* ]]; then
+  pass "D19 dash-leading marker splits on last '::'"
+else
+  fail "D19 dash marker (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
