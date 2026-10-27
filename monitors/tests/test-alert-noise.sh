@@ -59,7 +59,7 @@ run_check() { # state-dir, response, epoch, skip-public
   if COOLIFY_HEALTHCHECK_ENV_FILE=/nonexistent \
     STATE_DIR="$dir" LOCK_FILE="$dir/lock" \
     SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_BACKUP_CHECKS=1 SKIP_DISK_CHECK=1 \
-    CHECK_AISL_Q=0 CHECK_CMP_CALLBACKS=0 \
+    CHECK_AISL_Q=0 CHECK_CMP_CALLBACKS=0 LATENCY_PROBES= LATENCY_PUSH_ENABLED=0 \
     ALERT_TO=alexey@datatalks.club,dev@dtcdev.click ALERT_REPEAT_MIN=60 \
     RECOVER_NOTIFY_MIN_SEC=600 SKIP_PUBLIC_HTTP_CHECKS="$4" \
     APP_URLS='aishl=https://aishl.test/ping loopback=http://127.0.0.1/health/' \

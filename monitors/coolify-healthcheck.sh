@@ -159,7 +159,7 @@ SKIP_PUBLIC_HTTP_CHECKS="${SKIP_PUBLIC_HTTP_CHECKS:-0}"
 # website home + /events/past. Service label groups PromQL p95 per service
 # (cmp, aisl, relay, website). TTFB/total recorded even on HTTP 4xx/5xx
 # (status label preserves the code); curl transport failures record -1.
-LATENCY_PROBES="${LATENCY_PROBES:-cmp_home=https://courses.datatalks.club/::cmp cmp_course=https://courses.datatalks.club/ml-zoomcamp-2026/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website}"
+LATENCY_PROBES="${LATENCY_PROBES-cmp_home=https://courses.datatalks.club/::cmp cmp_course=https://courses.datatalks.club/ml-zoomcamp-2026/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website}"
 LATENCY_PUSH_ENABLED="${LATENCY_PUSH_ENABLED:-1}"
 # Contabo hosts reach VM over WireGuard; Hetzner deadman overrides via SSH.
 LATENCY_PUSH_URL="${LATENCY_PUSH_URL:-http://10.100.0.1:8429/api/v1/import/prometheus}"
