@@ -1,0 +1,20 @@
+# Storagebox S3-mirror staleness dead-man — user-crontab entry for Hetzner.
+#
+# The check MUST run on Hetzner itself (it reads ~/storagebox + pages via the
+# Hetzner msmtp `alerts` account). Install (once, as alexey — needs one-time
+# sudo for /usr/local/sbin only):
+#   ./monitors/install-storagebox-staleness-check.sh
+# which appends the lines below to your crontab if missing.
+#
+# Cadence: twice daily at 06:00 + 18:00 Europe/Berlin (after the 04:30 mirror,
+# plus an evening re-check). CRON_TZ prefix pins wall-clock time per line
+# (user crontabs here already set CRON_TZ=UTC mid-file — do not rely on a
+# top-level TZ).
+# The cron entry points at the STABLE installed copy
+# (/usr/local/sbin/storagebox-staleness-check.sh) — never at a worktree path.
+#
+# Threshold: 36h (STALE_SECONDS=129600) — pages
+# alexey@datatalks.club,dev@dtcdev.click via msmtp `alerts` account.
+
+CRON_TZ=Europe/Berlin
+0 6,18 * * * /usr/local/sbin/storagebox-staleness-check.sh >> /home/alexey/.local/state/storagebox-sync/staleness.log 2>&1
