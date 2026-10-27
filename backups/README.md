@@ -199,25 +199,21 @@ marker — data node only), `host/firewall-{ufw,iptables-v4,iptables-v6}.txt`
 backup-copies sibling schedule — no duplicate schedule here).
 
 The passphrase lives in `/etc/coolify-cp-backup.pass` (600) on the nodes and
-the operator box (`~/tmp/secrets/` + `~/.secrets/`). Off-host escrows (names
-only, never values in git): AWS Secrets Manager, MAIN account, eu-west-1,
-secret `dr/coolify-cp-backup-gpg-passphrase` (2026-10-24, t1378u; decrypt of
-the latest contabo-a/b bundles verified with the escrowed copy) AND AWS
-Secrets Manager, SANDBOX account 817685572750, eu-west-1, secrets
-`dr-escrow/coolify-cp-backup-gpg-passphrase` and
-`dr-escrow/acme-backup-gpg-passphrase` (CFN stack `dr-escrow`, migrated
-2026-10-27 from SSM `/dr-escrow/*` SecureString; old SSM params left in place
-until Alexey OKs deletion). The ACME edge-tls passphrase is escrowed in
-`dr/acme-backup-gpg-passphrase` (MAIN Secrets Manager) and
-`dr-escrow/acme-backup-gpg-passphrase` (SANDBOX Secrets Manager). S3
-retention: 30 d lifecycle (`coolify-control-plane-30d`); local copies 7 d.
+in the operator's private backup configuration. The sandbox escrow now lives
+in the DataOps team secrets store as `dr-escrow.coolify-cp-backup-gpg-passphrase`
+and `dr-escrow.acme-backup-gpg-passphrase`. Both records preserve the original
+SecretString in field `value`; reads bind KMS decryption to the exact name.
+The drill uses the sandbox AWS Gate default profile and checks account
+817685572750 before reading. It has no Secrets Manager or SSM fallback.
+Existing SSM escrow parameters are left untouched. MAIN remains a separate
+Developer-managed migration and is never accessed by this drill.
 
-Escrow-copy restore drill (passphrase from SANDBOX Secrets Manager, never the Hetzner file):
+Escrow-copy restore drill (passphrases from the sandbox team store):
 
 ```bash
 ./contingency/dr-escrow-restore-drill.sh \
   --cp-bundle <coolify-cp-bundle-...tar.gz.gpg> --acme-bundle <acme-...json.gpg>
-# → fetches both passphrases from Secrets Manager dr-escrow/*, decrypts,
+# → reads both dr-escrow.* values from the team store, decrypts,
 #   verifies cp filenames (coolify.env + ssh-keys/) and the acme letsencrypt
 #   block (counts only), prints DRILL_OK. Use --cp-pass-file/--acme-pass-file
 #   only for the Hetzner-copy script test. Region/secret names overridable via
