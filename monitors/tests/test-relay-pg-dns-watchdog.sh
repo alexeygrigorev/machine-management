@@ -667,7 +667,7 @@ run_b() {
   set +e
   B_OUT="$(env STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent \
     STATE_DIR="$B_DIR/var" LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 \
-    DNS_RECHECK_WAIT_SEC=0 ALERT_TO=test@example.com "$@" \
+    DNS_RECHECK_WAIT_SEC=0 ALERT_TO=test@example.com ALERT_OPS_TO=ops@example.com "$@" \
     PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
   B_RC=$?
   set -e
@@ -683,7 +683,9 @@ if [[ "$B_RC" == 0 && "$B_OUT" == *ALL_OK* && ! -f "$B_DIR/restarted-$PE" \
   && "$B_OUT" == *"later_success=2026-10-27T10:43:22.732319293Z"* \
   && "$B_OUT" == *"ALERT check=warn-dep-$PE subject='[relay-pg-dns-watchdog] WARN handled DB error (warn-dep-$PE)' priority=low"* ]] \
   && b_mail | grep -q '^X-Priority: 5' && b_mail | grep -q '^Importance: low' \
-  && b_mail | grep -q 'deadlock_detected'; then
+  && b_mail | grep -q 'deadlock_detected' \
+  && [[ "$B_OUT" == *"ALERT check=warn-dep-$PE"*"to=test@example.com"* ]] \
+  && b_mail | grep -q '^ARGS: .*test@example.com' && ! b_mail | grep -q 'ops@example.com'; then
   pass "B1-a real 2026-10-27 deadlock + later SUCCESSFUL tasks: no restart, WARN line, low-priority mail"
 else
   fail "B1-a deadlock then success (rc=$B_RC) -- $B_OUT -- mail: $(b_mail)"
@@ -790,10 +792,40 @@ fi
   echo "2026-10-27T10:50:05.000000000Z Task id=33333333-3333-4333-8333-333333333333 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL"; } > "$TMP/conn-then-ok.log"
 run_b conn_then_success "$TMP/conn-then-ok.log"
 if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"db_error_recovered=conn:"*"@2026-10-27T10:50:00.000000000Z,later_success=2026-10-27T10:50:05"* \
-  && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
+  && "$B_OUT" == *"ALERT check=warn-ops-dep-$PE"*"priority=low"*"to=ops@example.com"* ]] \
+  && b_mail | grep -q '^ARGS: .*ops@example.com' && ! b_mail | grep -q 'test@example.com'; then
   pass "B1-i connection error followed by later SUCCESSFUL task: no restart, WARN + low-priority mail"
 else
   fail "B1-i conn then success (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-i2 (t1672u/t1673u): benign WARN routing. A recovered connection/DNS
+# error notice goes ops-only (ALERT_OPS_TO); if an unsent deadlock notice is
+# folded into it, the whole notice goes to ALERT_TO (deadlock is serious).
+B_DIR="$TMP/state-b-fold-route"; mkdir -p "$B_DIR/var"; echo healthy > "$B_DIR/mode"
+printf '%s\n' "db_error_recovered=conn:psycopg2.OperationalError:_x@2026-10-27T10:50:00Z" "$PE" \
+  "db_error_recovered=conn:psycopg2.OperationalError:_x@2026-10-27T10:50:00Z,later_success=2026-10-27T10:50:05Z" "progress=OK" \
+  "db_error_recovered=handled:django.db.utils.OperationalError:_deadlock_detected@2026-10-27T10:43:00Z,later_success=2026-10-27T10:43:22Z" \
+  > "$B_DIR/var/warn-dep-$PE.pending"
+set +e
+out="$(STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$B_DIR/var" \
+  LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com ALERT_OPS_TO=ops@example.com \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out" == *"ALERT check=warn-dep-$PE"*"to=test@example.com"* && "$out" != *"warn-ops-dep-$PE"* ]] \
+  && b_mail | grep -q 'deadlock_detected' && ! b_mail | grep -q 'ops@example.com'; then
+  pass "B1-i2 recovered conn notice folding an unsent deadlock notice goes to ALERT_TO, not ops-only"
+else
+  fail "B1-i2 fold routing -- $out -- mail: $(b_mail)"
+fi
+# B1-i3: FAIL path (connection error after last success -> restart) still
+# mails ALERT_TO, never ALERT_OPS_TO.
+run_b fail_route "$TMP/conn-after.log"
+if [[ "$B_OUT" == *"ALERT check=dep-$PE"*"to=test@example.com"* && "$B_OUT" != *"to=ops@example.com"* ]] \
+  && ! b_mail | grep -q 'ops@example.com'; then
+  pass "B1-i3 FAIL/AUTOHEALED alerts still go to ALERT_TO only"
+else
+  fail "B1-i3 FAIL routing -- $B_OUT -- mail: $(b_mail)"
 fi
 
 # B1-j: an unrecognised (non-connection) OperationalError after the last

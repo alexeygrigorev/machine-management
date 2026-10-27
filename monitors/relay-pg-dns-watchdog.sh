@@ -103,6 +103,11 @@ TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
 HANDLED_DB_ERROR_GRACE_SEC="${HANDLED_DB_ERROR_GRACE_SEC:-300}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+# Ops-only recipients for benign WARN notices: a connection-class / DNS DB
+# error that later recovered (db_error_recovered=conn:...). Deadlock,
+# serialization failure and unrecognised OperationalError WARNs, and every
+# FAIL / AUTOHEALED / RECOVERED, still go to ALERT_TO (t1672u / t1673u).
+ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
 ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
@@ -139,10 +144,10 @@ prune_stale_state_files() {
       rm -f "$f" "${STATE_DIR}/restart-${cname}.stamp"
     fi
   done
-  for f in "$STATE_DIR"/warn-dep-*.state "$STATE_DIR"/warn-dep-*.key "$STATE_DIR"/warn-dep-*.pending "$STATE_DIR"/pending-dep-*.since; do
+  for f in "$STATE_DIR"/warn-dep-*.state "$STATE_DIR"/warn-ops-dep-*.state "$STATE_DIR"/warn-dep-*.key "$STATE_DIR"/warn-dep-*.pending "$STATE_DIR"/pending-dep-*.since; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"; base="${base%.*}"
-    cname="${base#warn-dep-}"; cname="${cname#pending-dep-}"
+    cname="${base#warn-dep-}"; cname="${cname#warn-ops-dep-}"; cname="${cname#pending-dep-}"
     if ! docker inspect "$cname" >/dev/null 2>&1; then
       log "PRUNE check=${base}: container '${cname}' no longer exists — removed stale state"
       rm -f "$f"
@@ -163,9 +168,10 @@ send_alert() {
   # $1=check-name $2=subject-suffix $3=body  (same dedupe as coolify-healthcheck)
   # $4=priority: "normal" (default) or "low" (adds X-Priority: 5 / Importance:
   # low headers; used for WARN notices that need no action).
+  # $5=recipients override (comma list; default ALERT_TO).
   # Returns 1 only when a WARN notice was rate-limited or not delivered
   # (caller keeps it pending and retries on a later run).
-  local name="$1" subject="$2" body="$3" priority="${4:-normal}"
+  local name="$1" subject="$2" body="$3" priority="${4:-normal}" rcpt="${5:-$ALERT_TO}"
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status="" fail_since=0 last_autohealed=0 autoheal_count=0
   if [[ -f "$state_file" ]]; then
@@ -215,7 +221,7 @@ send_alert() {
   fi
 
   local full_subject="[relay-pg-dns-watchdog] ${subject} (${name})"
-  local to_csv="${ALERT_TO// /,}"
+  local to_csv="${rcpt// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
@@ -271,7 +277,7 @@ send_alert() {
   else
     log "WARN: no MTA (sendmail/msmtp) — alert for ${name} logged only"
   fi
-  log "ALERT check=${name} subject='${full_subject}' priority=${priority} via=${sent} to=${ALERT_TO}"
+  log "ALERT check=${name} subject='${full_subject}' priority=${priority} via=${sent} to=${rcpt}"
 
   if [[ "$subject" == WARN* ]]; then
     # Not delivered: keep the notice pending so a later run retries it.
@@ -1127,13 +1133,29 @@ send_pending_warn() {
   [[ -n "${key:-}" && -n "${c:-}" ]] || { rm -f "$pending"; return 0; }
   warn_check="warn-dep-$(safe_name "$c")"
   [[ -n "${prev:-}" ]] && extra=$'\n'"Earlier unsent notice: ${prev}"
-  if send_alert "$warn_check" "WARN handled DB error" \
+  # Routing (t1672u / t1673u): only a benign notice -- every folded note is a
+  # connection-class / DNS error that later recovered -- goes ops-only to
+  # ALERT_OPS_TO under its own rate-limit state. Deadlock / serialization /
+  # unrecognised DB errors keep going to ALERT_TO.
+  local send_check="$warn_check" rcpt="$ALERT_TO" n benign=1
+  local -a notes=()
+  IFS=';' read -r -a notes <<< "${note}${prev:+;${prev}}"
+  for n in "${notes[@]}"; do
+    n="${n# }"
+    [[ -z "$n" ]] && continue
+    [[ "$n" == db_error_recovered=conn:* ]] || { benign=0; break; }
+  done
+  if (( benign )) && [[ -n "${ALERT_OPS_TO:-}" ]]; then
+    send_check="warn-ops-dep-$(safe_name "$c")"
+    rcpt="$ALERT_OPS_TO"
+  fi
+  if send_alert "$send_check" "WARN handled DB error" \
     "${c} on $(hostname) logged a database error that the watchdog does NOT treat as a stale connection, so the container was not restarted (low priority; no action needed unless this repeats).
 
 Observed: ${note}
 Progress check: ${prog}${extra}
 
-Handled per-task errors (deadlock, serialization failure) abort one task; the worker keeps processing. If no later task succeeds, the SQL ready-backlog check (progress-task-queues) or the ${HANDLED_DB_ERROR_GRACE_SEC}s no-progress grace still restarts the worker." "low"; then
+Handled per-task errors (deadlock, serialization failure) abort one task; the worker keeps processing. If no later task succeeds, the SQL ready-backlog check (progress-task-queues) or the ${HANDLED_DB_ERROR_GRACE_SEC}s no-progress grace still restarts the worker." "low" "$rcpt"; then
     printf '%s\n' "$key" > "${STATE_DIR}/${warn_check}.key"
     rm -f "$pending"
   fi

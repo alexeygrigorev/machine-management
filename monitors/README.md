@@ -217,7 +217,13 @@ watchdog now verifies all three layers before logging `ALL_OK`:
      - any DB error followed by a later success -> no restart.
      Each non-restart case logs `WARN check=dep-...` and sends one
      low-priority mail (`WARN handled DB error`, `X-Priority: 5`,
-     `Importance: low`) per distinct error. App retry lines
+     `Importance: low`) per distinct error. Routing (t1672u / t1673u):
+     only a benign notice (connection-class / DNS error that later
+     recovered, `db_error_recovered=conn:...`) goes ops-only to
+     `ALERT_OPS_TO` (default `dev@dtcdev.click`); deadlock, serialization
+     failure and unrecognised `OperationalError` notices (or any notice that
+     folds one in) keep going to `ALERT_TO`, like every FAIL / AUTOHEALED /
+     RECOVERED. App retry lines
      (`... hit a transient DB error ...; retrying ...`) are ignored.
 3. **SQL task & heartbeat freshness (`check_pg_worker_progress`)**:
    - **`progress-scheduler-heartbeat`**: queries `relay_scheduler_heartbeat.ticked_at`
