@@ -11,6 +11,10 @@
 #
 # Does NOT flip prod. Does NOT touch RDS. Distinct container/port from
 # one-shot drills (t1037u :55437, t1118u :55438) — weekly uses :55439.
+#
+# Locking: THIS script is the single lock owner ($LOCK, default
+# /tmp/weekly-fast-pg-raise.lock). Do not wrap it in an outer `flock`
+# (see weekly-fast-pg-raise.cron). Exit 75 + SKIP log line = lock contended.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,11 +38,21 @@ SSH_ID="${SSH_ID:-$HOME/.ssh/id_contabo}"
 PGUSER_SHARED="${PGUSER_SHARED:-pgadmin}"
 PGUSER_RELAY="${PGUSER_RELAY:-pgadmin}"
 
+log() { printf '[weekly-fast-pg-raise %s] %s\n' "$(TZ=Europe/Berlin date -Iseconds)" "$*"; }
+
+# Single lock owner: the script itself holds $LOCK for the whole run.
+# The cron unit (weekly-fast-pg-raise.cron) must NOT wrap this script in
+# another `flock` on the same file — that double-lock made every cron run
+# a silent no-op ("another weekly raise is running", exit 0) since 2026-10-22.
+# Contended (genuinely concurrent) run: SKIP line in the log + exit 75
+# (EX_TEMPFAIL), so a no-op never looks like a success (no metrics update,
+# no last_success.env touch, non-zero exit).
 LOCK="${LOCK:-/tmp/weekly-fast-pg-raise.lock}"
 exec 9>"$LOCK"
-flock -n 9 || { echo "another weekly raise is running"; exit 0; }
-
-log() { printf '[weekly-fast-pg-raise %s] %s\n' "$(TZ=Europe/Berlin date -Iseconds)" "$*"; }
+if ! flock -n 9; then
+  log "SKIP: another weekly raise is running (lock contended on $LOCK)"
+  exit 75
+fi
 
 ssh_b() {
   ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -i "$SSH_ID" "$CONTABO_B" "$@"

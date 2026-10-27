@@ -91,6 +91,21 @@ Manual one-shot (does not conflict with t1118u ports):
 TEARDOWN=1 bash ~/git/machine-management/contingency/weekly-fast-pg-raise.sh
 ```
 
+## Locking (single owner — fixed 2026-10-27)
+
+- **Owner:** `contingency/weekly-fast-pg-raise.sh` itself (`flock -n` on
+  `$LOCK`, default `/tmp/weekly-fast-pg-raise.lock`, held for the whole run).
+- **Cron** (`weekly-fast-pg-raise.cron`) calls the script directly with NO
+  outer `flock`. The 2026-10-22→25 outage was a double lock: cron held the
+  same file via `/usr/bin/flock -n`, so the script's inner `flock -n 9`
+  always failed and every Sunday run logged `another weekly raise is
+  running` and exited 0 without doing anything.
+- **Contended run** (a second instance while one holds the lock): logs
+  `SKIP: another weekly raise is running (lock contended on ...)` and exits
+  **75** (`EX_TEMPFAIL`). It never pushes metrics and never touches
+  `last_success.env`, so a no-op is distinguishable from `done
+  result=pass` (exit 0).
+
 ## Seed from t1118u (2026-10-22)
 
 Real-data raise already proved **~26 s** RTO (cmp 393 MB / aisl 133 MB / relay 270 MB / website 18 MB). Metrics were seeded from that success so the dead-man does not false-alert before the first Sunday cron.

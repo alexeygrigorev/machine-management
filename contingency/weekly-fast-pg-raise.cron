@@ -1,7 +1,12 @@
 # Weekly Contabo → Hetzner fast PG raise drill (t1119u).
 # Sundays 04:30 Europe/Berlin — after nightly Contabo dumps (02:30) and
 # offset from weekly basebackup (Sun 03:00). Runs on Hetzner operator box.
+#
+# Locking: this cron unit does NOT use flock. The script itself is the
+# single lock owner ($LOCK). Wrapping it in an outer `flock -n` on the same
+# file re-creates the 2026-10-22 silent-no-op bug (script's `flock -n 9`
+# always fails while the outer lock is held). Keep this line flock-free.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Berlin
-30 4 * * 0 alexey /usr/bin/flock -n /tmp/weekly-fast-pg-raise.lock /home/alexey/git/machine-management/contingency/weekly-fast-pg-raise.sh >> /home/alexey/.local/state/dr-fast-pg-raise/weekly.log 2>&1
+30 4 * * 0 alexey /home/alexey/git/machine-management/contingency/weekly-fast-pg-raise.sh >> /home/alexey/.local/state/dr-fast-pg-raise/weekly.log 2>&1
