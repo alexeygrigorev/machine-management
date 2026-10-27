@@ -13,6 +13,12 @@ FAILN=0
 pass() { PASS=$((PASS+1)); echo "PASS: $1"; }
 fail() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 
+# 8138f287 AC0b: the suite must never configure a real recipient, even under
+# stubs -- all ALERT_TO/ALERT_OPS_TO/LATENCY_ALERT_TO are non-routable.
+T_ALARM="stub-alarm@invalid.test"   # ALERT_TO
+T_OPS="stub-ops@invalid.test"       # ALERT_OPS_TO
+T_LAT="stub-latency@invalid.test"   # LATENCY_ALERT_TO
+
 # ---- D0: syntax ----
 if bash -n "$SCRIPT" && bash -n "$INSTALLER"; then pass "D0 bash -n (deadman + installer)"; else fail "D0 bash -n"; fi
 
@@ -79,7 +85,9 @@ chmod +x "$TMP/stubbin/ssh" "$TMP/stubbin/curl"
 cat > "$TMP/stubbin/sendmail" <<'EOF'
 #!/usr/bin/env bash
 # Capture recipients and From header for drill recipient assertions.
-mkdir -p "$STUB_DM_MAILDIR"
+# Fail closed: without a writable capture dir the stub refuses to deliver.
+mkdir -p "$STUB_DM_MAILDIR" || { echo "stub sendmail: no capture dir; refusing" >&2; exit 1; }
+[[ -d "${STUB_DM_MAILDIR:-}" && -w "$STUB_DM_MAILDIR" ]] || { echo "stub sendmail: capture dir missing/unwritable; refusing" >&2; exit 1; }
 msg="$(cat)"
 from="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^From:/{print $2; exit}')"
 to="$(printf '%s\n' "$msg" | awk -F': ' 'BEGIN{IGNORECASE=1} /^To:/{print $2; exit}')"
@@ -90,6 +98,10 @@ exit 0
 EOF
 chmod +x "$TMP/stubbin/sendmail"
 cp "$TMP/stubbin/sendmail" "$TMP/stubbin/msmtp"
+# Fail closed (8138f287 AC0b): abort unless every send path is stubbed.
+for s in ssh curl sendmail msmtp; do
+  [[ -x "$TMP/stubbin/$s" ]] || { echo "ABORT: stub '$s' missing from stubbin" >&2; exit 1; }
+done
 
 run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
@@ -100,8 +112,8 @@ run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
   DEADMAN_FORCE_FAIL="$4" \
   LATENCY_PROBES="" \
   LATENCY_PUSH_ENABLED=0 \
-  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
-  ALERT_OPS_TO="dev@dtcdev.click" \
+  ALERT_TO="$T_ALARM,$T_OPS" \
+  ALERT_OPS_TO="$T_OPS" \
   STUB_DM_MAILDIR="$3/mail" \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
@@ -158,19 +170,19 @@ SD7="$(mktemp -d -p "$TMP")"
 out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 1)"; rc=$?; set -e
 mailf="$SD7/mail/sent.tsv"
 if [[ $rc -ne 0 && -f "$mailf" ]] \
-  && grep -q $'DTC Alerts <alerts@dtcdev.click>\tdev@dtcdev.click\t.*drill-forced' "$mailf" \
+  && grep -q $'DTC Alerts <alerts@dtcdev.click>\t'"$T_OPS"$'\t.*drill-forced' "$mailf" \
   && grep -q '\-a alerts.*\-f alerts@dtcdev\.click' "$mailf" \
-  && ! grep -q 'alexey@datatalks.club' "$mailf" \
-  && [[ "$out" == *'to=dev@dtcdev.click'* ]]; then
-  pass "D7 drill recipients ops-only (no alexey@)"
+  && ! grep -q "$T_ALARM" "$mailf" \
+  && [[ "$out" == *"to=$T_OPS"* ]]; then
+  pass "D7 drill recipients ops-only (no ALERT_TO)"
 else
   fail "D7 ops-only drill -- out=$out mail=$(cat "$mailf" 2>/dev/null || echo missing)"
 fi
 out=""; set +e; out="$(run_dm 'node-a' "$GOOD_URLS" "$SD7" 0)"; rc=$?; set -e
 if [[ $rc -eq 0 && $(wc -l < "$mailf") -eq 2 ]] \
-  && grep -q $'DTC Alerts <alerts@dtcdev.click>\tdev@dtcdev.click\t.*RECOVERED.*drill-forced' "$mailf" \
-  && ! grep -q 'alexey@datatalks.club' "$mailf"; then
-  pass "D7 recovery recipients also ops-only (no alexey@)"
+  && grep -q $'DTC Alerts <alerts@dtcdev.click>\t'"$T_OPS"$'\t.*RECOVERED.*drill-forced' "$mailf" \
+  && ! grep -q "$T_ALARM" "$mailf"; then
+  pass "D7 recovery recipients also ops-only (no ALERT_TO)"
 else
   fail "D7 ops-only recovery -- $out"
 fi
@@ -179,9 +191,10 @@ fi
 SD8="$(mktemp -d -p "$TMP")"
 out=""; set +e; out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' "$GOOD_URLS" "$SD8" 1)"; rc=$?; set -e
 if [[ $rc -ne 0 ]] \
-  && grep -q $'alexey@datatalks.club, dev@dtcdev.click\t.*FAIL.*node-node-a' "$SD8/mail/sent.tsv" \
-  && grep -q $'dev@dtcdev.click\t.*FAIL.*drill-forced' "$SD8/mail/sent.tsv"; then
-  pass "D8 real node failure during drill keeps both real recipients"
+  && grep 'FAIL.*node-node-a' "$SD8/mail/sent.tsv" | grep -q "$T_ALARM" \
+  && grep 'FAIL.*node-node-a' "$SD8/mail/sent.tsv" | grep -q "$T_OPS" \
+  && grep 'FAIL.*drill-forced' "$SD8/mail/sent.tsv" | grep -q "$T_OPS"; then
+  pass "D8 real node failure during drill keeps both configured recipients"
 else
   fail "D8 real failure recipients -- $out"
 fi
@@ -277,8 +290,8 @@ run_dm_lat() { # $1=latency_probes $2=sustain $3=state-dir
   DEADMAN_URLS='svc=https://example.test/good::"status":"ok"' \
   DEADMAN_FORCE_FAIL=0 \
   LATENCY_PROBES="$1" LATENCY_SUSTAIN_SEC="$2" LATENCY_PUSH_ENABLED=0 \
-  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
-  ALERT_OPS_TO="dev@dtcdev.click" LATENCY_ALERT_TO="dev@dtcdev.click" \
+  ALERT_TO="$T_ALARM,$T_OPS" \
+  ALERT_OPS_TO="$T_OPS" LATENCY_ALERT_TO="$T_LAT" \
   STUB_DM_MAILDIR="$3/mail" \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
@@ -295,8 +308,8 @@ SD16="$(mktemp -d -p "$TMP")"
 out=""; set +e; out="$(run_dm_lat 'p1=https://example.test/slow::cmp' 0 "$SD16")"; rc=$?; set -e
 if [[ $rc -ne 0 && "$out" == *'FAIL latency probe=p1'* ]]; then
   to_line="$(cat "$SD16/mail/sent.tsv" 2>/dev/null | tail -n 1 || true)"
-  if [[ "$to_line" == *'dev@dtcdev.click'* && "$to_line" != *'alexey@'* ]]; then
-    pass "D16 slow latency FAILs dev-only (sustain=0 drill)"
+  if [[ "$to_line" == *"$T_LAT"* && "$to_line" != *"$T_ALARM"* ]]; then
+    pass "D16 slow latency FAILs LATENCY_ALERT_TO-only"
   else
     fail "D16 slow recipient not dev-only -- $to_line -- $out"
   fi
@@ -307,7 +320,7 @@ fi
 # ---- D17-D19: url::marker split on LAST '::' outside IPv6 brackets (8138f287) ----
 # D17: IPv6 literal URL survives the split (old code probed 'http://[').
 out=""; set +e; out="$(run_dm 'node-a' 'svc=http://[::1]/good::"status":"ok"' "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
-if [[ $rc -eq 0 && "$out" == *'OK check=ext-svc'* ]]; then
+if [[ $rc -eq 0 && "$out" == *'OK check=ext-svc: http://[::1]/good -> 200'* && "$out" == *"marker='\"status\":\"ok\"'"* ]]; then
   pass "D17 IPv6 literal URL survives url::marker split"
 else
   fail "D17 IPv6 split (rc=$rc) -- $out"
@@ -326,10 +339,50 @@ fi
 
 # D19: dash-leading marker ('-ok', leaked FAIL mail #1) parses as the marker.
 out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/dash::-ok' "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
-if [[ $rc -eq 0 && "$out" == *'OK check=ext-svc'* ]]; then
+if [[ $rc -eq 0 && "$out" == *'https://example.test/dash -> 200'* && "$out" == *"marker='-ok'"* ]]; then
   pass "D19 dash-leading marker splits on last '::'"
 else
   fail "D19 dash marker (rc=$rc) -- $out"
+fi
+
+
+# ---- D20: sentinel MTAs never fire; no real mail path reachable (AC0b, 8138f287) ----
+SENT="$TMP/sentinel"; mkdir -p "$SENT"; : > "$SENT/invocations.log"
+for s in msmtp sendmail aws; do
+  cat > "$SENT/$s" <<EOF
+#!/usr/bin/env bash
+echo "$s \$*" >> "$SENT/invocations.log"
+exit 99
+EOF
+  chmod +x "$SENT/$s"
+done
+run_dm_sent() { # $1=urls $2=force-fail $3=state-dir (PATH: stubs, then sentinels, then system)
+  CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
+  STATE_DIR="$3" LOCK_FILE="$3.lock" DEADMAN_HOSTS="node-a" \
+  DEADMAN_URLS="$1" DEADMAN_FORCE_FAIL="$2" \
+  LATENCY_PROBES="" LATENCY_PUSH_ENABLED=0 \
+  ALERT_TO="$T_ALARM,$T_OPS" \
+  ALERT_OPS_TO="$T_OPS" \
+  STUB_DM_MAILDIR="$3/mail" \
+  PATH="$TMP/stubbin:$SENT:/usr/bin:/bin" \
+  bash "$SCRIPT" 2>&1
+}
+SD20="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm_sent 'svc=https://example.test/good::"status":"ok"' 0 "$SD20")"; rc=$?; set -e
+n_inv="$(wc -l < "$SENT/invocations.log")"
+if [[ $rc -eq 0 && "$n_inv" -eq 0 && ! -s "$SD20/mail/sent.tsv" ]]; then
+  pass "D20 sentinel MTAs silent, zero sends on green run"
+else
+  fail "D20 green (rc=$rc inv=$n_inv) -- $(cat "$SENT/invocations.log" 2>/dev/null)"
+fi
+SD20B="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm_sent 'svc=https://example.test/good::"status":"ok"' 1 "$SD20B")"; rc=$?; set -e
+n_inv="$(wc -l < "$SENT/invocations.log")"
+row20="$(tail -n 1 "$SD20B/mail/sent.tsv" 2>/dev/null || true)"
+if [[ $rc -ne 0 && "$n_inv" -eq 0 && "$row20" == *"$T_OPS"* && "$row20" != *"$T_ALARM"* ]]; then
+  pass "D20 sentinel MTAs silent on drill; send captured by stub only"
+else
+  fail "D20 drill (rc=$rc inv=$n_inv row=[$row20])"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
