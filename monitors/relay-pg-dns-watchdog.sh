@@ -97,6 +97,10 @@ RESTART_WORKERS_OLDER_THAN_PG="${RESTART_WORKERS_OLDER_THAN_PG:-1}"
 PG_RECREATE_GRACE_SEC="${PG_RECREATE_GRACE_SEC:-15}"
 SCHEDULER_MAX_AGE_SEC="${SCHEDULER_MAX_AGE_SEC:-180}"
 TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
+# Handled per-task DB error (deadlock / serialization failure) with no later
+# successful work, in a loop the SQL queue check does not cover: wait this long
+# for progress before treating it as no-progress and restarting (AC-B1).
+HANDLED_DB_ERROR_GRACE_SEC="${HANDLED_DB_ERROR_GRACE_SEC:-300}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
@@ -135,6 +139,15 @@ prune_stale_state_files() {
       rm -f "$f" "${STATE_DIR}/restart-${cname}.stamp"
     fi
   done
+  for f in "$STATE_DIR"/warn-dep-*.state "$STATE_DIR"/warn-dep-*.key; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f")"; base="${base%.*}"
+    cname="${base#warn-dep-}"
+    if ! docker inspect "$cname" >/dev/null 2>&1; then
+      log "PRUNE check=${base}: container '${cname}' no longer exists — removed stale state"
+      rm -f "$f"
+    fi
+  done
   for f in "$STATE_DIR"/restart-*.stamp; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f" .stamp)"
@@ -148,7 +161,10 @@ prune_stale_state_files() {
 
 send_alert() {
   # $1=check-name $2=subject-suffix $3=body  (same dedupe as coolify-healthcheck)
-  local name="$1" subject="$2" body="$3"
+  # $4=priority: "normal" (default) or "low" (adds X-Priority: 5 / Importance:
+  # low headers; used for WARN notices that need no action).
+  # Returns 1 only when a WARN notice was rate-limited (caller retries later).
+  local name="$1" subject="$2" body="$3" priority="${4:-normal}"
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status="" fail_since=0 last_autohealed=0 autoheal_count=0
   if [[ -f "$state_file" ]]; then
@@ -179,6 +195,14 @@ send_alert() {
   elif [[ "$subject" == RECOVERED* ]]; then
     # RECOVERED notification rate-limiting handled via mark_ok / RECOVER_NOTIFY_MIN_SEC
     :
+  elif [[ "$subject" == WARN* ]]; then
+    # Low-priority notices: at most one per ALERT_REPEAT_MIN per check. A
+    # rate-limited notice is not dropped: the caller keeps it pending and
+    # it goes out on a later run.
+    if [[ "$last_status" == "WARN" ]] && (( (NOW - last_alert) / 60 < ALERT_REPEAT_MIN )); then
+      log "WARN check=${name}: low-priority notice rate-limited (ALERT_REPEAT_MIN=${ALERT_REPEAT_MIN}); will send on a later run"
+      return 1
+    fi
   else
     # FAIL alert dedupe
     if [[ "$last_status" == "FAIL" ]]; then
@@ -212,12 +236,18 @@ send_alert() {
   [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
   [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
 
+  local prio_headers=""
+  if [[ "$priority" == "low" ]]; then
+    prio_headers=$'X-Priority: 5 (Lowest)\nImportance: low\nPriority: non-urgent\n'
+  fi
+
   local sent="no"
   if command -v msmtp >/dev/null 2>&1; then
     if {
       echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
+      printf '%s' "$prio_headers"
       echo ""
       printf '%s\n' "$body"
     } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then sent="msmtp"; fi
@@ -233,13 +263,19 @@ send_alert() {
       echo "From: ${from_header}"
       echo "To: ${to_header}"
       echo "Subject: ${full_subject}"
+      printf '%s' "$prio_headers"
       echo ""
       printf '%s\n' "$body"
     } | sendmail "${sendmail_args[@]}" 2>/dev/null; then sent="sendmail"; fi
   else
     log "WARN: no MTA (sendmail/msmtp) — alert for ${name} logged only"
   fi
-  log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  log "ALERT check=${name} subject='${full_subject}' priority=${priority} via=${sent} to=${ALERT_TO}"
+
+  if [[ "$subject" == WARN* ]]; then
+    printf 'STATUS=WARN\nLAST_ALERT=%s\nFAIL_SINCE=0\nLAST_AUTOHEALED=0\nAUTOHEAL_COUNT=0\n' "$NOW" > "$state_file"
+    return 0
+  fi
 
   local is_recovery=0
   [[ "$subject" == RECOVERED* || "$subject" == AUTOHEALED* ]] && is_recovery=1
@@ -620,6 +656,95 @@ sys.exit(0)
   return "$rc"
 }
 
+classify_db_errors() {
+  # stdin: worker log lines (optionally `docker logs --timestamps` prefixed)
+  # after the latest startup banner. Echoes one line:
+  #   <verdict>|<class>|<error_ts>|<error_line>|<last_success_ts>
+  # verdicts:
+  #   clean           no DB exception lines
+  #   conn            a connection-class or unrecognised DB error came AFTER the
+  #                   last successful unit of work -> restart (unchanged policy)
+  #   handled_pending only handled per-task errors (DeadlockDetected /
+  #                   SerializationFailure) after the last success
+  #   recovered       every DB error is followed by a later success
+  # Successful unit of work: db_worker `state=SUCCESSFUL`, or an SQS ingress
+  # batch with deleted>=1 (messages are durably enqueued before delete).
+  # Retry log lines ("retrying ...", "transient DB error") are not failures:
+  # the app is handling them; only the resulting outcome counts.
+  awk '
+    {
+      line = $0; ts = ""
+      if (match(line, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]+Z /)) {
+        ts = substr(line, 1, RLENGTH - 1); line = substr(line, RLENGTH + 1)
+      }
+      low = tolower(line)
+      if (low ~ /retrying|transient db error/) next
+      if (line ~ /state=SUCCESSFUL/ || line ~ /received=[0-9]+ deleted=[1-9]/) {
+        ok_ts = ts; last_ok = NR; next
+      }
+      if (line !~ /(psycopg2?|django\.db\.utils)(\.errors)?\.(OperationalError|InterfaceError|DeadlockDetected|SerializationFailure)/) next
+      if (line ~ /DeadlockDetected|SerializationFailure/ || low ~ /deadlock detected|could not serialize access/) {
+        cls = "handled"
+      } else if (line ~ /InterfaceError/ || low ~ /could not translate host name|name or service not known|temporary failure in name resolution|connection refused|server closed the connection|connection already closed|connection is closed|connection to server|could not connect|connection timed out|timeout expired|terminating connection|connection reset|no route to host|network is unreachable|ssl syscall error|ssl connection has been closed|could not receive data from server|could not send data to server|database system is (starting up|shutting down|in recovery mode)|remaining connection slots|too many clients/) {
+        cls = "conn"
+      } else {
+        # Unrecognised OperationalError: keep the conservative pre-AC-B1
+        # behaviour (restart unless later work succeeded).
+        cls = "other"
+      }
+      n++; e_nr[n] = NR; e_cls[n] = cls; e_ts[n] = ts; e_line[n] = line
+    }
+    END {
+      if (n == 0) { print "clean||||" ok_ts; exit }
+      pick = 0; hpick = 0
+      for (i = 1; i <= n; i++) {
+        if (e_nr[i] < last_ok) continue
+        if (e_cls[i] == "handled") hpick = i; else pick = i
+      }
+      if (pick) { v = "conn" }
+      else if (hpick) { v = "handled_pending"; pick = hpick }
+      else { v = "recovered"; pick = n }
+      gsub(/\|/, "/", e_line[pick])
+      printf "%s|%s|%s|%s|%s\n", v, e_cls[pick], e_ts[pick], e_line[pick], (ok_ts == "" ? "none" : ok_ts)
+    }
+  '
+}
+
+parse_db_name() {
+  # arg = env block. Echoes the database name from DATABASE_URL (or
+  # POSTGRES_DB); never echoes credentials.
+  local block="$1" line val
+  while IFS= read -r line; do
+    case "$line" in
+      DATABASE_URL=*)
+        val="${line#DATABASE_URL=}"; val="${val#*//}"
+        [[ "$val" == */* ]] || return 0
+        val="${val#*/}"; val="${val%%\?*}"
+        printf '%s' "$val"; return 0;;
+    esac
+  done <<< "$block"
+  while IFS= read -r line; do
+    case "$line" in POSTGRES_DB=*) printf '%s' "${line#POSTGRES_DB=}"; return 0;; esac
+  done <<< "$block"
+}
+
+# Set per label by watch_pg: the Postgres container and the database whose
+# django_tasks_database_dbtaskresult backlog check_pg_worker_progress watches
+# (empty when that SQL check is disabled or the table does not exist).
+LABEL_PG=""
+QUEUE_SQL_DB=""
+
+worker_queue_sql_covered() {
+  # $1=dep $2=target pg container $3=dep database. 0 when the SQL ready-backlog
+  # check (progress-task-queues) watches this db_worker's queue and would pick
+  # this container as the worker to restart.
+  local c="$1" target_pg="$2" dep_db="$3"
+  [[ "$PROGRESS_SQL_CHECKS" == "1" && -n "$QUEUE_SQL_DB" && -n "$dep_db" ]] || return 1
+  [[ "$target_pg" == "$LABEL_PG" && "$dep_db" == "$QUEUE_SQL_DB" ]] || return 1
+  [[ "$c" == provider-events-worker-* || "$c" == worker-* ]] || return 1
+  return 0
+}
+
 probe_worker_progress() {
   # $1=dep_container $2=target_pg_container $3=port
   # Verifies running-worker health beyond fresh sibling TCP (t1218u):
@@ -628,9 +753,13 @@ probe_worker_progress() {
   #   c) ses-ingress latest batch did not fail 100% (deleted=0 failed>0)
   #   d) background workers have no uncaught DB OperationalError/InterfaceError
   #      after their latest startup banner
+  #   e) DB errors are classified (classify_db_errors): connection-class
+  #      errors after the last successful unit of work fail; handled per-task
+  #      errors (deadlock / serialization failure) do not (AC-B1).
+  # $4=database name the dependent uses (for SQL queue-check coverage).
   # Echoes summary string; returns 0 if healthy, 4 if stale/stuck.
   [[ "$PROGRESS_CHECKS" == "1" ]] || { printf 'progress=disabled'; return 0; }
-  local c="$1" target_pg="$2" port="$3"
+  local c="$1" target_pg="$2" port="$3" dep_db="${4:-}"
   local pg_ips peer_out dep_iso pg_iso dep_epoch pg_epoch logs last_batch
   pg_ips="$(pg_container_ips "$target_pg")"
   if ! peer_out="$(check_active_socket_peers "$c" "$port" "$pg_ips")"; then
@@ -653,10 +782,12 @@ probe_worker_progress() {
     return 4
   fi
 
+  # --timestamps: classify_db_errors needs the time of each DB error and of
+  # the last successful unit of work (ordering + handled-error grace).
   if [[ -n "$dep_iso" && "$dep_iso" != "0001-01-01"* ]]; then
-    logs="$(docker logs --since "$dep_iso" --tail 200 "$c" 2>&1 || true)"
+    logs="$(docker logs --timestamps --since "$dep_iso" --tail 200 "$c" 2>&1 || true)"
   else
-    logs="$(docker logs --tail 200 "$c" 2>&1 || true)"
+    logs="$(docker logs --timestamps --tail 200 "$c" 2>&1 || true)"
   fi
 
   local tail_after_start="$logs"
@@ -667,12 +798,39 @@ probe_worker_progress() {
       END { printf "%s", buf }
     ')"
   fi
-  if printf '%s\n' "$tail_after_start" | grep -qE '(psycopg2|django\.db\.utils)\.(OperationalError|InterfaceError)'; then
-    local err_line
-    err_line="$(printf '%s\n' "$tail_after_start" | grep -E '(psycopg2|django\.db\.utils)\.(OperationalError|InterfaceError)' | tail -n 1 | tr -s '[:space:]' '_' | cut -c1-80)"
-    printf 'progress=FAIL(worker_db_error_since_start:%s)' "$err_line"
-    return 4
-  fi
+  # DB errors after the latest startup banner (AC-B1, 2026-10-27 deadlock
+  # false positive). See classify_db_errors for the verdicts.
+  local db_note="" verdict err_cls err_ts err_text ok_ts
+  IFS='|' read -r verdict err_cls err_ts err_text ok_ts < <(printf '%s\n' "$tail_after_start" | classify_db_errors)
+  err_text="$(printf '%s' "${err_text:-}" | tr -s '[:space:]' '_' | cut -c1-80)"
+  case "${verdict:-clean}" in
+    conn)
+      printf 'progress=FAIL(worker_db_error_since_start:%s)' "$err_text"
+      return 4
+      ;;
+    recovered)
+      db_note="db_error_recovered=${err_cls}:${err_text}@${err_ts:-unknown},later_success=${ok_ts:-unknown}"
+      ;;
+    handled_pending)
+      local err_epoch=0 err_age=-1
+      [[ -n "$err_ts" ]] && err_epoch="$(date -d "$err_ts" +%s 2>/dev/null || echo 0)"
+      (( err_epoch > 0 )) && err_age=$(( $(date +%s) - err_epoch ))
+      if worker_queue_sql_covered "$c" "$target_pg" "$dep_db"; then
+        # No task since the handled error: the SQL ready-backlog check
+        # (progress-task-queues) owns "no progress" for this worker and
+        # restarts it if due READY tasks get stuck.
+        db_note="handled_db_error=${err_cls}:${err_text}@${err_ts:-unknown},later_success=none,deferred_to=progress-task-queues"
+      elif (( err_age >= 0 && err_age < HANDLED_DB_ERROR_GRACE_SEC )); then
+        db_note="handled_db_error=${err_cls}:${err_text}@${err_ts},later_success=none,grace=${err_age}s<${HANDLED_DB_ERROR_GRACE_SEC}s"
+      else
+        # No queue check covers this loop and no progress within the grace
+        # window (or unknown error time): treat as no progress.
+        printf 'progress=FAIL(handled_db_error_no_progress:%s@%s,age=%ss)' "$err_text" "${err_ts:-unknown}" "$err_age"
+        return 4
+      fi
+      ;;
+  esac
+  [[ -n "$db_note" ]] && peer_out="${peer_out},${db_note}"
 
   if [[ "$c" == ses-ingress* ]]; then
     last_batch="$(printf '%s\n' "$logs" | grep -oE 'received=[0-9]+ deleted=[0-9]+ failed=[0-9]+' | tail -n 1 || true)"
@@ -695,7 +853,11 @@ probe_worker_progress() {
     fi
   fi
 
-  printf 'progress=ok(%s,logs=clean)' "$peer_out"
+  if [[ -n "$db_note" ]]; then
+    printf 'progress=ok(%s)' "$peer_out"
+  else
+    printf 'progress=ok(%s,logs=clean)' "$peer_out"
+  fi
   return 0
 }
 
@@ -710,7 +872,7 @@ check_pg_worker_progress() {
   local has_hb
   has_hb="$(docker exec "$pg" psql -U "$PGUSER" -d "$db" -tAqc "SELECT to_regclass('public.relay_scheduler_heartbeat') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   if [[ "$has_hb" == "t" ]]; then
-    local sched_c="" d hb_age hb_check="progress-scheduler-heartbeat"
+    local sched_c="" d hb_age hb_pre hb_check="progress-scheduler-heartbeat"
     for d in $deps; do
       [[ "$d" == scheduler-* ]] && { sched_c="$d"; break; }
     done
@@ -724,6 +886,7 @@ check_pg_worker_progress() {
         mark_ok "$hb_check"
       else
         log "FAIL check=${hb_check} pg=${label} scheduler=${sched_c:-none} age=${hb_age}s max=${SCHEDULER_MAX_AGE_SEC}s"
+        hb_pre="$hb_age"
         if [[ -n "$sched_c" ]] && restart_dependent "$sched_c"; then
           sleep "$RESTART_VERIFY_WAIT"
           dependent_is_retiring "$sched_c" && return
@@ -733,19 +896,27 @@ check_pg_worker_progress() {
           if [[ "$hb_age" =~ ^-?[0-9]+$ ]] && (( hb_age <= SCHEDULER_MAX_AGE_SEC )); then
             log "HEALED check=${hb_check} scheduler=${sched_c} age=${hb_age}s after restart"
             send_alert "$hb_check" "AUTOHEALED" \
-              "Relay scheduler heartbeat (relay_scheduler_heartbeat.ticked_at) on $(hostname) was stale (> ${SCHEDULER_MAX_AGE_SEC}s) while fresh TCP probe was green.
-Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
+              "Relay scheduler heartbeat (relay_scheduler_heartbeat.ticked_at) on $(hostname) was stale while fresh TCP probe was green. Auto-restarted ${sched_c}.
+
+Pre-restart reason: heartbeat age=${hb_pre}s > max ${SCHEDULER_MAX_AGE_SEC}s
+Post-restart result: heartbeat age=${hb_age}s (ok)"
           else
             log "STILLFAIL check=${hb_check} scheduler=${sched_c} age=${hb_age:-unknown}s after restart"
             send_alert "$hb_check" "FAIL" \
-              "Relay scheduler heartbeat on $(hostname) remains stale (age=${hb_age:-unknown}s > ${SCHEDULER_MAX_AGE_SEC}s) after restarting ${sched_c}."
+              "Relay scheduler heartbeat on $(hostname) remains stale after restarting ${sched_c}.
+
+Pre-restart reason: heartbeat age=${hb_pre}s > max ${SCHEDULER_MAX_AGE_SEC}s
+Post-restart result: heartbeat age=${hb_age:-unknown}s (still stale)"
           fi
         else
           [[ "$?" -eq 2 ]] && return
           [[ -n "$sched_c" ]] && dependent_is_retiring "$sched_c" && return
           FAILED=1
           send_alert "$hb_check" "FAIL" \
-            "Relay scheduler heartbeat on $(hostname) is stale (age=${hb_age}s > ${SCHEDULER_MAX_AGE_SEC}s); scheduler=${sched_c:-not-found} restart skipped (cooldown or DRY_RUN)."
+            "Relay scheduler heartbeat on $(hostname) is stale; scheduler=${sched_c:-not-found}.
+
+Pre-restart reason: heartbeat age=${hb_age}s > max ${SCHEDULER_MAX_AGE_SEC}s
+Post-restart result: not restarted (cooldown, DRY_RUN or no scheduler container)"
         fi
       fi
     fi
@@ -778,11 +949,19 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
       IFS='|' read -r qname qcnt qage <<< "$line"
       [[ "$qage" =~ ^-?[0-9]+$ ]] || continue
       if (( qage > TASK_QUEUE_MAX_READY_AGE_SEC )); then
+        # Several stacks can share one Postgres (relay + relay_dev): pick the
+        # worker whose DATABASE_URL uses this database; fall back to a worker
+        # with no parseable database name.
         qworker=""
+        local qfallback="" ddb
         for d in $deps; do
-          if [[ "$qname" == "provider-events" && "$d" == provider-events-worker-* ]]; then qworker="$d"; break; fi
-          if [[ "$qname" == "default" && "$d" == worker-* ]]; then qworker="$d"; break; fi
+          if [[ ( "$qname" == "provider-events" && "$d" == provider-events-worker-* ) || ( "$qname" == "default" && "$d" == worker-* ) ]]; then
+            ddb="$(parse_db_name "$(dep_env_block "$d")")"
+            if [[ "$ddb" == "$db" ]]; then qworker="$d"; break; fi
+            [[ -z "$ddb" && -z "$qfallback" ]] && qfallback="$d"
+          fi
         done
+        qworker="${qworker:-$qfallback}"
         if [[ -n "$qworker" ]] && { dependent_is_retiring "$qworker" || dependent_is_young "$qworker"; }; then
           q_young=1
           continue
@@ -803,12 +982,17 @@ Auto-restarted ${sched_c}; heartbeat age is now ${hb_age}s."
           if [[ "$new_age" =~ ^-?[0-9]+$ ]] && (( new_age <= TASK_QUEUE_MAX_READY_AGE_SEC )); then
             log "HEALED check=${q_check} queue=${qname} worker=${qworker} oldest_ready=${new_age}s after restart"
             send_alert "$q_check" "AUTOHEALED" \
-              "Relay task queue '${qname}' on $(hostname) had ${qcnt} due READY task(s) stuck for ${qage}s (> ${TASK_QUEUE_MAX_READY_AGE_SEC}s) while fresh TCP probe was green.
-Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
+              "Relay task queue '${qname}' on $(hostname) had due READY tasks stuck while fresh TCP probe was green. Auto-restarted ${qworker}.
+
+Pre-restart reason: ${qcnt} due READY task(s), oldest_ready=${qage}s > max ${TASK_QUEUE_MAX_READY_AGE_SEC}s
+Post-restart result: oldest_ready=${new_age}s (ok)"
           else
             log "STILLFAIL check=${q_check} queue=${qname} worker=${qworker} oldest_ready=${new_age:-unknown}s after restart"
             send_alert "$q_check" "FAIL" \
-              "Relay task queue '${qname}' on $(hostname) still has due READY task(s) stuck (oldest_ready=${new_age:-unknown}s > ${TASK_QUEUE_MAX_READY_AGE_SEC}s) after restarting ${qworker}."
+              "Relay task queue '${qname}' on $(hostname) still has due READY task(s) stuck after restarting ${qworker}.
+
+Pre-restart reason: ${qcnt} due READY task(s), oldest_ready=${qage}s > max ${TASK_QUEUE_MAX_READY_AGE_SEC}s
+Post-restart result: oldest_ready=${new_age:-unknown}s (still stuck)"
           fi
         else
           [[ "$?" -eq 2 ]] && { q_young=1; continue; }
@@ -816,7 +1000,10 @@ Auto-restarted ${qworker}; oldest_ready is now ${new_age}s."
           q_failed=1
           FAILED=1
           send_alert "$q_check" "FAIL" \
-            "Relay task queue '${qname}' on $(hostname) has ${qcnt} due READY task(s) stuck for ${qage}s (> ${TASK_QUEUE_MAX_READY_AGE_SEC}s); worker=${qworker:-not-found} restart skipped (cooldown or DRY_RUN)."
+            "Relay task queue '${qname}' on $(hostname) has due READY task(s) stuck; worker=${qworker:-not-found}.
+
+Pre-restart reason: ${qcnt} due READY task(s), oldest_ready=${qage}s > max ${TASK_QUEUE_MAX_READY_AGE_SEC}s
+Post-restart result: not restarted (cooldown, DRY_RUN or no worker container)"
         fi
       fi
     done <<< "$q_rows"
@@ -859,10 +1046,46 @@ restart_dependent() {
   return 0
 }
 
+probe_rc_desc() {
+  case "$1" in
+    0) printf 'connect ok';;
+    1) printf 'connect failed';;
+    2) printf 'name unresolvable';;
+    3) printf 'no probe tooling';;
+    4) printf 'worker-progress check failed';;
+    *) printf 'unknown';;
+  esac
+}
+
+warn_handled_db_error() {
+  # $1=dep $2=progress summary. Handled per-task DB error (deadlock /
+  # serialization failure) or a DB error followed by later successful work:
+  # no restart (AC-B1), but log a WARN line and send a low-priority notice
+  # once per distinct error (keyed by the error's log timestamp + text).
+  local c="$1" prog="$2" note key warn_check key_file last_key=""
+  note="$(printf '%s' "$prog" | grep -oE '(handled_db_error|db_error_recovered)=[^)]*' | head -n 1)"
+  [[ -n "$note" ]] || return 0
+  log "WARN check=dep-$(safe_name "$c") dep=${c}: DB error seen but worker not restarted (${note})"
+  warn_check="warn-dep-$(safe_name "$c")"
+  key="$(printf '%s' "$note" | sed -E 's/,(later_success|deferred_to|grace)=.*$//')"
+  key_file="${STATE_DIR}/${warn_check}.key"
+  [[ -f "$key_file" ]] && last_key="$(cat "$key_file" 2>/dev/null)"
+  [[ "$key" == "$last_key" ]] && return 0
+  if send_alert "$warn_check" "WARN handled DB error" \
+    "${c} on $(hostname) logged a database error that the watchdog does NOT treat as a stale connection, so the container was not restarted (low priority; no action needed unless this repeats).
+
+Observed: ${note}
+Progress check: ${prog}
+
+Handled per-task errors (deadlock, serialization failure) abort one task; the worker keeps processing. If no later task succeeds, the SQL ready-backlog check (progress-task-queues) or the ${HANDLED_DB_ERROR_GRACE_SEC}s no-progress grace still restarts the worker." "low"; then
+    printf '%s\n' "$key" > "$key_file"
+  fi
+}
+
 watch_pg() {
   # $1=coolify.resourceName label
-  local label="$1" pg pgname deps c dep_nets n nets pg_nets target host port rc
-  local dep_check target_pg prog_out
+  local label="$1" pg pgname deps c dep_nets n nets pg_nets target host port rc env_block
+  local dep_check target_pg prog_out dep_db pre_reason post_result
   pg="$(resolve_pg_container "$label")"
   if [[ -z "$pg" ]]; then
     log "FAIL pg=${label}: no container with label coolify.resourceName=${label}"
@@ -880,6 +1103,15 @@ watch_pg() {
   fi
   pg_nets="$(pg_container_networks "$pg")"
   log "OK pg=${label} container=${pg} name=${pgname} nets=[${pg_nets% }]"
+  LABEL_PG="$pg"
+  QUEUE_SQL_DB=""
+  if [[ "$PROGRESS_SQL_CHECKS" == "1" ]]; then
+    local label_db
+    label_db="$(pg_db_for_label "$label")"
+    if [[ "$(docker exec "$pg" psql -U "$PGUSER" -d "$label_db" -tAqc "SELECT to_regclass('public.django_tasks_database_dbtaskresult') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')" == "t" ]]; then
+      QUEUE_SQL_DB="$label_db"
+    fi
+  fi
 
   deps=""
   for c in $(docker ps --format '{{.Names}}' 2>/dev/null); do
@@ -903,7 +1135,9 @@ watch_pg() {
   for c in $deps; do
     dependent_is_retiring "$c" && continue
     dependent_is_young "$c" && continue
-    target="$(parse_db_target "$(dep_env_block "$c")")"
+    env_block="$(dep_env_block "$c")"
+    target="$(parse_db_target "$env_block")"
+    dep_db="$(parse_db_name "$env_block")"
     host="${target%% *}"; port="${target##* }"
     [[ -z "$port" ]] && port=5432
     dep_check="dep-$(safe_name "$c")"
@@ -925,10 +1159,11 @@ watch_pg() {
     fi
     dependent_is_retiring "$c" && continue
     if [[ "$rc" -eq 0 ]]; then
-      if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
+      if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port" "$dep_db")"; then
         dependent_is_retiring "$c" && continue
         log "OK check=${dep_check} dep=${c} host=${host}:${port} $(resolved_addrs "$c" "$host") ${prog_out}"
         mark_ok "$dep_check"
+        warn_handled_db_error "$c" "$prog_out"
         continue
       else
         rc=4
@@ -944,6 +1179,7 @@ watch_pg() {
     fi
     dependent_is_retiring "$c" && continue
     log "FAIL check=${dep_check} dep=${c} host=${host}:${port} rc=${rc} $(resolved_addrs "$c" "$host") ${prog_out}"
+    pre_reason="probe rc=${rc} ($(probe_rc_desc "$rc")), ${prog_out}"
     if [[ "$host" != "$pgname" && "$host" != "$pg" ]] && ! name_known_to_docker "$host" "$pg"; then
       # Stale NAME (PG redeployed under a new uuid) — restart cannot fix.
       dependent_is_retiring "$c" && continue
@@ -961,7 +1197,7 @@ No restart attempted (would not help)."
       probe_from_container "$c" "$host" "$port" && rc=0 || rc=$?
       dependent_is_retiring "$c" && continue
       if [[ "$rc" -eq 0 ]]; then
-        if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port")"; then
+        if prog_out="$(probe_worker_progress "$c" "$target_pg" "$port" "$dep_db")"; then
           rc=0
         else
           rc=4
@@ -969,16 +1205,25 @@ No restart attempted (would not help)."
       fi
       dependent_is_retiring "$c" && continue
       FAILED=1
+      post_result="probe rc=${rc} ($(probe_rc_desc "$rc")), ${prog_out}"
       if [[ "$rc" -eq 0 ]]; then
-        log "HEALED check=${dep_check} dep=${c}: connect+progress OK after restart (${prog_out})"
+        log "HEALED check=${dep_check} dep=${c}: connect+progress OK after restart (pre: ${pre_reason}; post: ${post_result})"
         send_alert "$dep_check" "AUTOHEALED" \
-          "${c} on $(hostname) had stale Postgres ${host}:${port} connectivity or worker-progress state (${prog_out}, cf. t1205u/t1218u).
+          "${c} on $(hostname) had stale Postgres ${host}:${port} connectivity or worker-progress state (cf. t1205u/t1218u).
 Auto-restarted the container; TCP connectivity and running-worker progress verified OK after restart.
+
+Pre-restart reason: ${pre_reason}
+Post-restart result: ${post_result}
+
 SES/SQS impact window: <1 min (watchdog cadence 1 min)."
       else
-        log "STILLFAIL check=${dep_check} dep=${c}: rc=${rc} after restart (${prog_out})"
+        log "STILLFAIL check=${dep_check} dep=${c}: rc=${rc} after restart (pre: ${pre_reason}; post: ${post_result})"
         send_alert "$dep_check" "FAIL" \
-          "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check and STILL fails after an auto-restart (probe rc=${rc}, ${prog_out}).
+          "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check and STILL fails after an auto-restart.
+
+Pre-restart reason: ${pre_reason}
+Post-restart result: ${post_result}
+
 PG '${pg}' itself is healthy (pg_isready ok). Check docker network / iptables / app logs."
       fi
     else
@@ -986,7 +1231,11 @@ PG '${pg}' itself is healthy (pg_isready ok). Check docker network / iptables / 
       dependent_is_retiring "$c" && continue
       FAILED=1
       send_alert "$dep_check" "FAIL" \
-        "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check (probe rc=${rc}, ${prog_out}); restart skipped (cooldown or DRY_RUN).
+        "${c} on $(hostname) failed Postgres ${host}:${port} connectivity or worker-progress check; restart skipped (cooldown or DRY_RUN).
+
+Pre-restart reason: ${pre_reason}
+Post-restart result: not restarted (cooldown or DRY_RUN)
+
 PG '${pg}' itself is healthy (pg_isready ok). If this repeats every cooldown, investigate manually."
     fi
   done

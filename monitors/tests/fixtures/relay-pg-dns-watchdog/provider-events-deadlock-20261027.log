@@ -1,0 +1,78 @@
+2026-10-27T10:43:04.528245585Z Task id=c62aaa62-cbbb-4305-b97e-1e996c332c0d path=mailing.tasks.process_ses_webhook_event state=RUNNING
+2026-10-27T10:43:04.542177263Z Task id=c62aaa62-cbbb-4305-b97e-1e996c332c0d path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL
+2026-10-27T10:43:05.551493718Z Task id=1e9dffa1-f969-49ad-a0e4-70a97d9bbfad path=mailing.tasks.process_ses_webhook_event state=RUNNING
+2026-10-27T10:43:05.575904122Z Task id=1e9dffa1-f969-49ad-a0e4-70a97d9bbfad path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL
+2026-10-27T10:43:06.585031313Z Task id=d3cf093c-e75e-40f9-baa8-ccf4f4125103 path=mailing.tasks.process_ses_webhook_event state=RUNNING
+2026-10-27T10:43:07.605925659Z Task id=d3cf093c-e75e-40f9-baa8-ccf4f4125103 path=mailing.tasks.process_ses_webhook_event state=FAILED
+2026-10-27T10:43:07.605982665Z Traceback (most recent call last):
+2026-10-27T10:43:07.605991959Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 105, in _execute
+2026-10-27T10:43:07.605995805Z     return self.cursor.execute(sql, params)
+2026-10-27T10:43:07.605998869Z            ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+2026-10-27T10:43:07.606001904Z psycopg2.errors.DeadlockDetected: deadlock detected
+2026-10-27T10:43:07.606004928Z DETAIL:  Process 638784 waits for ShareLock on transaction 395940; blocked by process 638915.
+2026-10-27T10:43:07.606007853Z Process 638915 waits for ShareLock on transaction 395946; blocked by process 638784.
+2026-10-27T10:43:07.606013541Z HINT:  See server log for query details.
+2026-10-27T10:43:07.606016476Z CONTEXT:  while locking tuple (682,153) in relation "contacts"
+2026-10-27T10:43:07.606019490Z 
+2026-10-27T10:43:07.606022385Z 
+2026-10-27T10:43:07.606025319Z The above exception was the direct cause of the following exception:
+2026-10-27T10:43:07.606028444Z 
+2026-10-27T10:43:07.606031348Z Traceback (most recent call last):
+2026-10-27T10:43:07.606034242Z   File "/app/.venv/lib/python3.13/site-packages/django_tasks_db/management/commands/db_worker.py", line 168, in run_task
+2026-10-27T10:43:07.606037377Z     return_value = task.call(*task_result.args, **task_result.kwargs)
+2026-10-27T10:43:07.606040301Z   File "/app/.venv/lib/python3.13/site-packages/django_tasks/base.py", line 165, in call
+2026-10-27T10:43:07.606043286Z     return self.func(*args, **kwargs)
+2026-10-27T10:43:07.606046300Z            ~~~~~~~~~^^^^^^^^^^^^^^^^^
+2026-10-27T10:43:07.606049305Z   File "/app/mailing/tasks.py", line 180, in process_ses_webhook_event
+2026-10-27T10:43:07.606052370Z     result = process_ses_webhook(normalize_ses_webhook_worker_payload(payload))
+2026-10-27T10:43:07.606055274Z   File "/app/mailing/services/ses_webhooks.py", line 519, in process_ses_webhook
+2026-10-27T10:43:07.606058228Z     source = correlate_ses_message(payload.get("ses_message_id", ""))
+2026-10-27T10:43:07.606061203Z   File "/app/mailing/services/ses_webhooks.py", line 548, in correlate_ses_message
+2026-10-27T10:43:07.606064167Z     return transactional_messages.first()
+2026-10-27T10:43:07.606067072Z            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+2026-10-27T10:43:07.606069986Z   File "/app/.venv/lib/python3.13/site-packages/django/db/models/query.py", line 1145, in first
+2026-10-27T10:43:07.606073211Z     for obj in queryset[:1]:
+2026-10-27T10:43:07.606091058Z                ~~~~~~~~^^^^
+2026-10-27T10:43:07.606093041Z   File "/app/.venv/lib/python3.13/site-packages/django/db/models/query.py", line 390, in __iter__
+2026-10-27T10:43:07.606094873Z     self._fetch_all()
+2026-10-27T10:43:07.606096576Z     ~~~~~~~~~~~~~~~^^
+2026-10-27T10:43:07.606098198Z   File "/app/.venv/lib/python3.13/site-packages/django/db/models/query.py", line 2000, in _fetch_all
+2026-10-27T10:43:07.606099951Z     self._result_cache = list(self._iterable_class(self))
+2026-10-27T10:43:07.606102645Z                          ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-10-27T10:43:07.606104438Z   File "/app/.venv/lib/python3.13/site-packages/django/db/models/query.py", line 95, in __iter__
+2026-10-27T10:43:07.606106220Z     results = compiler.execute_sql(
+2026-10-27T10:43:07.606107933Z         chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+2026-10-27T10:43:07.606109625Z     )
+2026-10-27T10:43:07.606111278Z   File "/app/.venv/lib/python3.13/site-packages/django/db/models/sql/compiler.py", line 1624, in execute_sql
+2026-10-27T10:43:07.606113031Z     cursor.execute(sql, params)
+2026-10-27T10:43:07.606114663Z     ~~~~~~~~~~~~~~^^^^^^^^^^^^^
+2026-10-27T10:43:07.606116325Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 122, in execute
+2026-10-27T10:43:07.606118068Z     return super().execute(sql, params)
+2026-10-27T10:43:07.606119721Z            ~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+2026-10-27T10:43:07.606121483Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 79, in execute
+2026-10-27T10:43:07.606123186Z     return self._execute_with_wrappers(
+2026-10-27T10:43:07.606124818Z            ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+2026-10-27T10:43:07.606126461Z         sql, params, many=False, executor=self._execute
+2026-10-27T10:43:07.606128143Z         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-10-27T10:43:07.606129776Z     )
+2026-10-27T10:43:07.606131388Z     ^
+2026-10-27T10:43:07.606133010Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 92, in _execute_with_wrappers
+2026-10-27T10:43:07.606134753Z     return executor(sql, params, many, context)
+2026-10-27T10:43:07.606136486Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 100, in _execute
+2026-10-27T10:43:07.606138198Z     with self.db.wrap_database_errors:
+2026-10-27T10:43:07.606139851Z          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-10-27T10:43:07.606141563Z   File "/app/.venv/lib/python3.13/site-packages/django/db/utils.py", line 94, in __exit__
+2026-10-27T10:43:07.606143256Z     raise dj_exc_value.with_traceback(traceback) from exc_value
+2026-10-27T10:43:07.606144928Z   File "/app/.venv/lib/python3.13/site-packages/django/db/backends/utils.py", line 105, in _execute
+2026-10-27T10:43:07.606149976Z     return self.cursor.execute(sql, params)
+2026-10-27T10:43:07.606151819Z            ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+2026-10-27T10:43:07.606176816Z django.db.utils.OperationalError: deadlock detected
+2026-10-27T10:43:07.606200572Z DETAIL:  Process 638784 waits for ShareLock on transaction 395940; blocked by process 638915.
+2026-10-27T10:43:07.606218238Z Process 638915 waits for ShareLock on transaction 395946; blocked by process 638784.
+2026-10-27T10:43:07.606226711Z HINT:  See server log for query details.
+2026-10-27T10:43:07.606229726Z CONTEXT:  while locking tuple (682,153) in relation "contacts"
+2026-10-27T10:43:07.606231849Z 
+2026-10-27T10:43:18.649786247Z Task id=b43d19fb-8fcd-4d8b-b639-9c2a9acddd3c path=mailing.tasks.process_ses_webhook_event state=RUNNING
+2026-10-27T10:43:18.677489745Z Task id=b43d19fb-8fcd-4d8b-b639-9c2a9acddd3c path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL
+2026-10-27T10:43:22.697951342Z Task id=b84189ca-f4c2-422f-847d-217bc024f5f6 path=mailing.tasks.process_ses_webhook_event state=RUNNING
+2026-10-27T10:43:22.732319293Z Task id=b84189ca-f4c2-422f-847d-217bc024f5f6 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL

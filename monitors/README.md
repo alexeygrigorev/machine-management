@@ -199,10 +199,25 @@ watchdog now verifies all three layers before logging `ALL_OK`:
    - **SES ingress batch progress**: checks `ses-ingress` current-lifecycle
      logs and fails if the latest `received=R deleted=D failed=F` batch had
      `deleted=0 failed>0`.
-   - **Uncaught DB exception check**: checks background workers (`db_worker`,
-     `scheduler`, callbacks, imports) for `OperationalError` / `InterfaceError`
+   - **DB exception classification** (hub intake 4140f58a): checks background
+     workers (`db_worker`, `scheduler`, callbacks, imports) for DB exceptions
      after their latest `Starting ...` banner (catches `StatReloader` keeping
-     PID 1 alive after the worker loop dies).
+     PID 1 alive after the worker loop dies), ordered against the last
+     successful unit of work (`state=SUCCESSFUL`, or an ingress batch with
+     `deleted>=1`):
+     - connection-class (`InterfaceError`, connection refused/closed, could
+       not translate host name, server closed the connection, ...) or
+       unrecognised `OperationalError` **after** the last success -> restart;
+     - handled per-task errors (`DeadlockDetected` / `SerializationFailure`)
+       after the last success -> no restart; deferred to
+       `progress-task-queues` when that SQL check covers the worker's queue
+       and database, else restart only after `HANDLED_DB_ERROR_GRACE_SEC`
+       (default `300`s) without progress;
+     - any DB error followed by a later success -> no restart.
+     Each non-restart case logs `WARN check=dep-...` and sends one
+     low-priority mail (`WARN handled DB error`, `X-Priority: 5`,
+     `Importance: low`) per distinct error. App retry lines
+     (`... hit a transient DB error ...; retrying ...`) are ignored.
 3. **SQL task & heartbeat freshness (`check_pg_worker_progress`)**:
    - **`progress-scheduler-heartbeat`**: queries `relay_scheduler_heartbeat.ticked_at`
      (expected every 15s; fails and auto-restarts `scheduler-*` if age >
@@ -211,6 +226,11 @@ watchdog now verifies all three layers before logging `ALL_OK`:
      for due `READY` tasks (`run_after <= NOW()`) and fails/auto-restarts the
      matching queue worker (`provider-events-worker-*` or `worker-*`) if
      `oldest_ready` exceeds `TASK_QUEUE_MAX_READY_AGE_SEC` (default `180`s).
+     The restarted worker is the one whose `DATABASE_URL` uses the checked
+     database (relay and relay_dev share one Postgres).
+
+AUTOHEALED / FAIL mails carry `Pre-restart reason:` and `Post-restart result:`
+as separate lines, so a heal shows why the restart happened.
 
 ### Multi-label coverage (t1143u)
 

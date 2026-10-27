@@ -19,6 +19,12 @@
 #       task stuck > TASK_QUEUE_MAX_READY_AGE_SEC -> detected (progress-task-queues),
 #       restarts provider-events-worker-*, AUTOHEALED
 #   T9: Postgres self-check fails -> stands down (PG_STANDDOWN, rc=2), 0 restarts
+#   B1-*: DB error classification (hub intake 4140f58a, 2026-10-27 deadlock
+#       false positive): handled per-task errors followed by later SUCCESSFUL
+#       tasks do not restart (WARN + low-priority mail); connection-class
+#       errors after the last success still restart; retry lines don't count.
+#   B2-*: AUTOHEALED / FAIL mail bodies carry the pre-restart reason and the
+#       post-restart result as separate lines.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,7 +187,9 @@ case "${1:-}" in
         fi
         ;;
       *'.Config.Env'*)
-        if [[ "$target" != "$PG_NAME" ]]; then
+        if [[ "$MODE" == queue_stuck_devdb && "$target" == provider-events-worker-* ]]; then
+          echo "DATABASE_URL=postgres://relay_app:redacted@${PG_NAME}:5432/relay_dev"
+        elif [[ "$target" != "$PG_NAME" ]]; then
           echo "DATABASE_URL=postgres://relay_app:redacted@${PG_NAME}:5432/relay"
         fi
         ;;
@@ -198,6 +206,11 @@ case "${1:-}" in
     ;;
   logs)
     target="${!#}"
+    # Per-test log fixture (AC-B1): served until the container is restarted.
+    if [[ -f "${STUB_STATE_DIR}/logs-${target}" ]] && ! was_restarted "$target"; then
+      cat "${STUB_STATE_DIR}/logs-${target}"
+      exit 0
+    fi
     if [[ "$target" == "ses-ingress-fjnzwomg" ]]; then
       if [[ "$MODE" == "ses_fail" ]]; then
         printf '%s\n' \
@@ -322,13 +335,13 @@ case "${1:-}" in
         exit 0
       fi
       if [[ "$sql" == *"GROUP BY queue_name"* ]]; then
-        if [[ "$MODE" == "queue_stuck" || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
+        if [[ "$MODE" == queue_stuck* || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
           echo "provider-events|4|360"
         fi
         exit 0
       fi
       if [[ "$sql" == *"AND queue_name ="* ]]; then
-        if [[ "$MODE" == "queue_stuck" || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
+        if [[ "$MODE" == queue_stuck* || "$MODE" == "young_sql" ]] && ! was_restarted "provider-events-worker-fjnzwomg"; then
           echo "360"
         else
           echo "0"
@@ -631,6 +644,201 @@ for mode in retiring_label retiring_compose retiring_stopped retiring_stopping r
       else fail "$mode (rc=$rc): $out"; fi;;
   esac
 done
+
+
+# ======================================================================
+# AC-B1 / AC-B2 (hub intake 4140f58a): DB error classification + mail body.
+# Fixture: real provider-events-worker log, 2026-10-27 10:43:04-10:43:22Z
+# (deadlock in correlate_ses_message, then two SUCCESSFUL tasks).
+# ======================================================================
+FIXTURE="$HERE/fixtures/relay-pg-dns-watchdog/provider-events-deadlock-20261027.log"
+PE=provider-events-worker-fjnzwomg
+CONN_ERR='django.db.utils.OperationalError: could not translate host name "mqimefrti7ratmaliirnikov" to address: Name or service not known'
+ts_ago() { date -u -d "$1 seconds ago" '+%Y-%m-%dT%H:%M:%S.000000000Z'; }
+
+# run_b <name> <log-file-for-PE> [extra env...] -> sets B_OUT B_RC B_DIR
+run_b() {
+  local name="$1" logf="$2"; shift 2
+  B_DIR="$TMP/state-b-$name"
+  mkdir -p "$B_DIR/var"
+  echo healthy > "$B_DIR/mode"
+  [[ -n "$logf" ]] && cp "$logf" "$B_DIR/logs-$PE"
+  set +e
+  B_OUT="$(env STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent \
+    STATE_DIR="$B_DIR/var" LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 \
+    DNS_RECHECK_WAIT_SEC=0 ALERT_TO=test@example.com "$@" \
+    PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+  B_RC=$?
+  set -e
+}
+b_mail() { cat "$B_DIR/mail/sent.log" 2>/dev/null || true; }
+
+# B1-a: the incident. Deadlock, then later SUCCESSFUL tasks -> no restart,
+# WARN log line, one low-priority mail; a second run does not re-mail.
+run_b deadlock_then_success "$FIXTURE"
+if [[ "$B_RC" == 0 && "$B_OUT" == *ALL_OK* && ! -f "$B_DIR/restarted-$PE" \
+  && "$B_OUT" != *"RESTART dep=$PE"* && "$B_OUT" != *"FAIL check=dep-$PE"* \
+  && "$B_OUT" == *"WARN check=dep-$PE dep=$PE: DB error seen but worker not restarted (db_error_recovered=handled:django.db.utils.OperationalError:_deadlock_detected"* \
+  && "$B_OUT" == *"later_success=2026-10-27T10:43:22.732319293Z"* \
+  && "$B_OUT" == *"ALERT check=warn-dep-$PE subject='[relay-pg-dns-watchdog] WARN handled DB error (warn-dep-$PE)' priority=low"* ]] \
+  && b_mail | grep -q '^X-Priority: 5' && b_mail | grep -q '^Importance: low' \
+  && b_mail | grep -q 'deadlock_detected'; then
+  pass "B1-a real 2026-10-27 deadlock + later SUCCESSFUL tasks: no restart, WARN line, low-priority mail"
+else
+  fail "B1-a deadlock then success (rc=$B_RC) -- $B_OUT -- mail: $(b_mail)"
+fi
+mails_before="$(grep -c '^Subject:' "$B_DIR/mail/sent.log" 2>/dev/null || echo 0)"
+set +e
+out2="$(env STUB_STATE_DIR="$B_DIR" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent \
+  STATE_DIR="$B_DIR/var" LOCK_FILE="$B_DIR/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+mails_after="$(grep -c '^Subject:' "$B_DIR/mail/sent.log" 2>/dev/null || echo 0)"
+if [[ "$mails_before" == 1 && "$mails_after" == 1 && "$out2" == *"WARN check=dep-$PE"* && "$out2" == *ALL_OK* ]]; then
+  pass "B1-a2 same handled error on the next run: WARN logged again, no duplicate mail"
+else
+  fail "B1-a2 dedupe (before=$mails_before after=$mails_after) -- $out2"
+fi
+
+# B1-b: deadlock with no later task, worker covered by the SQL queue check ->
+# no restart; deferred to progress-task-queues; still alerts (low priority).
+head -n 74 "$FIXTURE" > "$TMP/deadlock-only.log"
+run_b deadlock_covered "$TMP/deadlock-only.log"
+if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" \
+  && "$B_OUT" == *"handled_db_error=handled:django.db.utils.OperationalError:_deadlock_detected"*"later_success=none,deferred_to=progress-task-queues"* \
+  && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
+  pass "B1-b deadlock with no later task on a queue-checked worker: no restart, deferred to SQL queue check, low-priority mail"
+else
+  fail "B1-b deadlock covered (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-c: same, SQL checks off, error recent -> grace, no restart, still WARN.
+{ echo "$(ts_ago 400) Starting worker worker_id=x queues=provider-events"
+  echo "$(ts_ago 60) psycopg2.errors.SerializationFailure: could not serialize access due to concurrent update"
+  echo "$(ts_ago 60) django.db.utils.OperationalError: could not serialize access due to concurrent update"; } > "$TMP/serial-recent.log"
+run_b serial_recent "$TMP/serial-recent.log" PROGRESS_SQL_CHECKS=0
+if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"later_success=none,grace="* \
+  && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
+  pass "B1-c SerializationFailure, no later task, no queue check, within grace: no restart, WARN"
+else
+  fail "B1-c serialization recent (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-d: handled error, no queue check, no progress beyond grace -> no-progress
+# restart. Also B2: mail separates pre-restart reason and post-restart result.
+run_b deadlock_stale "$TMP/deadlock-only.log" PROGRESS_SQL_CHECKS=0
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" \
+  && "$B_OUT" == *"FAIL check=dep-$PE"*"progress=FAIL(handled_db_error_no_progress:"* \
+  && "$B_OUT" == *"HEALED check=dep-$PE"* ]] \
+  && b_mail | grep -q '^Pre-restart reason: probe rc=4 (worker-progress check failed), progress=FAIL(handled_db_error_no_progress:' \
+  && b_mail | grep -q '^Post-restart result: probe rc=0 (connect ok), progress=ok('; then
+  pass "B1-d handled error with no progress past grace (no queue check) still restarts; B2 mail has pre/post lines"
+else
+  fail "B1-d deadlock stale (rc=$B_RC) -- $B_OUT -- mail: $(b_mail)"
+fi
+
+# B1-e: connection-class error AFTER the last SUCCESSFUL task -> restart.
+# B2: AUTOHEALED body shows the pre-restart reason, not only progress=ok.
+{ cat "$FIXTURE"; echo "2026-10-27T10:43:25.000000000Z $CONN_ERR"; } > "$TMP/conn-after.log"
+run_b conn_after_success "$TMP/conn-after.log"
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" \
+  && "$B_OUT" == *"FAIL check=dep-$PE"*"worker_db_error_since_start:django.db.utils.OperationalError:_could_not_translate_host_name"* \
+  && "$B_OUT" == *"HEALED check=dep-$PE"* ]] \
+  && b_mail | grep -q 'AUTOHEALED' \
+  && b_mail | grep -q '^Pre-restart reason: probe rc=4 (worker-progress check failed), progress=FAIL(worker_db_error_since_start:django.db.utils.OperationalError:_could_not_translate' \
+  && b_mail | grep -q '^Post-restart result: probe rc=0 (connect ok), progress=ok(peers=1,logs=clean)'; then
+  pass "B1-e connection-class error after last SUCCESSFUL task restarts; B2 AUTOHEALED mail has pre-restart reason + post-restart result"
+else
+  fail "B1-e conn after success (rc=$B_RC) -- $B_OUT -- mail: $(b_mail)"
+fi
+
+# B1-f: InterfaceError after success -> restart (connection class).
+{ cat "$FIXTURE"; echo "2026-10-27T10:43:25.000000000Z django.db.utils.InterfaceError: connection already closed"; } > "$TMP/iface.log"
+run_b interface_after_success "$TMP/iface.log"
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"worker_db_error_since_start:django.db.utils.InterfaceError"* ]]; then
+  pass "B1-f InterfaceError after last SUCCESSFUL task restarts"
+else
+  fail "B1-f InterfaceError (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-g: deadlock -> success -> connection refused (no later success): the
+# handled deadlock must not mask the later connection failure.
+{ cat "$FIXTURE"; echo "2026-10-27T10:43:26.000000000Z psycopg2.OperationalError: connection to server at \"mqimefrti7ratmaliirnikov\" (10.0.1.2), port 5432 failed: Connection refused"; } > "$TMP/mixed.log"
+run_b mixed "$TMP/mixed.log"
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"worker_db_error_since_start:psycopg2.OperationalError:_connection_to_server"* ]]; then
+  pass "B1-g deadlock + success + later connection refused still restarts"
+else
+  fail "B1-g mixed (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-h: relay transient-DB retry lines (db_retry.run_with_db_retry format)
+# and a retried connection error followed by SUCCESSFUL tasks -> no restart.
+{ echo "2026-10-27T10:50:00.000000000Z Task id=11111111-1111-4111-8111-111111111111 path=mailing.tasks.process_ses_webhook_event state=RUNNING"
+  echo "2026-10-27T10:50:00.100000000Z process_ses_webhook_event hit a transient DB error (attempt 1/3); retrying in 0.5s: could not translate host name \"mqimefrti7ratmaliirnikov\" to address: Name or service not known"
+  echo "2026-10-27T10:50:00.700000000Z process_ses_webhook_event hit a transient DB error (attempt 2/3); retrying in 1.0s: server closed the connection unexpectedly"
+  echo "2026-10-27T10:50:01.800000000Z Task id=11111111-1111-4111-8111-111111111111 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL"; } > "$TMP/retry-ok.log"
+run_b retry_lines "$TMP/retry-ok.log"
+if [[ "$B_RC" == 0 && "$B_OUT" == *ALL_OK* && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" != *"WARN check=dep-$PE"* \
+  && "$B_OUT" == *"OK check=dep-$PE"*"logs=clean"* ]]; then
+  pass "B1-h relay 'retrying transient DB error' lines are not failures (no restart, no WARN)"
+else
+  fail "B1-h retry lines (rc=$B_RC) -- $B_OUT"
+fi
+{ echo "2026-10-27T10:50:00.000000000Z Task id=22222222-2222-4222-8222-222222222222 path=mailing.tasks.process_ses_webhook_event state=FAILED"
+  echo "2026-10-27T10:50:00.000000000Z $CONN_ERR"
+  echo "2026-10-27T10:50:05.000000000Z Task id=33333333-3333-4333-8333-333333333333 path=mailing.tasks.process_ses_webhook_event state=SUCCESSFUL"; } > "$TMP/conn-then-ok.log"
+run_b conn_then_success "$TMP/conn-then-ok.log"
+if [[ "$B_RC" == 0 && ! -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"db_error_recovered=conn:"* \
+  && "$B_OUT" == *"ALERT check=warn-dep-$PE"*"priority=low"* ]]; then
+  pass "B1-i connection error followed by later SUCCESSFUL task: no restart, WARN + low-priority mail"
+else
+  fail "B1-i conn then success (rc=$B_RC) -- $B_OUT"
+fi
+
+# B1-j: an unrecognised OperationalError after the last success keeps the
+# conservative restart (only deadlock/serialization are downgraded).
+{ cat "$FIXTURE"; echo "2026-10-27T10:43:25.000000000Z django.db.utils.OperationalError: could not open file \"base/16384/2619\": Permission denied"; } > "$TMP/other.log"
+run_b other_after_success "$TMP/other.log"
+if [[ "$B_RC" == 1 && -f "$B_DIR/restarted-$PE" && "$B_OUT" == *"worker_db_error_since_start:"* ]]; then
+  pass "B1-j unrecognised OperationalError after last success still restarts"
+else
+  fail "B1-j other error (rc=$B_RC) -- $B_OUT"
+fi
+
+# B2-k: queue-stuck and heartbeat AUTOHEALED mails carry pre/post lines.
+for mode in queue_stuck hb_stale; do
+  sdir="$TMP/state-b2-$mode"; mkdir -p "$sdir/var"; echo "$mode" > "$sdir/mode"
+  set +e
+  STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+    LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+    PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >/dev/null 2>&1
+  set -e
+  if grep -q 'AUTOHEALED' "$sdir/mail/sent.log" 2>/dev/null \
+    && grep -qE '^Pre-restart reason: (4 due READY task\(s\), oldest_ready=360s|heartbeat age=420s)' "$sdir/mail/sent.log" \
+    && grep -qE '^Post-restart result: (oldest_ready=0s|heartbeat age=8s) \(ok\)' "$sdir/mail/sent.log"; then
+    pass "B2-k $mode AUTOHEALED mail has separate pre-restart reason and post-restart result"
+  else
+    fail "B2-k $mode mail -- $(cat "$sdir/mail/sent.log" 2>/dev/null)"
+  fi
+done
+
+# B1-m: stuck relay queue must not restart a worker that uses another
+# database on the same Postgres (relay_dev): alert, no wrong restart.
+sdir="$TMP/state-b-devdb"; mkdir -p "$sdir/var"; echo queue_stuck_devdb > "$sdir/mode"
+set +e
+out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 ALERT_TO=test@example.com \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out" == *"FAIL check=progress-task-queues"*"worker=none"* && ! -f "$sdir/restarted-$PE" \
+  && "$out" == *"ALERT check=progress-task-queues"* ]]; then
+  pass "B1-m stuck relay queue does not restart the relay_dev worker; still alerts"
+else
+  fail "B1-m queue worker db match -- $out"
+fi
+
+# B1-l: real-failure classes unchanged (stale peer, older than PG, DNS miss,
+# queue stuck) are covered by T4, T5, dns_persistent and T8 above.
 
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]
