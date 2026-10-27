@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # DR escrow restore drill: decrypt one Coolify CP bundle + one acme bundle
-# using the passphrase from the SANDBOX SSM escrow copy (t1468u decision).
+# using the passphrase from the SANDBOX Secrets Manager escrow copy
+# (CFN stack dr-escrow, migrated 2026-10-27 from SSM /dr-escrow/*).
 #
-# Default passphrase source is AWS SSM Parameter Store (SANDBOX account
+# Default passphrase source is AWS Secrets Manager (SANDBOX account
 # 817685572750, eu-west-1):
-#   /dr-escrow/coolify-cp-backup-gpg-passphrase  (SecureString)
-#   /dr-escrow/acme-backup-gpg-passphrase        (SecureString)
-# fetched with --with-decryption into a 600 temp file that is shredded
+#   dr-escrow/coolify-cp-backup-gpg-passphrase
+#   dr-escrow/acme-backup-gpg-passphrase
+# fetched via get-secret-value into a 600 temp file that is shredded
 # after use. The Hetzner operator file is NOT read unless the caller
 # passes --cp-pass-file / --acme-pass-file explicitly (Hetzner-copy test).
 #
@@ -17,8 +18,8 @@
 # Usage:
 #   dr-escrow-restore-drill.sh --cp-bundle <file.tar.gz.gpg> --acme-bundle <file.json.gpg>
 #     [--region eu-west-1]
-#     [--cp-param /dr-escrow/coolify-cp-backup-gpg-passphrase]
-#     [--acme-param /dr-escrow/acme-backup-gpg-passphrase]
+#     [--cp-secret dr-escrow/coolify-cp-backup-gpg-passphrase]
+#     [--acme-secret dr-escrow/acme-backup-gpg-passphrase]
 #     [--cp-pass-file ~/tmp/secrets/coolify-cp-backup.pass]       # Hetzner-copy test only
 #     [--acme-pass-file ~/.secrets/acme-backup-gpg.pass]          # Hetzner-copy test only
 #
@@ -30,8 +31,8 @@ umask 077
 
 CP_BUNDLE=""; ACME_BUNDLE=""
 REGION="${DR_ESCROW_REGION:-eu-west-1}"
-CP_PARAM="${DR_ESCROW_CP_PARAM:-/dr-escrow/coolify-cp-backup-gpg-passphrase}"
-ACME_PARAM="${DR_ESCROW_ACME_PARAM:-/dr-escrow/acme-backup-gpg-passphrase}"
+CP_SECRET="${DR_ESCROW_CP_SECRET:-${DR_ESCROW_CP_PARAM:-dr-escrow/coolify-cp-backup-gpg-passphrase}}"
+ACME_SECRET="${DR_ESCROW_ACME_SECRET:-${DR_ESCROW_ACME_PARAM:-dr-escrow/acme-backup-gpg-passphrase}}"
 CP_PASS_FILE=""; ACME_PASS_FILE=""
 
 while [[ $# -gt 0 ]]; do
@@ -39,8 +40,8 @@ while [[ $# -gt 0 ]]; do
     --cp-bundle) CP_BUNDLE="${2:-}"; [[ -n "$CP_BUNDLE" ]] || { echo "missing value for --cp-bundle" >&2; exit 2; }; shift 2;;
     --acme-bundle) ACME_BUNDLE="${2:-}"; [[ -n "$ACME_BUNDLE" ]] || { echo "missing value for --acme-bundle" >&2; exit 2; }; shift 2;;
     --region) REGION="${2:-}"; [[ -n "$REGION" ]] || { echo "missing value for --region" >&2; exit 2; }; shift 2;;
-    --cp-param) CP_PARAM="${2:-}"; [[ -n "$CP_PARAM" ]] || { echo "missing value for --cp-param" >&2; exit 2; }; shift 2;;
-    --acme-param) ACME_PARAM="${2:-}"; [[ -n "$ACME_PARAM" ]] || { echo "missing value for --acme-param" >&2; exit 2; }; shift 2;;
+    --cp-secret|--cp-param) CP_SECRET="${2:-}"; [[ -n "$CP_SECRET" ]] || { echo "missing value for --cp-secret" >&2; exit 2; }; shift 2;;
+    --acme-secret|--acme-param) ACME_SECRET="${2:-}"; [[ -n "$ACME_SECRET" ]] || { echo "missing value for --acme-secret" >&2; exit 2; }; shift 2;;
     --cp-pass-file) CP_PASS_FILE="${2:-}"; [[ -n "$CP_PASS_FILE" ]] || { echo "missing value for --cp-pass-file" >&2; exit 2; }; shift 2;;
     --acme-pass-file) ACME_PASS_FILE="${2:-}"; [[ -n "$ACME_PASS_FILE" ]] || { echo "missing value for --acme-pass-file" >&2; exit 2; }; shift 2;;
     -h|--help) sed -n '2,20p' "$0"; exit 0;;
@@ -60,7 +61,7 @@ command -v gpg >/dev/null 2>&1 || fail "missing required binary: gpg"
 command -v tar >/dev/null 2>&1 || fail "missing required binary: tar"
 command -v python3 >/dev/null 2>&1 || fail "missing required binary: python3"
 if [[ -z "$CP_PASS_FILE" || -z "$ACME_PASS_FILE" ]]; then
-  command -v aws >/dev/null 2>&1 || fail "missing required binary: aws (SSM escrow mode)"
+  command -v aws >/dev/null 2>&1 || fail "missing required binary: aws (Secrets Manager escrow mode)"
 fi
 
 WORKDIR="$(mktemp -d /tmp/dr-escrow-drill-XXXXXX)"
@@ -71,28 +72,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Resolve a passphrase to a 600 file: explicit file (Hetzner test) or SSM escrow.
+# Resolve a passphrase to a 600 file: explicit file (Hetzner test) or Secrets Manager escrow.
 # Prints the path; the VALUE never touches argv, logs or reports.
-resolve_pass() { # $1 = label, $2 = file-override, $3 = ssm-param-name
+# Legacy SSM names starting with '/' are still honored via ssm get-parameter
+# (old /dr-escrow/* params left in place until Alexey OKs deletion).
+resolve_pass() { # $1 = label, $2 = file-override, $3 = secret-id (or legacy /ssm/param)
   local label="$1" file="$2" param="$3"
   local dest="$WORKDIR/${label}.pass"
   if [[ -n "$file" ]]; then
     [[ -f "$file" ]] || fail "$label: pass file missing: $file"
     cp -a "$file" "$dest"; chmod 600 "$dest"
     log "$label passphrase source: file (Hetzner-copy test)" >&2
-  else
+  elif [[ "$param" == /* ]]; then
     aws ssm get-parameter --name "$param" --with-decryption \
       --region "$REGION" --query "Parameter.Value" --output text >"$dest" 2>"$WORKDIR/${label}.ssm.err" \
       || fail "$label: SSM fetch failed ($param): $(tail -1 "$WORKDIR/${label}.ssm.err")"
     chmod 600 "$dest"
     [[ -s "$dest" ]] || fail "$label: SSM returned empty value ($param)"
-    log "$label passphrase source: ssm:$param (region $REGION)" >&2
+    log "$label passphrase source: ssm:$param (region $REGION, legacy)" >&2
+  else
+    aws secretsmanager get-secret-value --secret-id "$param" \
+      --region "$REGION" --query "SecretString" --output text >"$dest" 2>"$WORKDIR/${label}.sm.err" \
+      || fail "$label: Secrets Manager fetch failed ($param): $(tail -1 "$WORKDIR/${label}.sm.err")"
+    chmod 600 "$dest"
+    [[ -s "$dest" ]] || fail "$label: Secrets Manager returned empty value ($param)"
+    log "$label passphrase source: secretsmanager:$param (region $REGION)" >&2
   fi
   printf '%s' "$dest"
 }
 
-CP_PASS="$(resolve_pass cp "$CP_PASS_FILE" "$CP_PARAM")"
-ACME_PASS="$(resolve_pass acme "$ACME_PASS_FILE" "$ACME_PARAM")"
+CP_PASS="$(resolve_pass cp "$CP_PASS_FILE" "$CP_SECRET")"
+ACME_PASS="$(resolve_pass acme "$ACME_PASS_FILE" "$ACME_SECRET")"
 
 # ---- CP bundle: decrypt + verify filenames only ----
 log "cp decrypt start: $CP_BUNDLE"

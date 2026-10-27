@@ -202,25 +202,28 @@ The passphrase lives in `/etc/coolify-cp-backup.pass` (600) on the nodes and
 the operator box (`~/tmp/secrets/` + `~/.secrets/`). Off-host escrows (names
 only, never values in git): AWS Secrets Manager, MAIN account, eu-west-1,
 secret `dr/coolify-cp-backup-gpg-passphrase` (2026-10-24, t1378u; decrypt of
-the latest contabo-a/b bundles verified with the escrowed copy) AND AWS SSM
-Parameter Store, SANDBOX account 817685572750, eu-west-1, SecureString
-`/dr-escrow/coolify-cp-backup-gpg-passphrase` (2026-10-26, t1468u decision;
-decrypt of the 2026-10-26 contabo-a bundle verified with the escrowed copy).
-The ACME edge-tls passphrase is escrowed in `dr/acme-backup-gpg-passphrase`
-(MAIN Secrets Manager) and `/dr-escrow/acme-backup-gpg-passphrase` (SANDBOX
-SSM SecureString). S3 retention: 30 d lifecycle (`coolify-control-plane-30d`); local
-copies 7 d.
+the latest contabo-a/b bundles verified with the escrowed copy) AND AWS
+Secrets Manager, SANDBOX account 817685572750, eu-west-1, secrets
+`dr-escrow/coolify-cp-backup-gpg-passphrase` and
+`dr-escrow/acme-backup-gpg-passphrase` (CFN stack `dr-escrow`, migrated
+2026-10-27 from SSM `/dr-escrow/*` SecureString; old SSM params left in place
+until Alexey OKs deletion). The ACME edge-tls passphrase is escrowed in
+`dr/acme-backup-gpg-passphrase` (MAIN Secrets Manager) and
+`dr-escrow/acme-backup-gpg-passphrase` (SANDBOX Secrets Manager). S3
+retention: 30 d lifecycle (`coolify-control-plane-30d`); local copies 7 d.
 
-Escrow-copy restore drill (passphrase from SANDBOX SSM, never the Hetzner file):
+Escrow-copy restore drill (passphrase from SANDBOX Secrets Manager, never the Hetzner file):
 
 ```bash
 ./contingency/dr-escrow-restore-drill.sh \
   --cp-bundle <coolify-cp-bundle-...tar.gz.gpg> --acme-bundle <acme-...json.gpg>
-# → fetches both passphrases from SSM /dr-escrow/* (SecureString), decrypts,
+# → fetches both passphrases from Secrets Manager dr-escrow/*, decrypts,
 #   verifies cp filenames (coolify.env + ssh-keys/) and the acme letsencrypt
 #   block (counts only), prints DRILL_OK. Use --cp-pass-file/--acme-pass-file
-#   only for the Hetzner-copy script test. Region/param names overridable via
-#   --region/--cp-param/--acme-param (env: DR_ESCROW_REGION/_CP_PARAM/_ACME_PARAM).
+#   only for the Hetzner-copy script test. Region/secret names overridable via
+#   --region/--cp-secret/--acme-secret (env: DR_ESCROW_REGION/_CP_SECRET/_ACME_SECRET;
+#   legacy --cp-param/--acme-param and DR_ESCROW_CP_PARAM/_ACME_PARAM still accepted,
+#   including old /dr-escrow/* SSM names).
 ```
 
 Isolated restore drill (operator box only, never on a CP host —
