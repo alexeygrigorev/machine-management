@@ -106,7 +106,8 @@ after the 02:30 pg dumps and 03:30 CP bundles) and:
 
 1. `aws s3 sync` (no `--delete`) `coolify/postgres/` + `coolify/control-plane/`
    → `~/storagebox/backups/s3/…` (AWS creds via `AWS_PROFILE`, default
-   `main-temp` — read-only use, no rotation);
+   `storagebox-mirror-reader` — the dedicated READ-ONLY IAM principal, see
+   `backups/storagebox-mirror-reader-iam.tf`; `main-temp` is FORBIDDEN);
 2. `edge/acme-backup.sh` — fetches Traefik `acme.json` from both Contabo
    hosts, stores GPG-symmetric-encrypted (`~/.secrets/acme-backup-gpg.pass`,
    600, escrowed in Secrets Manager `dr/acme-backup-gpg-passphrase`) decrypt-verified copies under
@@ -117,9 +118,14 @@ after the 02:30 pg dumps and 03:30 CP bundles) and:
    `s3/.last-sync`.
 
 Install: `sudo ./backups/install-storagebox-sync.sh` (copies 3 scripts to
-`/usr/local/sbin`, never touches creds). Proof is the log tail
+`/usr/local/sbin`, creates `~/.local/state/storagebox-sync/` log dir owned
+by alexey — the old `/var/log` redirect failed because `/var/log` is
+root-owned; see t1553u). Proof is the log tail
 (`ALL_DONE s3-mirror + edge-tls + prune`) + `s3/.last-sync`, not just the
 installed cron — see the t1143u backup-copies report for a verified run.
+Staleness dead-man: `monitors/storagebox-staleness-check.sh` (36h, pages
+`alexey@datatalks.club,dev@dtcdev.click` via the `alerts` msmtp account);
+install with `./monitors/install-storagebox-staleness-check.sh`.
 
 ## Restore pointers
 

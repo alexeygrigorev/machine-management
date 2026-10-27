@@ -17,11 +17,18 @@
 # Freshness marker: $STORAGEBOX_ROOT/s3/.last-sync (UTC) on success.
 #
 # Secrets: NEVER in git. AWS creds come from the standard chain
-# (AWS_PROFILE, default main-temp — the read-capable operator profile);
+# (AWS_PROFILE, default storagebox-mirror-reader — the dedicated
+# READ-ONLY IAM principal scoped to s3://<bucket>/coolify/* Get/List only;
+# see backups/storagebox-mirror-reader-iam.tf). main-temp is FORBIDDEN here
+# (Hub session rules: no static main-account key for this job).
 # the acme GPG passphrase lives in ~/.secrets/ (see edge/acme-backup.sh).
 set -euo pipefail
 
-export AWS_PROFILE="${AWS_PROFILE:-main-temp}"
+export AWS_PROFILE="${AWS_PROFILE:-${STORAGEBOX_AWS_PROFILE:-storagebox-mirror-reader}}"
+if [[ "${AWS_PROFILE}" == "main-temp" ]]; then
+  echo "ERROR: AWS_PROFILE=main-temp is forbidden for storagebox-sync (use the dedicated storagebox-mirror-reader credential)" >&2
+  exit 2
+fi
 S3_BUCKET="${S3_BUCKET:-dtc-coolify-backups-387546586013}"
 STORAGEBOX_ROOT="${STORAGEBOX_ROOT:-$HOME/storagebox/backups}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

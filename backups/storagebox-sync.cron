@@ -8,9 +8,13 @@
 # which copies the scripts to /usr/local/sbin and this file to
 # /etc/cron.d/storagebox-backup-sync on the Hetzner operator box.
 #
-# Manual run: sudo /usr/local/sbin/storagebox-backup-sync.sh
-# (reads AWS creds via AWS_PROFILE=main-temp default; acme GPG passphrase
+# Manual run: sudo -u alexey /usr/local/sbin/storagebox-backup-sync.sh
+# (reads AWS creds via AWS_PROFILE=storagebox-mirror-reader default, the
+# dedicated read-only IAM principal; acme GPG passphrase
 #  from ~/.secrets/acme-backup-gpg.pass of the cron user).
+# Log: ~/.local/state/storagebox-sync/storagebox-backup-sync.log (cron user
+# alexey owns it; /var/log is root-owned and the old >> /var/log redirect
+# silently broke the job — see t1553u).
 
 TZ=Europe/Berlin
-30 4 * * * alexey /usr/local/sbin/storagebox-backup-sync.sh >> /var/log/storagebox-backup-sync.log 2>&1
+30 4 * * * alexey /usr/local/sbin/storagebox-backup-sync.sh >> /home/alexey/.local/state/storagebox-sync/storagebox-backup-sync.log 2>&1
