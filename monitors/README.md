@@ -171,6 +171,15 @@ Offline verification (stubbed mail and network):
 and `bash monitors/tests/test-alert-noise.sh` (public dedupe, immediate
 AISHL FAILs, recovery window).
 
+Latency alert state is checked with
+`python3 monitors/tests/test-latency-alert-state.py`. It exercises both monitors
+at the 600-second sustain boundary, the one-hour repeat boundary, and the
+2.5-second recovery boundary, including failed FAIL/RECOVERED deliveries.
+Only accepted mail advances delivery state; failed sends retry on the next run.
+A latency alert held by hysteresis keeps the monitor failing until recovery.
+HTTP errors from VictoriaMetrics are logged as failed ingestion, and temporary
+metric files are cleaned up even when pushing is disabled.
+
 
 ## relay-pg-dns-watchdog (t1207u / t1218u)
 

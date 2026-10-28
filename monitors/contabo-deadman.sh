@@ -113,6 +113,7 @@ send_alert() {
   # $1=check-name $2=subject-suffix $3=body [$4=optional to-csv override]
   # Drill path passes ALERT_OPS_TO so FORCE_FAIL never pages alexey@ (t1273u).
   local name="$1" subject="$2" body="$3"
+  SEND_ALERT_DELIVERED=0
   local to_override="${4:-}"
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status=""
@@ -126,6 +127,7 @@ send_alert() {
   if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
     local elapsed_min=$(( (NOW - last_alert) / 60 ))
     if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
+      SEND_ALERT_DELIVERED=1
       return 0
     fi
   fi
@@ -200,6 +202,7 @@ send_alert() {
     FAILED=1
     return 0
   fi
+  SEND_ALERT_DELIVERED=1
   printf 'STATUS=%s\nLAST_ALERT=%s\n' "$([ "$is_recovery" -eq 1 ] && echo OK || echo FAIL)" \
     "$([ "$is_recovery" -eq 1 ] && echo 0 || echo "$NOW")" > "$state_file"
 }
@@ -299,6 +302,7 @@ send_latency_alert() {
   local probe="$1" subject="$2" body="$3"
   local name="latency-${probe}"
   local state_file="${STATE_DIR}/${name}.state"
+  local STATUS="" LAST_ALERT=0 FIRST_EXCEED=0 FAIL_SINCE=0
   local last_alert=0 last_status="" first_exceed=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
@@ -315,6 +319,7 @@ send_latency_alert() {
     fi
   fi
   send_alert "$name" "$subject" "$body" "$LATENCY_ALERT_TO"
+  [[ "${SEND_ALERT_DELIVERED:-0}" == "1" ]] || return 0
   if [[ -f "$state_file" ]]; then
     if [[ "$is_recovery" -eq 1 ]]; then
       printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
@@ -329,6 +334,7 @@ send_latency_alert() {
 }
 
 LATENCY_METRICS_FILE=""
+trap '[[ -z "${LATENCY_METRICS_FILE:-}" ]] || rm -f -- "$LATENCY_METRICS_FILE"' EXIT
 latency_metrics_init() { LATENCY_METRICS_FILE="$(mktemp)" || return 1; }
 latency_metrics_emit() {
   local probe="$1" service="$2" uhost="$3" status="$4" ttfb="$5" total="$6"
@@ -343,12 +349,12 @@ latency_metrics_push() {
   [[ "${LATENCY_PUSH_ENABLED:-1}" == "1" ]] || return 0
   [[ -s "${LATENCY_METRICS_FILE:-}" ]] || return 0
   # Try direct push, else via SSH to contabo-a (Hetzner has no WG route).
-  if curl -sS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
+  if curl -fsS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
       "$LATENCY_PUSH_URL" -o /dev/null 2>/dev/null; then
     log "OK latency-push: direct push ok ($(grep -c '^probe_' "$LATENCY_METRICS_FILE") series)"
   elif [[ -n "${LATENCY_PUSH_SSH_HOST:-}" ]]; then
     if timeout "$LATENCY_PUSH_TIMEOUT" ssh -o BatchMode=yes -o ConnectTimeout=5 \
-        "$LATENCY_PUSH_SSH_HOST" "curl -sS --max-time 10 --data-binary @- '$LATENCY_PUSH_URL' -o /dev/null" \
+        "$LATENCY_PUSH_SSH_HOST" "curl -fsS --max-time 10 --data-binary @- '$LATENCY_PUSH_URL' -o /dev/null" \
         < "$LATENCY_METRICS_FILE" 2>/dev/null; then
       log "OK latency-push: pushed via SSH ${LATENCY_PUSH_SSH_HOST}"
     else
@@ -387,6 +393,7 @@ probe_latency() {
     latency_metrics_emit "$probe" "$service" "$uhost" "$status" "$ttfb" "$total"
   fi
   local state_file="${STATE_DIR}/latency-${probe}.state"
+  local STATUS="" LAST_ALERT=0 FIRST_EXCEED=0 FAIL_SINCE=0
   local last_status="" first_exceed=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
@@ -413,7 +420,8 @@ probe_latency() {
   else
     if [[ "$last_status" == "FAIL" && "$is_recovered" -eq 1 ]]; then
       send_latency_alert "$probe" "RECOVERED" "Slowness recovered (deadman vantage): probe '${probe}' TTFB ${ttfb}s."
-      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
+    elif [[ "$last_status" == "FAIL" ]]; then
+      FAILED=1
     elif [[ "$last_status" != "FAIL" ]]; then
       printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
     fi

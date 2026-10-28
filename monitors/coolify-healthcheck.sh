@@ -199,6 +199,7 @@ NOW="$(date +%s)"
 send_alert() {
   # $1=check-name $2=subject-suffix $3=body
   local name="$1" subject="$2" body="$3"
+  SEND_ALERT_DELIVERED=0
   local state_file="${STATE_DIR}/${name}.state"
   local last_alert=0 last_status=""
   if [[ -f "$state_file" ]]; then
@@ -212,6 +213,7 @@ send_alert() {
   if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
     local elapsed_min=$(( (NOW - last_alert) / 60 ))
     if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
+      SEND_ALERT_DELIVERED=1
       return 0  # still failing, recently alerted — dedupe
     fi
   fi
@@ -275,6 +277,12 @@ send_alert() {
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  if [[ "$sent" == "no" ]]; then
+    log "FAIL check=mail-${name}: delivery failed; retaining state for retry"
+    FAILED=1
+    return 0
+  fi
+  SEND_ALERT_DELIVERED=1
   if [[ "$is_recovery" -eq 1 ]]; then
     printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
   else
@@ -501,6 +509,7 @@ check_content() {
 # url_host is the URL authority only (no query string / PII). status is the
 # HTTP code or "000" on transport failure (values -1).
 LATENCY_METRICS_FILE=""
+trap '[[ -z "${LATENCY_METRICS_FILE:-}" ]] || rm -f -- "$LATENCY_METRICS_FILE"' EXIT
 latency_metrics_init() {
   LATENCY_METRICS_FILE="$(mktemp)" || return 1
 }
@@ -520,7 +529,7 @@ latency_metrics_push() {
   [[ "${LATENCY_PUSH_ENABLED:-1}" == "1" ]] || return 0
   [[ -s "${LATENCY_METRICS_FILE:-}" ]] || return 0
   [[ -n "${LATENCY_PUSH_URL:-}" ]] || { log "WARN latency-push: LATENCY_PUSH_URL empty, skipping"; return 0; }
-  if curl -sS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
+  if curl -fsS --max-time "$LATENCY_PUSH_TIMEOUT" --data-binary "@$LATENCY_METRICS_FILE" \
       "$LATENCY_PUSH_URL" -o /dev/null 2>/dev/null; then
     log "OK latency-push: pushed $(grep -c '^probe_' "$LATENCY_METRICS_FILE") series to VM"
   else
@@ -534,6 +543,7 @@ send_latency_alert() {
   local probe="$1" subject="$2" body="$3"
   local name="latency-${probe}-${LATENCY_STATE_SUFFIX}"
   local state_file="${STATE_DIR}/${name}.state"
+  local STATUS="" LAST_ALERT=0 FIRST_EXCEED=0 FAIL_SINCE=0
   local last_alert=0 last_status="" first_exceed=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
@@ -553,6 +563,7 @@ send_latency_alert() {
   ALERT_TO="$LATENCY_ALERT_TO"
   send_alert "$name" "$subject" "$body"
   ALERT_TO="$saved_to"
+  [[ "${SEND_ALERT_DELIVERED:-0}" == "1" ]] || return 0
   # send_alert wrote state under latency name with FAIL_SINCE; preserve FIRST_EXCEED.
   if [[ -f "$state_file" ]]; then
     if [[ "$is_recovery" -eq 1 ]]; then
@@ -591,6 +602,7 @@ probe_latency() {
   # Slowness leg (AC3): TTFB > warn sustained >= SUSTAIN_SEC -> FAIL (dev@ only).
   # Hysteresis: recover only when TTFB < recover threshold (transport fail = no recover).
   local state_file="${STATE_DIR}/latency-${probe}-${LATENCY_STATE_SUFFIX}.state"
+  local STATUS="" LAST_ALERT=0 FIRST_EXCEED=0 FAIL_SINCE=0
   local last_status="" first_exceed=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
@@ -620,9 +632,9 @@ probe_latency() {
     if [[ "$last_status" == "FAIL" && "$is_recovered" -eq 1 ]]; then
       log "OK latency probe=${probe}: TTFB ${ttfb}s recovered (< ${LATENCY_TTFB_RECOVER_SEC}s)"
       send_latency_alert "$probe" "RECOVERED" "Slowness recovered: probe '${probe}' (${service} ${uhost}) TTFB ${ttfb}s < ${LATENCY_TTFB_RECOVER_SEC}s."
-      printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
     elif [[ "$last_status" == "FAIL" ]]; then
-      log "OK latency probe=${probe}: TTFB ${ttfb}s below fire threshold but above recover (${LATENCY_TTFB_RECOVER_SEC}s) — holding FAIL (hysteresis)"
+      FAILED=1
+      log "WARN latency probe=${probe}: TTFB ${ttfb}s below fire threshold but above recover (${LATENCY_TTFB_RECOVER_SEC}s) — holding FAIL (hysteresis)"
     else
       printf 'STATUS=OK\nLAST_ALERT=0\nFIRST_EXCEED=0\n' > "$state_file"
     fi
