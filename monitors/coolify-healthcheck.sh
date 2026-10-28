@@ -15,7 +15,10 @@
 #   4. Content markers (CONTENT_CHECKS): 2xx/3xx plus a verbatim body marker.
 #   5. AISHL django_q (CHECK_AISL_Q=1, data host only): recurring task
 #      failures + worker progress. Dumps/WAL freshness, disk, and residual
-#      Created-container detection.
+#      Created-container detection. WAL freshness is idle-tolerant: a stale
+#      shipper timestamp is verified against pg_stat_archiver + spool before
+#      paging, so an idle DB is not a FAIL while a real archiving/shipper
+#      stop still pages (a3348a3e/t1862u).
 #
 # Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click)
 # via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
@@ -72,6 +75,16 @@ WAL_STATE_DIR="${WAL_SHIPPER_STATE_DIR:-/var/lib/coolify-wal-shipper}"
 WAL_STACKS="${WAL_STACKS:-pg-shared}"
 # archive_timeout=300 + shipper */1min → alert if last success > 20 min
 WAL_STALE_SECONDS="${WAL_STALE_SECONDS:-1200}"
+# Idle-tolerant verification (a3348a3e/t1862u, 2026-10-28T02:55Z false page):
+# before paging a stale last-success, verify the live archiver (see
+# wal_idle_verdict). 1 = verify (default), 0 = page on age alone (old behavior).
+WAL_IDLE_VERIFY="${WAL_IDLE_VERIFY:-1}"
+# The shipper publishes last-success by truncate+write; a concurrent read can
+# land in the sub-ms window and see an empty file (the 02:55Z page: GNU
+# date -d '' = today 00:00Z -> age exactly since midnight, plus empty `last=`).
+# One bounded re-read before failing; the repo shipper also publishes
+# atomically (mktemp+mv) since 91e25fd.
+WAL_IDLE_REREAD_WAIT_SEC="${WAL_IDLE_REREAD_WAIT_SEC:-0.5}"
 DISK_WARN_PERCENT="${DISK_WARN_PERCENT:-85}"
 SKIP_BACKUP_CHECKS="${SKIP_BACKUP_CHECKS:-0}"
 SKIP_DISK_CHECK="${SKIP_DISK_CHECK:-0}"
@@ -656,8 +669,106 @@ check_dump_freshness() {
   done
 }
 
+# ---- WAL idle verification (a3348a3e/t1862u: 2026-10-28T02:55Z false page) ----
+# A stale shipper last-success alone does not prove an archiving failure: an
+# idle database switches no segments, so the timestamp legitimately ages past
+# WAL_STALE_SECONDS with nothing wrong. Before paging, verify the live stack.
+# Needs the local container (data host); anything unverifiable stays a FAIL —
+# fail-closed, so a real stop still pages within ~WAL_STALE_SECONDS + cron
+# period. Verdict is idle (no page) only when ALL hold:
+#   - current WAL is within one segment of last_archived_wal (the segment
+#     being written is never "pending"; >=2 behind = archive_command stalled),
+#   - pg_stat_archiver failed_count is not above the previous verified run,
+#   - the PGDATA spool holds no unshipped segment (shipper->S3 leg has
+#     nothing queued — the DB cannot see this leg, so we check it directly).
+wal_archiver_snapshot() {
+  # $1=stack -> prints "last_archived_wal|since_last_arc_s|failed|archived|current_walfile"
+  # on stdout; rc!=0 when the stack DB is unreachable or output is malformed.
+  # Stack names look like pg-shared; the PG_* env vars use the bare suffix
+  # (PG_SHARED_*, PG_RELAY_*), so strip the pg- prefix before uppercasing.
+  local stack="$1" ind prefix u db ctr host port pass out rc
+  prefix="${stack#pg-}"; prefix="${prefix^^}"
+  ind="PGUSER_${prefix}";       u="${!ind:-pgadmin}"
+  ind="PG_${prefix}_DB";        db="${!ind:-postgres}"
+  ind="PG_${prefix}_CONTAINER"; ctr="${!ind:-}"
+  ind="PGHOST_${prefix}";       host="${!ind:-127.0.0.1}"
+  ind="PGPORT_${prefix}";       port="${!ind:-5432}"
+  ind="PGPASSWORD_${prefix}";   pass="${!ind:-}"
+  local sql="SELECT COALESCE(last_archived_wal,'-'),COALESCE(EXTRACT(EPOCH FROM (now()-last_archived_time))::bigint,-1),failed_count,archived_count,pg_walfile_name(pg_current_wal_lsn()) FROM pg_stat_archiver;"
+  if [[ -n "$ctr" ]]; then
+    out="$(timeout 20 docker exec -e PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' "$ctr" psql -X -U "$u" -d "$db" -tAc "$sql" 2>/dev/null)" && rc=0 || rc=$?
+  else
+    out="$(PGPASSWORD="$pass" PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=10000 -c default_transaction_read_only=on' timeout 20 psql -X -h "$host" -p "$port" -U "$u" -d "$db" -tAc "$sql" 2>/dev/null)" && rc=0 || rc=$?
+  fi
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  [[ "$out" =~ ^(-|[0-9A-F]{24})\|-?[0-9]+\|[0-9]+\|[0-9]+\|[0-9A-F]{24}$ ]] || return 1
+  printf '%s\n' "$out"
+}
+
+wal_spool_pending() {
+  # $1=container -> prints count of unshipped spool segment files; rc!=0 when
+  # unknown (no container/docker or unreadable PGDATA mount). Same mount
+  # resolution as backups/coolify-wal-shipper.sh spool_for().
+  local ctr="$1" mnt n
+  if [[ -z "$ctr" ]] || ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+  mnt="$(docker inspect "$ctr" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+  [[ -n "$mnt" ]] || return 1
+  n="$(find "$mnt/wal_spool" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)" || return 1
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$n"
+}
+
+wal_idle_verdict() {
+  # $1=stack -> prints "idle <detail>" (stale age is expected, do not page) or
+  # "fail <reason>" (page; reason doubles as the alert-text enrichment).
+  local stack="$1" snap arc_wal since_arc failed archived cur_wal ctr spool prev=0
+  local ind_container baseline="${STATE_DIR}/wal-archiver-failed-${stack}"  # NOT *.state: prune_stale_checks must never remove it
+  if ! snap="$(wal_archiver_snapshot "$stack")"; then
+    echo "fail archiver verification unavailable (pg_stat_archiver query failed) — failing closed"
+    return 0
+  fi
+  IFS='|' read -r arc_wal since_arc failed archived cur_wal <<< "$snap"
+  if [[ -f "$baseline" ]]; then
+    prev="$(tr -d '[:space:]' < "$baseline")"
+    [[ "$prev" =~ ^[0-9]+$ ]] || prev=0
+  fi
+  printf '%s\n' "$failed" > "$baseline"
+  if [[ "$arc_wal" == "-" ]]; then
+    echo "fail pg_stat_archiver has never archived a segment (failed_count=${failed}, current=${cur_wal})"
+    return 0
+  fi
+  # Segment ids are fixed-width hex; the timeline prefix (chars 1-8) is equal
+  # on a single primary, so compare the 64-bit segment counter only.
+  local dist=$(( 16#${cur_wal:8} - 16#${arc_wal:8} ))
+  if (( dist < 0 )); then
+    echo "fail current WAL ${cur_wal} is behind last archived ${arc_wal} — archiver state inconsistent"
+    return 0
+  fi
+  if (( dist >= 2 )); then
+    echo "fail unarchived backlog: current segment ${cur_wal} vs last archived ${arc_wal} (${dist} segments), failed_count=${failed} — archive_command stalled"
+    return 0
+  fi
+  if (( failed > prev )); then
+    echo "fail pg_stat_archiver failed_count rose ${prev}->${failed} (last_archived ${arc_wal} ${since_arc}s ago, current ${cur_wal})"
+    return 0
+  fi
+  ind_container="PG_${stack#pg-}_CONTAINER"; ind_container="${ind_container^^}"; ctr="${!ind_container:-}"
+  if ! spool="$(wal_spool_pending "$ctr")"; then
+    echo "fail spool state unknown (docker/PGDATA mount unavailable) — cannot rule out unshipped segments"
+    return 0
+  fi
+  if (( spool > 0 )); then
+    echo "fail spool holds ${spool} unshipped segment(s) — shipper/S3 leg stuck (last_archived ${arc_wal}, current ${cur_wal})"
+    return 0
+  fi
+  echo "idle last_archived=${arc_wal} ${since_arc}s ago, failed_count=${failed} (flat vs ${prev}), archived_count=${archived}, spool empty, current=${cur_wal}"
+}
+
 check_wal_freshness() {
-  local stack sf ts_raw ts age name
+  local stack sf ts_raw ts age name verdict detail
   local now; now="$(date +%s)"
   for stack in $WAL_STACKS; do
     name="wal-${stack}"
@@ -668,6 +779,12 @@ check_wal_freshness() {
       FAILED=1; continue
     fi
     ts_raw="$(tr -d '[:space:]' < "$sf")"
+    if [[ ! "$ts_raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+      # Sub-ms truncate→write race with the shipper (2026-10-28T02:55Z false
+      # page). One bounded re-read; still invalid -> fail closed below.
+      sleep "$WAL_IDLE_REREAD_WAIT_SEC"
+      ts_raw="$(tr -d '[:space:]' < "$sf")"
+    fi
     # Reject empty/relative dates before GNU date can interpret them as midnight.
     if [[ ! "$ts_raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
       log "FAIL check=${name}: invalid last-success timestamp"
@@ -682,8 +799,15 @@ check_wal_freshness() {
     fi
     age=$(( now - ts ))
     if [[ "$age" -gt "$WAL_STALE_SECONDS" ]]; then
-      log "FAIL check=${name}: age=${age}s > ${WAL_STALE_SECONDS}s last=${ts_raw}"
-      send_alert "$name" "FAIL" "WAL archive stale for stack=${stack}: last success ${ts_raw} (age ${age}s, threshold ${WAL_STALE_SECONDS}s) on $(hostname)."
+      verdict=""
+      [[ "${WAL_IDLE_VERIFY:-1}" == "1" ]] && verdict="$(wal_idle_verdict "$stack")"
+      detail="${verdict#fail }"
+      if [[ "$verdict" == idle* ]]; then
+        log "OK check=${name}: age=${age}s > ${WAL_STALE_SECONDS}s but archiver idle — no page (last=${ts_raw}; ${verdict#idle })"
+        mark_ok "$name"; continue
+      fi
+      log "FAIL check=${name}: age=${age}s > ${WAL_STALE_SECONDS}s last=${ts_raw}; ${detail}"
+      send_alert "$name" "FAIL" "WAL archive stale for stack=${stack}: last success ${ts_raw} (age ${age}s, threshold ${WAL_STALE_SECONDS}s); ${detail} on $(hostname)."
       FAILED=1; continue
     fi
     log "OK check=${name}: last=${ts_raw} age=${age}s"

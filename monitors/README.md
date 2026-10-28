@@ -24,7 +24,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | **Content markers** | each `name=url::marker` triple in `CONTENT_CHECKS` must return 2xx/3xx **and** the body (lowercased, whitespace-stripped) must contain the marker verbatim — catches proxy-default-page / error-page-with-200 incidents that status-only checks miss |
 | **AISHL jobs** | `CHECK_AISL_Q=1` on b checks recent failure count and age of the latest successful task with read-only, bounded SQL; real app failures remain red until repaired |
 | **Host / containers** | root-disk usage and Created containers older than `CREATED_GRACE_SEC` on both nodes; node-exporter and cAdvisor scrape both hosts into VictoriaMetrics |
-| **Backup freshness** | four DB dumps plus both stacks' WAL shipper success markers on b; these checks remain enabled there |
+| **Backup freshness** | four DB dumps plus both stacks' WAL shipper success markers on b; these checks remain enabled there. WAL staleness is **idle-tolerant** (a3348a3e/t1862u): before paging a timestamp older than `WAL_STALE_SECONDS`, the healthcheck verifies `pg_stat_archiver` (current WAL within one segment of last archived, `failed_count` flat vs the previous verified run) and an empty PGDATA spool — an idle DB does not page, while backlog, rising failures, unshipped spool segments, or an unverifiable state still page (fail-closed) within ~20 min. A state file read empty mid-publish (shipper publishes by truncate+write; atomic since 91e25fd) is re-read once before failing |
 
 > Coolify `standalone-postgresql` uses `POSTGRES_USER=pgadmin` — there is no
 > `postgres` role. Always use `PGUSER_*=pgadmin` (script default); `psql -U
