@@ -23,7 +23,7 @@ receivers:
         send_resolved: false
   - name: email-dev
     email_configs:
-      - to: 'dev@datatalks.club'
+      - to: 'dev@dtcdev.click'
         from: 'alertmanager@datatalks.club'
         smarthost: 'localhost:25'
         require_tls: false
