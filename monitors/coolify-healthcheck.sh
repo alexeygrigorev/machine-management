@@ -395,8 +395,7 @@ curl_http_code() {
     fi
     # Transient: TLS/recv reset (35/56). Retry exactly once.
     if [[ ( "$rc" -eq 35 || "$rc" -eq 56 ) && "$reset_retried" -eq 0 ]]; then
-      log "WARN check=http-retry: url=${url} rc=${rc} detail=$(tr -d 
- <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s" >&2
+      log "WARN check=http-retry: url=${url} rc=${rc} detail=$(tr -d '\n' <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s" >&2
       rm -f "$err"
       reset_retried=1
       sleep "$HTTP_RESET_RETRY_SLEEP_SEC"
@@ -453,8 +452,7 @@ check_content() {
       continue
     fi
     if [[ ( "$rc" -eq 35 || "$rc" -eq 56 ) && "$reset_retried" -eq 0 ]]; then
-      log "WARN check=content-retry: url=${url} rc=${rc} detail=$(tr -d 
- <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s"
+      log "WARN check=content-retry: url=${url} rc=${rc} detail=$(tr -d '\n' <"$err"); one reset retry after ${HTTP_RESET_RETRY_SLEEP_SEC}s"
       rm -f "$err"
       reset_retried=1
       sleep "$HTTP_RESET_RETRY_SLEEP_SEC"
