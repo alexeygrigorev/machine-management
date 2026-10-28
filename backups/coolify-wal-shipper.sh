@@ -41,7 +41,7 @@ S3_PREFIX="${S3_PREFIX:-coolify/postgres}"
 S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"
 [[ -n "$S3_BUCKET" ]] || fail "S3_BUCKET is not set in ${ENV_FILE}"
 
-for bin in docker aws gzip flock find; do
+for bin in docker aws gzip flock find mktemp mv; do
   command -v "$bin" >/dev/null 2>&1 || fail "missing binary on host: $bin"
 done
 
@@ -99,7 +99,14 @@ for STACK in $STACKS; do
     if gzip -c "$SEG" | s3_cp_stdin "$URL" && s3_exists "$URL"; then
       rm -f "$SEG"
       SHIPPED=$((SHIPPED + 1))
-      date -u '+%Y-%m-%dT%H:%M:%SZ' > "$STATE_DIR/last-success-$STACK"
+      # Readers run concurrently. Never expose a truncated/empty timestamp:
+      # GNU date -d '' treats an empty value as midnight, causing false pages.
+      STATE_TMP="$(mktemp "$STATE_DIR/.last-success-$STACK.XXXXXX")"
+      if ! { date -u '+%Y-%m-%dT%H:%M:%SZ' > "$STATE_TMP" &&
+             mv -f "$STATE_TMP" "$STATE_DIR/last-success-$STACK"; }; then
+        rm -f "$STATE_TMP"
+        fail "stack=$STACK cannot publish last-success timestamp"
+      fi
       log "stack=$STACK seg=$NAME archived s3=$URL"
     else
       log "ERROR: stack=$STACK seg=$NAME S3 upload/read-back failed, keeping spool copy"

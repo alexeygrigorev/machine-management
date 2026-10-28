@@ -668,6 +668,12 @@ check_wal_freshness() {
       FAILED=1; continue
     fi
     ts_raw="$(tr -d '[:space:]' < "$sf")"
+    # Reject empty/relative dates before GNU date can interpret them as midnight.
+    if [[ ! "$ts_raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+      log "FAIL check=${name}: invalid last-success timestamp"
+      send_alert "$name" "FAIL" "WAL shipper last-success invalid for stack=${stack}: expected a UTC timestamp."
+      FAILED=1; continue
+    fi
     ts="$(date -u -d "$ts_raw" +%s 2>/dev/null || echo 0)"
     if [[ "$ts" -le 0 ]]; then
       log "FAIL check=${name}: unparseable timestamp '${ts_raw}'"
