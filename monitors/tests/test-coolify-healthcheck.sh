@@ -83,6 +83,11 @@ echo "200"; exit 0
 EOF
 cat > "$TMP/stubbin/msmtp" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${HC_MAIL_LOG:-}" ]]; then
+  printf '%s %s\n' "${0##*/}" "$*" >> "$HC_MAIL_ARGS"
+  cat >> "$HC_MAIL_LOG"
+  exit 0
+fi
 cat >/dev/null; exit 0
 EOF
 cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
@@ -101,6 +106,8 @@ run_check() { # $1=envfile -> prints output, returns script rc
   SKIP_BACKUP_CHECKS=1 \
   SKIP_CREATED_CHECK=1 \
   CHECK_CMP_CALLBACKS=0 \
+  HC_MAIL_LOG="$TMP/mail" HC_MAIL_ARGS="$TMP/mail-args" \
+  BASH_ENV="${HC_BASH_ENV:-/dev/null}" \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
 }
@@ -113,6 +120,31 @@ if [[ $rc -ne 0 && "$out" == *'role "postgres" does not exist'* && "$out" == *'H
   pass "T3 stale postgres user FAILs with alert error + hint (rc=$rc)"
 else
   fail "T3 incident repro (rc=$rc) -- $out"
+fi
+
+# Verify the actual message and envelope, including the fallback transport.
+if grep -qxF 'From: DTC Alerts <alerts@dtcdev.click>' "$TMP/mail" \
+  && grep -qxF 'To: test@example.com' "$TMP/mail" \
+  && grep -qxF 'msmtp -a alerts -f alerts@dtcdev.click -- test@example.com' "$TMP/mail-args"; then
+  pass "T3b default alert has DTC Alerts From header and alerts envelope/account"
+else
+  fail "T3b default alert sender/header/envelope"
+fi
+: > "$TMP/mail"; : > "$TMP/mail-args"
+cat > "$TMP/no-msmtp" <<'EOF'
+# Model a sendmail-only installation while keeping both MTAs stubbed.
+command() {
+  if [[ "${1:-}" == -v && "${2:-}" == msmtp ]]; then return 1; fi
+  builtin command "$@"
+}
+EOF
+out=""; set +e; out="$(HC_BASH_ENV="$TMP/no-msmtp" run_check "$TMP/env-stale")"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'via=sendmail'* ]] \
+  && grep -qxF 'From: DTC Alerts <alerts@dtcdev.click>' "$TMP/mail" \
+  && grep -qxF 'sendmail -t -f alerts@dtcdev.click' "$TMP/mail-args"; then
+  pass "T3c sendmail fallback preserves DTC Alerts From header and alerts envelope"
+else
+  fail "T3c fallback sender/header/envelope (rc=$rc) -- $out"
 fi
 
 # ---- T4: fixed defaults + label auto-discovery — empty env must go green ----

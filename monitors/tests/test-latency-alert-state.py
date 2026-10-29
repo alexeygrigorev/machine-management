@@ -15,7 +15,8 @@ class LatencyStateTest(unittest.TestCase):
     def run_case(self, script, body):
         source = (MONITORS / script).read_text()
         functions = []
-        for name in ("send_alert", "send_latency_alert", "probe_latency",
+        for name in ("strip_personal_recipients", "enqueue_digest",
+                     "send_alert", "send_latency_alert", "probe_latency",
                      "latency_metrics_emit", "latency_metrics_push"):
             match = re.search(r"^" + name + r"\(\) \{.*?^\}", source, re.M | re.S)
             self.assertIsNotNone(match, name)
@@ -30,6 +31,10 @@ class LatencyStateTest(unittest.TestCase):
 set -euo pipefail
 log() { echo "$*"; }
 STATE_DIR="$CASE_DIR/state"; mkdir "$STATE_DIR"
+# send_alert also uses the configured-host and digest policy helpers.
+# Keep the extracted functions isolated from live config and digest spools.
+ENV_FILE="$CASE_DIR/env"; touch "$ENV_FILE"
+DIGEST_SCRIPT="$CASE_DIR/no-digest-script"
 NOW=100000; FAILED=0
 ALERT_TO=production@invalid.test
 LATENCY_ALERT_TO=latency@invalid.test
