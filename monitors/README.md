@@ -367,32 +367,31 @@ Rules of record for every monitor test or drill in this repo:
 
 ### DR stale-check alert transport
 
-`dr-raise-stale-check.sh` sends through a chain: msmtp with the dedicated
-`alerts` account (same proven SES path as `coolify-healthcheck`) first, then
-`sendmail`, then the dedicated Contabo monitors Relay client (`sender`
-`alerts`, `DTC Alerts <alerts@dtcdev.click>`) as a last resort. The first
-working transport wins; a total failure exits non-zero, logs an explicit
-error, and leaves dedupe state unchanged so the next run retries loudly.
+`dr-raise-stale-check.sh` sends through the dedicated Contabo monitors Relay
+client, using sender `alerts` (`DTC Alerts <alerts@dtcdev.click>`). This check
+does not monitor Relay itself, so it has no direct SMTP bypass. A failed
+Relay request exits non-zero, logs an explicit error, and leaves dedupe
+state unchanged so the next run retries.
 
-Relay can only ever be the fallback here, never the primary: Relay sits
-behind a CloudFront WAF whose managed body rules answer bare HTTP 403 to
+Relay sits behind a CloudFront WAF whose managed body rules answer bare HTTP 403 to
 request bodies containing `http(s)://` with an IP-literal host (reproduced
 2026-10-27 with the exact cron bodies of 2026-10-25/26 — benign bodies are
 accepted, `http://127.0.0.1:8428` and `http://93.184.216.34` are blocked).
-Every real alert from this check contains the local vmui URL, so a
-Relay-primary configuration fails silently on every firing. The Relay
-fallback therefore sends a defanged body (`http://127.0.0.1:8428` becomes
-`127.0.0.1:8428`); hostnames are untouched. Keep `/etc/relay-monitors.toml`
+Every real alert contains the local vmui URL. Before every Relay request,
+the script defangs IP-literal URL schemes (`http://127.0.0.1:8428` becomes
+`127.0.0.1:8428`); hostnames are untouched. This preserves the body fix from
+the 27 October incident while satisfying the Relay routing requirement.
+Keep `/etc/relay-monitors.toml`
 provisioned through Relay's admin/client API with `url` and `api_key`,
 root-owned mode 0600. Never put the key in shell arguments, source control
 or cron entries. `RELAY_MONITOR_CONFIG` and `DATAMAILER_BIN` can override
 the paths for testing. Existing `ALERT_TO` recipients are preserved;
-comma/space-separated recipients receive separate messages (one Relay
-message each on the fallback leg).
+comma/space-separated recipients receive separate Relay messages.
 
 `dr-raise-stale-check.sh --test-alert` sends a real source-specific proof only to
-`dev@dtcdev.click` through the same chain, without querying VictoriaMetrics
-or changing monitor state.
+`dev@dtcdev.click` through the same sanitized Relay path, including a local
+vmui URL in the proof body, without querying VictoriaMetrics or changing
+monitor state.
 The Relay self-monitors (`relay-pg-dns-watchdog`, `coolify-healthcheck`, and
 `contabo-deadman`) retain their independent direct SES SMTP transport.
 
