@@ -414,7 +414,7 @@ else
 fi
 
 # T21: host-scoping guard (f4361152 / 3bf25bda AC4): when SKIP_BACKUP_CHECKS is unset
-# and neither DUMP_DIR nor WAL_STATE_DIR exists, backup/WAL checks auto-skip without FAIL.
+# on an operator host, backup/WAL checks auto-skip without evaluating local paths.
 out=""; set +e
 out="$(env -u SKIP_BACKUP_CHECKS COOLIFY_HEALTHCHECK_ENV_FILE="/nonexistent" \
   STATE_DIR="$(mktemp -d -p "$TMP")" LOCK_FILE="$TMP/lock-t21" \
@@ -424,8 +424,8 @@ out="$(env -u SKIP_BACKUP_CHECKS COOLIFY_HEALTHCHECK_ENV_FILE="/nonexistent" \
   ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
 rc=$?; set -e
-if [[ $rc -eq 0 && "$out" == *"SKIP backup dump/WAL freshness (auto:"* && "$out" == *"ALL_OK"* ]]; then
-  pass "T21 unset SKIP_BACKUP_CHECKS auto-skips on host without dump/WAL dirs"
+if [[ $rc -eq 0 && "$out" == *"SKIP backup dump/WAL freshness (host="* && "$out" == *"ALL_OK"* ]]; then
+  pass "T21 unset SKIP_BACKUP_CHECKS skips local backups on operator host"
 else
   fail "T21 auto-skip backup checks (rc=$rc) -- $out"
 fi

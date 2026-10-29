@@ -90,18 +90,21 @@ DISK_WARN_RECOVER_PERCENT="${DISK_WARN_RECOVER_PERCENT:-83}"
 DISK_MAX_PERCENT="${DISK_MAX_PERCENT:-92}"
 DISK_RECOVER_PERCENT="${DISK_RECOVER_PERCENT:-90}"
 DISK_FAIL_CONSECUTIVE="${DISK_FAIL_CONSECUTIVE:-2}"
-# Host-scoping guard (f4361152 / 3bf25bda AC4): when SKIP_BACKUP_CHECKS is unset,
-# only run dump/WAL checks on hosts where DUMP_DIR or WAL_STATE_DIR exists.
+# Dumps and WAL markers belong to contabo-b (vmd210005). Select the data
+# host by identity, never by path existence: losing both directories there
+# must still alert. Explicit SKIP_BACKUP_CHECKS=0 enables missing-path drills
+# and data hosts with another hostname; =1 disables local backup checks.
+BACKUP_HOSTNAME="${BACKUP_HOSTNAME:-vmd210005}"
+SKIP_BACKUP_CHECKS_AUTO=0
 if [[ -z "${SKIP_BACKUP_CHECKS:-}" ]]; then
-  if [[ -d "$DUMP_DIR" || -d "$WAL_STATE_DIR" ]]; then
-    SKIP_BACKUP_CHECKS="0"
-    SKIP_BACKUP_CHECKS_AUTO="0"
+  if [[ "$(hostname -s)" == "$BACKUP_HOSTNAME" || "$(hostname -s)" == contabo-b ]]; then
+    SKIP_BACKUP_CHECKS=0
   else
-    SKIP_BACKUP_CHECKS="1"
-    SKIP_BACKUP_CHECKS_AUTO="1"
+    SKIP_BACKUP_CHECKS=1
+    SKIP_BACKUP_CHECKS_AUTO=1
   fi
 else
-  SKIP_BACKUP_CHECKS_AUTO="0"
+  SKIP_BACKUP_CHECKS="${SKIP_BACKUP_CHECKS:-0}"
 fi
 SKIP_DISK_CHECK="${SKIP_DISK_CHECK:-0}"
 
@@ -1138,10 +1141,24 @@ check_created_containers
 
 if [[ "${SKIP_BACKUP_CHECKS:-0}" == "1" ]]; then
   if [[ "${SKIP_BACKUP_CHECKS_AUTO:-0}" == "1" ]]; then
-    log "SKIP backup dump/WAL freshness (auto: neither ${DUMP_DIR} nor ${WAL_STATE_DIR} exists on this host)"
+    log "SKIP backup dump/WAL freshness (host=$(hostname -s); data host is ${BACKUP_HOSTNAME}/contabo-b)"
   else
     log "SKIP backup dump/WAL freshness (SKIP_BACKUP_CHECKS=1)"
   fi
+  # Close old wrong-host incidents without claiming that a local artifact
+  # became healthy. Failed delivery retains FAIL so the next run retries.
+  for backup_check in ${EXPECT_DBS}; do
+    backup_state="${STATE_DIR}/dump-${backup_check}.state"
+    if [[ -f "$backup_state" ]] && grep -qx 'STATUS=FAIL' "$backup_state"; then
+      send_alert "dump-${backup_check}" "RECOVERED" "Local backup check retired on $(hostname): dumps are monitored on ${BACKUP_HOSTNAME}/contabo-b. No local backup paths were evaluated."
+    fi
+  done
+  for backup_check in ${WAL_STACKS}; do
+    backup_state="${STATE_DIR}/wal-${backup_check}.state"
+    if [[ -f "$backup_state" ]] && grep -qx 'STATUS=FAIL' "$backup_state"; then
+      send_alert "wal-${backup_check}" "RECOVERED" "Local WAL check retired on $(hostname): WAL freshness is monitored on ${BACKUP_HOSTNAME}/contabo-b. No local WAL paths were evaluated."
+    fi
+  done
 else
   check_dump_freshness
   check_wal_freshness
