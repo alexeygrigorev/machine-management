@@ -463,6 +463,43 @@
         "run_completed": true,
         "webhook_2xx": true
       }
+    },
+    {
+      "source": "dapier-failure-notice-current",
+      "checked_at": "2026-10-29T06:03:42.545139+00:00",
+      "received_at": "2026-10-29T06:00:49.180831+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "subject": "[dapier] Run failed: orin-mailbox",
+      "message_id": "<010001a1863f239a-b6e918fc-4478-469c-b5b9-59b288f7e037-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.99 as permitted sender) client-ip=54.240.8.99; envelope-from=010001a1863f239a-b6e918fc-4478-469c-b5b9-59b288f7e037-000000@mail.dtcdev.click; helo=a8-99.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:d2b72bc61d7138092801211146af54ee36b1fbd4436ec19d7998102d012c280f",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      },
+      "source_run_id": "orin-mailbox:37dbb03c-11e6-4204-91ce-7d73a2bd479f",
+      "source_run_status": "failed"
     }
   ]
 }

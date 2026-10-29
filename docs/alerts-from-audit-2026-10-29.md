@@ -8,14 +8,14 @@ their own receipt evidence. No DONE note or legacy sender removal is justified.
 
 ## Verified sender and delivery state
 
-The [receipt evidence](alerts-from-receipts-2026-10-29.json) contains 14 records
+The [receipt evidence](alerts-from-receipts-2026-10-29.json) contains 15 records
 read through the authenticated Dapier inbox and run APIs on 29 October. Each
 record includes the full received Message-ID, full `dev-mailbox` run ID,
 Authentication-Results, DKIM signing domains and Developer webhook status.
-All 14 have From `DTC Alerts <alerts@dtcdev.click>`, SPF pass through
+All 15 have From `DTC Alerts <alerts@dtcdev.click>`, SPF pass through
 `mail.dtcdev.click`, DKIM pass with `d=dtcdev.click`, aligned DMARC pass, a
 completed run and webhook HTTP 200. Original receipts are from 24 October;
-four additional records are from 29 October. These were existing messages;
+five additional records are from 29 October. These were existing messages;
 this continuation generated no mail.
 
 Relay's `datamailer domains` API reports domain 1 enabled and routed to
@@ -48,7 +48,7 @@ receipt keys refer to complete message/run evidence in the JSON companion.
 | course-management-platform `deploy/coolify/check-workers.sh`, installed as `cmp-check-workers` | Inherited `noreply@datatalks.club` | Relay sender `alerts` | Live script SHA256 matches current origin/main; backup present | `cmp-workers` |
 | rds-export `notify_run.sh`, Hetzner | `Relay Backup Alerts <relay@datatalks.club>` via `backup-alerts` | Relay sender `alerts`, explicitly selected | Live wrapper contains `--from alerts`; origin/main `26deb55` | `rds-export-backup` |
 | dapier `src/dapier/alarm_notify.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Sender deployment `3f2259e`; green deploy run below | `dapier-alarm-original`, `dapier-alarm-current` |
-| dapier `src/dapier/engine/notify.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Alert sender present in current origin/main | Individual received notice still required |
+| dapier `src/dapier/engine/notify.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Alert sender present in current origin/main; real failure notice received on 29 October | `dapier-failure-notice-current` |
 | dapier `src/dapier/error_digest.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Alert sender present in current origin/main | Individual received digest still required |
 | dapier `src/dapier/connection_digest.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Alert sender present in current origin/main | Individual received digest still required |
 | dapier `src/dapier/backup.py` | `no-reply@dtcdev.click` | Sandbox SES API through `operator_sender()` | Alert sender present in current origin/main | Individual received backup notice still required; backup alarm is a different source |
@@ -94,10 +94,20 @@ was not used. An approved sandbox role or operator-supplied current IAM policy
 evidence is needed for this criterion.
 
 AC5/10 require a real received alert and Developer webhook 2xx from each
-Dapier notice source. Alarm receipts prove the shared sender works but cannot
-stand in for notify, error digest, connection digest, backup notice and
-host-job deliveries. Source-specific receipts or controlled source tests are
-still required. No inbox body, webhook URL, token or provider credential is
+Dapier notice source. Alarm and failure-notice receipts prove their respective
+paths but cannot stand in for error digest, connection digest, backup notice
+and host-job deliveries. Source-specific receipts or controlled source tests
+are still required for those four paths. A bounded read-only search of 500
+email events, spanning 23–29 October, found no new-sender candidates with
+those sources' subject patterns. This is a search bound, not a claim that
+they have never sent mail.
+
+The newly verified failure notice arrived at dev@ on 29 October at 06:00:49Z,
+with subject `[dapier] Run failed: orin-mailbox`. Its originating run
+`orin-mailbox:37dbb03c-11e6-4204-91ce-7d73a2bd479f` is confirmed failed through
+the run API. The notice's own `dev-mailbox` run completed and Developer
+webhook returned HTTP 200. Full IDs and authentication evidence are in the
+companion JSON. No inbox body, webhook URL, token or provider credential is
 included in this report or the JSON evidence.
 
 ## Allowlists and recipients
