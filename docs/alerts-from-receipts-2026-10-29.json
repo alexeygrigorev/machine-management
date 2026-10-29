@@ -1,0 +1,468 @@
+{
+  "checked_at": "2026-10-29T05:46:49.540442+00:00",
+  "method": "Read-only authenticated Dapier inbox detail and run detail; no mail generated",
+  "receipts": [
+    {
+      "source": "deadman-fail",
+      "received_at": "2026-10-24T15:02:05.100025+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e6ee1c4-040f3910-867c-49be-87a1-74b992a4b6c6-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.132 as permitted sender) client-ip=54.240.48.132; envelope-from=010001a16e6ee1c4-040f3910-867c-49be-87a1-74b992a4b6c6-000000@mail.dtcdev.click; helo=a48-132.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:1944bbde2e9f14bbfc02b9c58fea1b909a8effc684b52e7c0ac3bd7b5571c790",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "deadman-recovery",
+      "received_at": "2026-10-24T15:02:17.004530+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e6f13cb-d6520d9d-8b1b-49ce-a350-e25dea6c7828-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.132 as permitted sender) client-ip=54.240.48.132; envelope-from=010001a16e6f13cb-d6520d9d-8b1b-49ce-a350-e25dea6c7828-000000@mail.dtcdev.click; helo=a48-132.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:03866e3b0ae42d4a3b76d841b3b703d182ecaf4ded8e6e063ca288b248f0a3ad",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "healthcheck-a",
+      "received_at": "2026-10-24T15:03:35.376915+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e70457b-9175a370-96e8-432f-a3ac-ad1c63a18557-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.80 as permitted sender) client-ip=54.240.8.80; envelope-from=010001a16e70457b-9175a370-96e8-432f-a3ac-ad1c63a18557-000000@mail.dtcdev.click; helo=a8-80.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:681f205fa3c93ff0a994e929abd4819669059418f5c5db00d8f711d29732c376",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "healthcheck-b",
+      "received_at": "2026-10-24T15:04:13.095386+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e70d971-f9ebff80-cda3-4224-9926-baa800600fa8-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.99 as permitted sender) client-ip=54.240.8.99; envelope-from=010001a16e70d971-f9ebff80-cda3-4224-9926-baa800600fa8-000000@mail.dtcdev.click; helo=a8-99.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:f22ff1bd00b35788cbefa5cb1156eb078289412ffcc5a0bdca8bdc80f6742138",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "pg-watchdog",
+      "received_at": "2026-10-24T15:05:28.076675+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e71fde9-30e05309-a421-4679-b93a-f1f9e6cda090-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.131 as permitted sender) client-ip=54.240.48.131; envelope-from=010001a16e71fde9-30e05309-a421-4679-b93a-f1f9e6cda090-000000@mail.dtcdev.click; helo=a48-131.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:57bfb419195266a2a9e12d64bef33743d0dd9e83232eecde46c4fa98f3ad6c1a",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "dr-stale-original-relay",
+      "received_at": "2026-10-24T14:41:03.467345+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e5ba1d6-0a31e482-9ad7-4fdc-be1d-22752b8204ef-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.80 as permitted sender) client-ip=54.240.8.80; envelope-from=010001a16e5ba1d6-0a31e482-9ad7-4fdc-be1d-22752b8204ef-000000@mail.dtcdev.click; helo=a8-80.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:e55bb34ae924be9c14204508cb535ec8bcf416a35e33e9841f337d68fcfc73a3",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "cmp-created",
+      "received_at": "2026-10-24T14:41:09.579515+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e5ba402-1d4f370a-060c-4aad-87c5-18173157f9ff-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.44 as permitted sender) client-ip=54.240.8.44; envelope-from=010001a16e5ba402-1d4f370a-060c-4aad-87c5-18173157f9ff-000000@mail.dtcdev.click; helo=a8-44.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:e64e31efa704b7b514cde92fa8bc30a8f0570744e0b284d723ebc11b74a9560d",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "cmp-workers",
+      "received_at": "2026-10-24T14:41:05.539499+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e5ba65d-4e86c070-3099-4b7c-b5f3-540acc376b26-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.131 as permitted sender) client-ip=54.240.48.131; envelope-from=010001a16e5ba65d-4e86c070-3099-4b7c-b5f3-540acc376b26-000000@mail.dtcdev.click; helo=a48-131.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:8083f872e9cd7c5cd705078d3bbfab0267a928e0deaed38b67105302ad955a44",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "rds-export-backup",
+      "received_at": "2026-10-24T14:31:00.812319+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e5268ab-e38a9bd3-1241-4a13-b1cd-90fdc4673dde-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.80 as permitted sender) client-ip=54.240.8.80; envelope-from=010001a16e5268ab-e38a9bd3-1241-4a13-b1cd-90fdc4673dde-000000@mail.dtcdev.click; helo=a8-80.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:0067a8632b51164446ec74de99243134889b5fd181f3e0028fb59d9e00322a7b",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "dapier-alarm-original",
+      "received_at": "2026-10-24T13:33:33.214181+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a16e1dd4d8-8297995e-9682-4f7b-b986-094719472a10-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.130 as permitted sender) client-ip=54.240.48.130; envelope-from=010001a16e1dd4d8-8297995e-9682-4f7b-b986-094719472a10-000000@mail.dtcdev.click; helo=a48-130.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:a69f1ccd4a1d8925087428ebbc44914f96c07efb37268d1fe9283d458de78eba",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "dr-stale-current",
+      "received_at": "2026-10-29T00:55:57.682480+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a185280bfe-7f7ca7eb-c352-4a40-ba51-8e7bc4571cf8-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.44 as permitted sender) client-ip=54.240.8.44; envelope-from=010001a185280bfe-7f7ca7eb-c352-4a40-ba51-8e7bc4571cf8-000000@mail.dtcdev.click; helo=a8-44.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:88a5e22b417e4e27961bfa2eec6e98a4130f795f06c16512284f03f7336ae0d3",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "hetzner-disk-current",
+      "received_at": "2026-10-29T05:20:04.209094+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a18619d771-f08f548d-b8c9-4fc5-b053-78f9a907d975-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.91 as permitted sender) client-ip=54.240.8.91; envelope-from=010001a18619d771-f08f548d-b8c9-4fc5-b053-78f9a907d975-000000@mail.dtcdev.click; helo=a8-91.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:6d64fd7490c6a5cf0bac07c7d6ffde08343a4588f96bd59de47efee043d64ec8",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "storagebox-current",
+      "received_at": "2026-10-29T00:56:09.849486+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a185283b06-25ff8521-d46a-430e-9085-c986925a3d77-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.80 as permitted sender) client-ip=54.240.8.80; envelope-from=010001a185283b06-25ff8521-d46a-430e-9085-c986925a3d77-000000@mail.dtcdev.click; helo=a8-80.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:a000a5b613385524c26ebf2801cd88dcdc88851e3c896dc94c740f5d2a3349a8",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    },
+    {
+      "source": "dapier-alarm-current",
+      "received_at": "2026-10-29T03:02:37.053130+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "message_id": "<010001a1859bfa36-1568e121-fd19-47d7-a9ec-e4443a2b3e55-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.45 as permitted sender) client-ip=54.240.8.45; envelope-from=010001a1859bfa36-1568e121-fd19-47d7-a9ec-e4443a2b3e55-000000@mail.dtcdev.click; helo=a8-45.smtp-out.amazonses.com; dkim=pass header.i=@dtcdev.click; dkim=pass header.i=@amazonses.com; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:57dd83f545db4f35adae42975a736ccc6cd3b7d6d23e08a085857711eb450fc2",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true
+      }
+    }
+  ]
+}
