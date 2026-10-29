@@ -363,7 +363,8 @@
         "dmarc_pass": true,
         "run_completed": true,
         "webhook_2xx": true
-      }
+      },
+      "superseded_by": "dr-stale-relay-live"
     },
     {
       "source": "hetzner-disk-current",
@@ -500,6 +501,84 @@
       },
       "source_run_id": "orin-mailbox:37dbb03c-11e6-4204-91ce-7d73a2bd479f",
       "source_run_status": "failed"
+    },
+    {
+      "source": "dr-stale-relay-sanitized",
+      "checked_at": "2026-10-29T06:57:11.808817+00:00",
+      "proof_phase": "pre-install temporary copy with production Relay client",
+      "source_sha256": "f3ec7693440a5e3f3076bbda4e43f33f6073f7f7c8a1ae2f4741fe269be3d988",
+      "received_at": "2026-10-29T06:55:51.470742+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "subject": "TEST dr-raise-stale-check alert (transport proof)",
+      "message_id": "<010001a186718387-205d27d8-1a84-4d48-9c0f-f2d49b81c22f-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.8.44 as permitted sender) client-ip=54.240.8.44; envelope-from=010001a186718387-205d27d8-1a84-4d48-9c0f-f2d49b81c22f-000000@mail.dtcdev.click; helo=a8-44.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:73d80f7b059c8001762a58922efe24805f35a785f5880c4546da763c15944e3c",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true,
+        "ip_url_defanged": true
+      }
+    },
+    {
+      "source": "dr-stale-relay-live",
+      "checked_at": "2026-10-29T07:01:12.515183+00:00",
+      "proof_phase": "installed monitor reporting observed missing/unreadable metric; not a forced failure",
+      "repo_commit": "78c87a7",
+      "source_sha256": "f3ec7693440a5e3f3076bbda4e43f33f6073f7f7c8a1ae2f4741fe269be3d988",
+      "received_at": "2026-10-29T06:59:53.789392+00:00",
+      "from": "DTC Alerts <alerts@dtcdev.click>",
+      "to": [
+        "dev@dtcdev.click"
+      ],
+      "subject": "[dr-fast-pg-raise] FAIL stale/missing weekly raise",
+      "message_id": "<010001a186753874-ea28979c-bd00-4738-9e53-4572a3be5742-000000@email.amazonses.com>",
+      "authentication_results": [
+        "amazonses.com; spf=pass (spfCheck: domain of mail.dtcdev.click designates 54.240.48.132 as permitted sender) client-ip=54.240.48.132; envelope-from=010001a186753874-ea28979c-bd00-4738-9e53-4572a3be5742-000000@mail.dtcdev.click; helo=a48-132.smtp-out.amazonses.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@dtcdev.click; dmarc=pass header.from=dtcdev.click;"
+      ],
+      "dkim_domains": [
+        "amazonses.com",
+        "dtcdev.click"
+      ],
+      "run_id": "dev-mailbox:a8a86099dd67252d2e0cab5e8071c849d4d5511f3ee98ee006b24c4ceb220228",
+      "run_status": "completed",
+      "webhooks": [
+        {
+          "action_id": "post-webhook",
+          "status": "completed",
+          "http_status": 200
+        }
+      ],
+      "checks": {
+        "from_matches": true,
+        "spf_pass": true,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+        "run_completed": true,
+        "webhook_2xx": true,
+        "ip_url_defanged": true
+      }
     }
-  ]
+  ],
+  "last_updated_at": "2026-10-29T07:01:12.515183+00:00"
 }

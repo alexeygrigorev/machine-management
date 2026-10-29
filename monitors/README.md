@@ -392,8 +392,7 @@ comma/space-separated recipients receive separate Relay messages.
 `dev@dtcdev.click` through the same sanitized Relay path, including a local
 vmui URL in the proof body, without querying VictoriaMetrics or changing
 monitor state.
-The Relay self-monitors (`relay-pg-dns-watchdog`, `coolify-healthcheck`, and
-`contabo-deadman`) retain their independent direct SES SMTP transport.
+Relay self-monitoring checks retain their independent direct SES SMTP transport.
 
 ## Hetzner host-local disk + node_exporter (t1493u)
 
