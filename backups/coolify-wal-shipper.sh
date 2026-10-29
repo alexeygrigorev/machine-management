@@ -41,6 +41,13 @@ S3_PREFIX="${S3_PREFIX:-coolify/postgres}"
 S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"
 [[ -n "$S3_BUCKET" ]] || fail "S3_BUCKET is not set in ${ENV_FILE}"
 
+# t1852u (S3 egress cut): additionally stage every verified segment in a local
+# outbox that mirrors the S3 key layout. The Hetzner Storagebox mirror pulls
+# WAL from here over SSH instead of downloading it back from S3 (egress $).
+# Best-effort: S3 stays the authoritative leg; an outbox failure is logged
+# and marks the run failed but never blocks spool cleanup. Empty = disabled.
+WAL_OUTBOX_DIR="${WAL_OUTBOX_DIR:-/var/backups/coolify-wal-outbox}"
+
 for bin in docker aws gzip flock find mktemp mv; do
   command -v "$bin" >/dev/null 2>&1 || fail "missing binary on host: $bin"
 done
@@ -97,6 +104,17 @@ for STACK in $STACKS; do
     KEY="${S3_PREFIX}/${STACK}/wal/${DAY_PATH}/${NAME}.gz"
     URL="s3://${S3_BUCKET}/${KEY}"
     if gzip -c "$SEG" | s3_cp_stdin "$URL" && s3_exists "$URL"; then
+      # t1852u: outbox copy for the direct Contabo->Storagebox mirror feed
+      # (same relative key as S3). Runs before spool cleanup; failure keeps
+      # the S3 leg authoritative and never retains the spool copy.
+      if [[ -n "$WAL_OUTBOX_DIR" ]]; then
+        OUTBOX="${WAL_OUTBOX_DIR}/${KEY}"
+        if ! { mkdir -p "${OUTBOX%/*}" && gzip -c "$SEG" > "${OUTBOX}.tmp" \
+               && mv -f "${OUTBOX}.tmp" "$OUTBOX"; }; then
+          log "ERROR: stack=$STACK seg=$NAME outbox copy failed (S3 leg OK)"
+          FAILED=1
+        fi
+      fi
       rm -f "$SEG"
       SHIPPED=$((SHIPPED + 1))
       # Readers run concurrently. Never expose a truncated/empty timestamp:

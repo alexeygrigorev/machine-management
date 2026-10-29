@@ -65,7 +65,9 @@ done
 prune_one "$STORAGEBOX_ROOT/edge-tls" '*.json.gpg'
 # S3 mirror tree maintained by storagebox-sync.sh (no --delete: age-pruned here).
 if [[ -d "$STORAGEBOX_ROOT/s3" ]]; then
-  prune_one "$STORAGEBOX_ROOT/s3" '*.dump.gz' '*.dump' '*.tar.gz.gpg' '*.json.gpg'
+  # '*.gz' also covers WAL segments (*.gz) and basebackup tarballs (*.tar.gz),
+  # which the S3 leg's 30d lifecycle expires too (they were never pruned here).
+  prune_one "$STORAGEBOX_ROOT/s3" '*.dump.gz' '*.dump' '*.tar.gz.gpg' '*.json.gpg' '*.gz'
 fi
 
 if [[ "$APPLY" == "1" ]]; then

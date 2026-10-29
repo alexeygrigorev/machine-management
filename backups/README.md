@@ -104,10 +104,18 @@ S3 alone is single-region. `storagebox-sync.sh` runs on the Hetzner operator
 box daily at `30 4 * * *` Europe/Berlin (`/etc/cron.d/storagebox-backup-sync`,
 after the 02:30 pg dumps and 03:30 CP bundles) and:
 
-1. `aws s3 sync` (no `--delete`) `coolify/postgres/` + `coolify/control-plane/`
-   → `~/storagebox/backups/s3/…` (AWS creds via `AWS_PROFILE`, default
-   `storagebox-mirror-reader` — the dedicated READ-ONLY IAM principal, see
-   `backups/storagebox-mirror-reader-iam.tf`; `main-temp` is FORBIDDEN);
+1. **contabo-direct (since 2026-10-28, t1852u — S3 egress cut):** rsync over
+   SSH from the Contabo origin, no AWS credentials, no S3 download:
+   contabo-b `/var/backups/coolify-postgres/*.dump.gz` and
+   `/var/backups/coolify-postgres-base/*.tar.gz` (re-nested into the S3 key
+   layout `coolify/postgres/<stack>/<db|base>/Y/M/D/`), the WAL outbox
+   `/var/backups/coolify-wal-outbox/coolify/postgres/` (fed per minute by
+   `coolify-wal-shipper.sh`, already nested), and both hosts'
+   `/var/backups/coolify-cp/` → `coolify/control-plane/<host-id>/Y/M/D/`.
+   WARN if the newest mirrored WAL is >36 h old; then prunes the contabo-b
+   outbox to 3 days (`sudo -n find … -delete`). Previously this step was
+   `aws s3 sync` with `storagebox-mirror-reader`, which re-downloaded every
+   day's backups from S3 (~0.5–1.8 GB/day of paid egress);
 2. `edge/acme-backup.sh` — fetches Traefik `acme.json` from both Contabo
    hosts, stores GPG-symmetric-encrypted (`~/.secrets/acme-backup-gpg.pass`,
    600, escrowed in Secrets Manager `dr/acme-backup-gpg-passphrase`) decrypt-verified copies under
@@ -165,7 +173,7 @@ production restore so the next dump matches the restored state.
 | `coolify-wal-archive.sh` | SUPERSEDED by the shipper (kept for reference): direct-upload helper that cannot run inside the Coolify PG container (no aws binary, no mounts) |
 | `coolify-wal-enable.sh` | stages `archive_mode=on` etc. via ALTER SYSTEM; NEVER restarts (operator window) |
 | `coolify-pg-replay.sh` | throwaway-DB replay drill: dump→restore or base+WAL PITR, census + timing |
-| `storagebox-sync.sh` | **Hetzner** daily job: S3 `coolify/postgres/` + `coolify/control-plane/` → `~/storagebox/backups/s3/…`, then `edge/acme-backup.sh`, then `prune-storagebox.sh --apply`; tightens perms; writes `s3/.last-sync` |
+| `storagebox-sync.sh` | **Hetzner** daily job: contabo-direct rsync (dumps, basebackups, WAL outbox, control-plane) → `~/storagebox/backups/s3/…` (S3 key layout, no S3 reads), then `edge/acme-backup.sh`, then `prune-storagebox.sh --apply`; tightens perms; writes `s3/.last-sync` |
 | `storagebox-sync.cron` | `30 4 * * *` Europe/Berlin entry (one hour after CP bundles) |
 | `install-storagebox-sync.sh` | Hetzner installer (copies 3 scripts to `/usr/local/sbin`, installs cron) |
 

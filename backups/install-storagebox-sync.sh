@@ -42,6 +42,6 @@ bash -n /usr/local/sbin/storagebox-backup-sync.sh && echo SYNTAX_OK
 cat /etc/cron.d/storagebox-backup-sync
 echo
 echo "Prereqs (not created here):"
-echo "  - AWS read creds for the cron user (AWS_PROFILE=storagebox-mirror-reader default, dedicated read-only; main-temp FORBIDDEN)"
+echo "  - SSH for the cron user to contabo-a/contabo-b + sudo -n find on contabo-b outbox (no AWS creds needed since t1852u)"
 echo "  - ~/.secrets/acme-backup-gpg.pass (600) for that user, escrowed offline"
 echo "Manual run: sudo -u alexey /usr/local/sbin/storagebox-backup-sync.sh"
