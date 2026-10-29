@@ -160,8 +160,10 @@ send_alert() {
 # Weekly push samples disappear from instant lookback between runs. Search the
 # full stale window (8d by default), then take the newest success across hosts.
 # This also keeps a 7-8 day old success valid until the existing 8d deadline.
-AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[${STALE_SECONDS}s]))")"
-AGE="$(python3 - <<'PY' "$AGE_JSON" 2>/dev/null || true
+# A second probe on last_run_unixtime lets alerts distinguish "no attempts
+# recorded" (metric missing) from "attempts recorded but failing" (run failed).
+parse_vm_age() {
+  python3 - <<'PY' "$1" 2>/dev/null || true
 import json,sys
 try:
   d=json.loads(sys.argv[1])
@@ -172,13 +174,46 @@ try:
 except Exception:
   print("MISSING")
 PY
-)"
+}
+
+AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[${STALE_SECONDS}s]))")"
+AGE="$(parse_vm_age "$AGE_JSON")"
+RUN_AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_run_unixtime[${STALE_SECONDS}s]))")"
+RUN_AGE="$(parse_vm_age "$RUN_AGE_JSON")"
+run_age_int() {
+  if [[ "${RUN_AGE}" == "MISSING" || -z "${RUN_AGE}" ]]; then
+    printf 'MISSING'
+  else
+    printf '%.0f' "${RUN_AGE}" 2>/dev/null || printf 'MISSING'
+  fi
+}
 
 if [[ "$AGE" == "MISSING" || -z "$AGE" ]]; then
-  log "FAIL: last_success metric missing/unreadable"
+  RUN_INT="$(run_age_int)"
+  if [[ "$RUN_INT" == "MISSING" ]]; then
+    log "FAIL: last_success metric missing/unreadable and no attempts recorded"
+    send_alert "FAIL stale/missing weekly raise: no attempts recorded" \
+      "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}, and dr_fast_pg_raise_last_run_unixtime is also missing: no raise attempts recorded.
+Weekly Contabo→alt-host fast PG raise has no successful run recorded and no attempts recorded.
+Schedule: Sundays 04:30 Europe/Berlin on Hetzner (contingency/weekly-fast-pg-raise.sh).
+Alert destination: ${ALERT_TO}."
+    exit 1
+  fi
+  RUN_DAYS="$(python3 -c "print(round($RUN_INT/86400, 2))" 2>/dev/null || echo "?")"
+  if [[ "$RUN_INT" -le "$STALE_SECONDS" ]]; then
+    log "FAIL: last_success missing/unreadable but last run ${RUN_INT}s ago — attempts failing"
+    send_alert "FAIL weekly raise failing: recent attempts but no success" \
+      "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}, but dr_fast_pg_raise_last_run_unixtime is ${RUN_INT}s old (~${RUN_DAYS} days): raise attempts are recorded and failing (or never passing).
+Weekly Contabo→alt-host fast PG raise runs but has no successful run recorded.
+Schedule: Sundays 04:30 Europe/Berlin on Hetzner (contingency/weekly-fast-pg-raise.sh).
+vmui: ${VM_URL}/vmui
+Alert destination: ${ALERT_TO}."
+    exit 1
+  fi
+  log "FAIL: last_success metric missing/unreadable (last attempt ${RUN_INT}s ago, also stale)"
   send_alert "FAIL stale/missing weekly raise" \
     "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}.
-Weekly Contabo→alt-host fast PG raise has no successful run recorded.
+Weekly Contabo→alt-host fast PG raise has no successful run recorded (last attempt ${RUN_INT}s ago, also stale).
 Schedule: Sundays 04:30 Europe/Berlin on Hetzner (contingency/weekly-fast-pg-raise.sh).
 Alert destination: ${ALERT_TO}."
   exit 1
@@ -188,6 +223,17 @@ fi
 AGE_INT="$(printf '%.0f' "$AGE" 2>/dev/null || echo 999999999)"
 if [[ "$AGE_INT" -gt "$STALE_SECONDS" ]]; then
   DAYS="$(python3 -c "print(round($AGE_INT/86400, 2))" 2>/dev/null || echo "?")"
+  RUN_INT="$(run_age_int)"
+  if [[ "$RUN_INT" != "MISSING" ]] && [[ "$RUN_INT" -le "$STALE_SECONDS" ]]; then
+    RUN_DAYS="$(python3 -c "print(round($RUN_INT/86400, 2))" 2>/dev/null || echo "?")"
+    log "FAIL: last_success age=${AGE_INT}s (~${DAYS}d) > ${STALE_SECONDS} but last run ${RUN_INT}s ago — attempts failing"
+    send_alert "FAIL weekly raise failing: recent attempts but no success within 8 days" \
+      "dr_fast_pg_raise_last_success_unixtime is ${AGE_INT}s old (~${DAYS} days; threshold ${STALE_SECONDS}s), but dr_fast_pg_raise_last_run_unixtime is ${RUN_INT}s old (~${RUN_DAYS} days): raise attempts are recorded and failing.
+Weekly Contabo→alt-host fast PG raise missed its window.
+vmui: ${VM_URL}/vmui
+Alert destination: ${ALERT_TO}."
+    exit 1
+  fi
   log "FAIL: last_success age=${AGE_INT}s (~${DAYS}d) > ${STALE_SECONDS}"
   send_alert "FAIL no successful raise within 8 days" \
     "dr_fast_pg_raise_last_success_unixtime is ${AGE_INT}s old (~${DAYS} days; threshold ${STALE_SECONDS}s).

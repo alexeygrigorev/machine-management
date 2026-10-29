@@ -9,7 +9,7 @@
 1. Takes **fresh** `pg_dump -Fc` from live Contabo Coolify Postgres (`pg-shared`: cmp/aisl/website, `pg-relay`: relay) via `sudo docker exec`.
 2. SCPs dumps to Hetzner, stages as `~/tmp/pg-fast-raise-weekly/dumps/<db>.dump`.
 3. Runs timed `contingency/fast-pg-raise.sh` on **loopback only** (`127.0.0.1:55439`, container `pg-fast-raise-weekly`, `Restart=no`).
-4. Pushes metrics into Contabo **VictoriaMetrics** (`contabo-a:8428`) via SSH localhost import.
+4. Pushes metrics via `contingency/push-dr-raise-metrics.sh`: **direct** POST to Hetzner-local VM (`$VM_URL`, default `http://127.0.0.1:8428`, 400d retention) **plus** SSH relay to contabo-a localhost import (until the contabo-a check migrates; its hot VM keeps ~2d so a weekly sample expires before the 8d window — root cause of the 2026-10-29 false stale alert; format was fine, HTTP 204). `VM_SSH=""` skips the remote leg (tests/local-only, no Contabo contact).
 5. Tears down the throwaway container/volume (`TEARDOWN=1` default).
 
 **Hard guards:** no CF/DNS flip, no Coolify prod restart, no RDS touch. Distinct port from one-shot drills (`:55437` t1037u, `:55438` t1118u).
@@ -50,12 +50,19 @@ Note: VM default `search.latencyOffset` ≈ 30s — wait briefly after push befo
 
 ## Alert
 
-`monitors/dr-raise-stale-check.sh` on **contabo-a**:
+`monitors/dr-raise-stale-check.sh` on **contabo-a** (also runnable on Hetzner
+against the local VM for verification: `DRY_RUN=1 bash
+monitors/dr-raise-stale-check.sh` — queries only, sends no mail, changes no
+state):
 
 - Fires if metric **missing** or age **> 691200 s (~8 days)**.
 - Searches samples over `STALE_SECONDS` (`[691200s]`, equivalent to `[8d]` by
   default). Weekly push metrics disappear from instant-query lookback between
   runs; the range keeps successes visible throughout the existing stale window.
+- Distinguishes **"no attempts recorded"** (both `last_success` and
+  `last_run` missing) from **"recent attempts but no success"** (a fresh
+  `last_run` with stale/missing `last_success`, i.e. the raise runs but
+  fails) — see `monitors/tests/test-dr-raise-missing-vs-failed.sh`.
 - Email **only** `dev@dtcdev.click` via existing msmtp → SES (`alerts@dtcdev.click`).
 - Deduped to at most once per day while still failing; sends RECOVERED on clear.
 
