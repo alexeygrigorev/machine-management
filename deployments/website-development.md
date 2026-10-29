@@ -7,10 +7,15 @@ host. Local testing is the available default; preview availability must be
 verified for the particular application and release.
 
 `web.dtcdev.click` was retired on 2026-09-02. Do not rebuild that AWS stack.
-`dev.datatalks.club` is a different, existing deployment: `website-dev-web` on
-contabo-a, isolated on the `website_dev` database. The decision does not mean
-it has already been removed. Its retirement is **prep-only** in this intake;
-preserve its container, database, credentials, DNS and CloudFront distribution.
+`dev.datatalks.club` is a different, existing deployment. On 2026-10-29 its
+public route serves Coolify's `website-staging` web application on contabo-a;
+both its web and worker use `website_dev`. The older standalone
+`website-dev-web` also remains running against that database. The decision has
+not yet been fully implemented: retirement remains blocked, with no teardown
+performed. Preserve these containers, database, credentials, DNS and CloudFront
+distribution pending an authorized resource-specific change. The
+[2026-10-29 inventory and evidence](../inventory/dev-host-retirement-2026-10-29.md)
+supersede the old single-container retirement assumption.
 See the [current bindings](../inventory/db-bindings.md) and
 [origin TLS enforcement](../edge/origin-tls-enforce/README.md).
 
@@ -78,8 +83,11 @@ Those features alone do not prove this website has a usable preview.
 2. Confirm its database, role, storage and external services are isolated from
    production, with synthetic data and no production email/webhook delivery.
    Configure values in the **preview** variable group; do not copy production
-   credentials. Do not use the production-backed `website-staging` release
-   application as a writable preview despite its name.
+   credentials. Do not assume an application named `website-staging` is a
+   disposable preview: it currently serves the persistent dev route and its
+   source UUID participates in the production rollout configuration. A
+   `website_dev` database binding alone does not establish isolation of storage,
+   email, webhooks or other external services.
 3. Check the image's hostname contract before deploying: the currently reviewed
    `website.settings.development` accepts only the selected hostname in
    `deploy/development_target.py`, whose allowlist contains `web.dtcdev.click`
@@ -128,8 +136,9 @@ command sequence:
 | Object | Proposed future change and boundary |
 | --- | --- |
 | contabo-a `website-dev-web`, `/data/website-dev/docker-compose.yaml` | Stop the dedicated dev web only after checking current ownership, mounts and unique data; retain recovery material. Preserve production web, workers and Coolify applications. |
+| Coolify `website-staging`, UUID `wodajblzizrjunwme3ossav3` | Its web now serves `dev.datatalks.club`; web and worker consume `website_dev`. Preserve both. Resolve its role as the website production rollout source before proposing any control-plane change. Stopping only `website-dev-web` does not retire the public site. |
 | pg-shared `website_dev` database and `website_dev` role | Verify no consumers or unique data, create and verify a backup, then seek authorization for those two objects only. Preserve `website` and `website_app`. |
-| Traefik dev routes and `website-dev-backend` in dynamic configuration | Inventory current keys and references before changing them; do not replay historical installer output. Preserve production routes, shared `origin.website.datatalks.club`, origin verification and ACME renewal. Remove only dev credential alternatives from shared rules after reviewing the rendered diff privately. |
+| Traefik dev routes and `website-dev-backend` in dynamic configuration | The `origin-websitedev-*` routers currently target the Coolify Docker service, not `website-dev-backend`. Inventory current keys and references before changing them; do not replay historical installer output. Preserve production routes, shared `origin.website.datatalks.club`, origin verification and ACME renewal. Remove only dev credential alternatives from shared rules after reviewing the rendered diff privately. |
 | CloudFront `E33FS79KPFSAOM`, viewer `dev.datatalks.club` | Prepare disable/wait/record-removal order and exact DNS record set. No AWS calls are needed for this documentation change. AWS work must use separately available authorized credentials, never `main-temp`. Preserve production distribution `E1VNMGFFIXBOXX`. |
 | Website deployment triggers and development environment references | Inventory the website repository's current workflows, Coolify hooks and consumers before disabling a dev target. Do not delete credentials, state, historical evidence or unrelated configuration. |
 | This repo's inventory and edge expectations | Update live-state claims only after an authorized cutover, with independent review. Keep historical TLS/isolation evidence identifiable as history. |

@@ -5,6 +5,22 @@ Host-header probes. **No secret values here** — users/hosts/DB names only.
 
 Project `dtc-prod`, envs: `production`, `staging`.
 
+## Website update, 2026-10-29
+
+The website entries below are historical. A read-only container-label,
+credential-redacted environment and Traefik inspection now finds:
+
+- Coolify `website-staging` (`wodajblzizrjunwme3ossav3`) web serves
+  `dev.datatalks.club`; both its web and worker use `website_dev` at `10.100.0.2`.
+- Standalone `website-dev-web` still uses `website_dev` but is no longer the
+  target of the `origin-websitedev-*` routes.
+- The dev and production public readiness endpoints return 200 with trusted
+  TLS. The old claims that `website-staging` uses `website` and that its dev
+  hostname label is absent do not describe the current state.
+
+See [commands, outputs and retirement blockers](dev-host-retirement-2026-10-29.md).
+No DB privilege, table-count or non-website binding re-audit is claimed here.
+
 ## Serving-route separation (AC: no prod container serves a dev hostname)
 
 | Hostname | DNS → | Before (23 Oct ~13:30 CEST) | After | Proof |
