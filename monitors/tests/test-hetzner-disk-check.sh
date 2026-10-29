@@ -421,5 +421,55 @@ EOF
   fi
 fi
 
+echo "---- T14: t1885u WARN/RECOVERED never mail alexey@, hysteresis, and sustained CRIT breach ----"
+ST14="$(mkstate)"
+cat > "$TMP/envT14" <<EOF
+DISK_MOUNTS="/"
+ALERT_TO=alexey@datatalks.club,dev@dtcdev.click
+ALERT_OPS_TO=dev@dtcdev.click
+RECOVER_NOTIFY_MIN_SEC=0
+DISK_BREACH_RUNS=2
+EOF
+# 14a: 14% free -> WARN goes to dev@ only + digest, NEVER alexey@
+write_vals "/|ext4|$((100*GB))|$((14*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
+if grep -q 'dev@dtcdev.click' "$MAILBOX" && ! grep -q 'alexey@datatalks.club' "$MAILBOX" && [[ -s "$ST14/digest/queue.tsv" ]]; then
+  pass "T14a WARN (14% free) routes to dev@ + digest only, never alexey@"
+else
+  fail "T14a WARN routing -- mail: $(cat "$MAILBOX")"
+fi
+# 14b: Hysteresis: 16% free (< DISK_WARN_RECOVER_PCT=17%) stays in WARN (no premature RECOVERED flap)
+write_vals "/|ext4|$((100*GB))|$((16*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
+out="$(cat "$LAST_OUT")"; rc="$(cat "$LAST_RC")"
+if [[ "$rc" -ne 0 && "$out" == *WARN* && ! -s "$MAILBOX" ]]; then
+  pass "T14b hysteresis keeps 16% free in WARN without flapping"
+else
+  fail "T14b hysteresis (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
+fi
+# 14c: 18% free (>= 17%) recovers, RECOVERED goes to dev@ only, never alexey@
+write_vals "/|ext4|$((100*GB))|$((18*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
+out="$(cat "$LAST_OUT")"; rc="$(cat "$LAST_RC")"
+if [[ "$rc" -eq 0 && "$out" == *ALL_OK* ]] && grep -q 'RECOVERED' "$MAILBOX" && ! grep -q 'alexey@datatalks.club' "$MAILBOX"; then
+  pass "T14c recovery at 18% free sends RECOVERED to dev@ only, never alexey@"
+else
+  fail "T14c recovery routing (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
+fi
+# 14d: CRIT (5% free) requires 2 consecutive runs (DISK_BREACH_RUNS=2) before paging alexey@
+write_vals "/|ext4|$((100*GB))|$((5*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
+if grep -q 'dev@dtcdev.click' "$MAILBOX" && ! grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'PENDING_BREACH' "$LAST_OUT"; then
+  pass "T14d CRIT run 1/2 holds personal PAGE (PENDING_BREACH)"
+else
+  fail "T14d CRIT run 1/2 -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
+fi
+: > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
+if grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'dev@dtcdev.click' "$MAILBOX"; then
+  pass "T14e CRIT run 2/2 (sustained breach) pages alexey@ + dev@"
+else
+  fail "T14e CRIT run 2/2 -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
+fi
+
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]

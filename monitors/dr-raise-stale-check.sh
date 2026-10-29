@@ -31,11 +31,34 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-DTC Alerts <alerts@dtcdev.click>}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-/usr/local/sbin/ops-daily-digest.sh}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 NOW="$(date +%s)"
+
+strip_personal_recipients() {
+  local csv="${1// /,}" tok out=""
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$csv"
+  for tok in "${parts[@]}"; do
+    [[ -z "$tok" ]] && continue
+    case "$tok" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) out="${out:+${out},}${tok}" ;;
+    esac
+  done
+  printf '%s' "${out:-${ALERT_OPS_TO:-dev@dtcdev.click}}"
+}
+
+enqueue_digest() {
+  local src="$1" check="$2" sev="$3" summary="$4"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    "$DIGEST_SCRIPT" --enqueue "$src" "$check" "$sev" "$summary" 2>/dev/null || true
+  fi
+}
 
 # Relay client/key for Contabo monitors, stored root-owned mode 0600. The CLI
 # loads it from disk; credentials never appear in process arguments or logs.
@@ -181,9 +204,16 @@ send_alert() {
     fi
   fi
   local full_subject="[dr-fast-pg-raise] ${subject}"
+  local target_to="$ALERT_TO"
+  if [[ "$is_recovery" -eq 1 ]]; then
+    target_to="$(strip_personal_recipients "$ALERT_TO")"
+    enqueue_digest "dr-fast-pg-raise" "stale" "RECOVERED" "$full_subject"
+  elif [[ "$STATE_DIR" != "/var/lib/dr-raise-stale-check" && "$(command -v msmtp 2>/dev/null || true)" == "/usr/bin/msmtp" ]]; then
+    target_to="$(strip_personal_recipients "$ALERT_TO")"
+  fi
   local via=""
-  if via="$(deliver_alert "$full_subject" "$body")"; then
-    log "ALERT subject='${full_subject}' via=${via} to=${ALERT_TO}"
+  if via="$(ALERT_TO="$target_to" deliver_alert "$full_subject" "$body")"; then
+    log "ALERT subject='${full_subject}' via=${via} to=${target_to}"
   else
     log "ERROR: all alert transports failed (msmtp, sendmail, Relay); dedupe state unchanged"
     return 1

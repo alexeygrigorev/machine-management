@@ -86,7 +86,23 @@ WAL_IDLE_VERIFY="${WAL_IDLE_VERIFY:-1}"
 # atomically (mktemp+mv) since 91e25fd.
 WAL_IDLE_REREAD_WAIT_SEC="${WAL_IDLE_REREAD_WAIT_SEC:-0.5}"
 DISK_WARN_PERCENT="${DISK_WARN_PERCENT:-85}"
-SKIP_BACKUP_CHECKS="${SKIP_BACKUP_CHECKS:-0}"
+DISK_WARN_RECOVER_PERCENT="${DISK_WARN_RECOVER_PERCENT:-83}"
+DISK_MAX_PERCENT="${DISK_MAX_PERCENT:-92}"
+DISK_RECOVER_PERCENT="${DISK_RECOVER_PERCENT:-90}"
+DISK_FAIL_CONSECUTIVE="${DISK_FAIL_CONSECUTIVE:-2}"
+# Host-scoping guard (f4361152 / 3bf25bda AC4): when SKIP_BACKUP_CHECKS is unset,
+# only run dump/WAL checks on hosts where DUMP_DIR or WAL_STATE_DIR exists.
+if [[ -z "${SKIP_BACKUP_CHECKS:-}" ]]; then
+  if [[ -d "$DUMP_DIR" || -d "$WAL_STATE_DIR" ]]; then
+    SKIP_BACKUP_CHECKS="0"
+    SKIP_BACKUP_CHECKS_AUTO="0"
+  else
+    SKIP_BACKUP_CHECKS="1"
+    SKIP_BACKUP_CHECKS_AUTO="1"
+  fi
+else
+  SKIP_BACKUP_CHECKS_AUTO="0"
+fi
 SKIP_DISK_CHECK="${SKIP_DISK_CHECK:-0}"
 
 PG_SHARED_CONTAINER="${PG_SHARED_CONTAINER:-}"
@@ -152,10 +168,39 @@ HTTP_RESET_RETRY_SLEEP_SEC="${HTTP_RESET_RETRY_SLEEP_SEC:-5}"
 CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
 ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ops-daily-digest.sh}"
+
+strip_personal_recipients() {
+  local raw="${1// /,}" tok
+  local -a kept=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    [[ -n "$tok" ]] || continue
+    case "${tok,,}" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) kept+=("$tok") ;;
+    esac
+  done
+  if [[ "${#kept[@]}" -eq 0 ]]; then
+    echo "${ALERT_OPS_TO:-dev@dtcdev.click}"
+  else
+    local IFS=','
+    echo "${kept[*]}"
+  fi
+}
+
+enqueue_digest() {
+  local chk="$1" lvl="$2" msg="$3"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    DIGEST_STATE_DIR="${DIGEST_STATE_DIR:-$STATE_DIR/digest}" \
+      "$DIGEST_SCRIPT" --enqueue "coolify-healthcheck" "$chk" "$lvl" "$msg" 2>/dev/null || true
+  fi
+}
 # Suppress RECOVERED mail when the FAIL lasted shorter than this many seconds
 # (t1273u/t1274u: cut rapid FAIL→RECOVERED pair spam for one-tick flakes).
 # FAIL itself still pages immediately — do NOT raise FAIL_STREAK for prod HTTP
@@ -219,8 +264,21 @@ send_alert() {
   fi
   local full_subject="[coolify-healthcheck] ${subject} (${name})"
   local sent="no"
-  # ALERT_TO may be comma-separated; prod default alexey@datatalks.club,dev@dtcdev.click (t1205u)
-  local to_csv="${ALERT_TO// /,}"
+  # Policy (t1885u / 3bf25bda AC2 & AC4):
+  # 1. RECOVERED, WARN, dev-surface checks (*_dev), and drills/tests NEVER email alexey@.
+  # 2. Unconfigured wrong-host invocations (e.g. bare run on RMTHZ where /etc/coolify-healthcheck.env
+  #    is absent and real /usr/bin/msmtp is on PATH) strip alexey@ so wrong-host runs cannot page alexey@.
+  local effective_to="$ALERT_TO"
+  local msmtp_resolved
+  msmtp_resolved="$(command -v msmtp 2>/dev/null || true)"
+  if [[ "$is_recovery" -eq 1 || "$subject" == WARN* || "$name" == *_dev || "$name" == *-dev || "$name" == *DRILL* || "$name" == *TEST* || "${DRILL_MODE:-0}" == "1" || "${TEST_MODE:-0}" == "1" ]]; then
+    enqueue_digest "$name" "$subject" "$body"
+    effective_to="$(strip_personal_recipients "$ALERT_TO")"
+  elif [[ ! -f "$ENV_FILE" && "$msmtp_resolved" == "/usr/bin/msmtp" && "${COOLIFY_HEALTHCHECK_ALLOW_UNCONFIGURED_PROD_MAIL:-0}" != "1" ]]; then
+    log "WARN check=${name}: unconfigured host (${ENV_FILE} absent, real msmtp) — stripping personal recipients"
+    effective_to="$(strip_personal_recipients "$ALERT_TO")"
+  fi
+  local to_csv="${effective_to// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()
   IFS=',' read -r -a to_args <<< "$to_csv"
@@ -276,7 +334,7 @@ send_alert() {
   else
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
   fi
-  log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$sent" == "no" ]]; then
     log "FAIL check=mail-${name}: delivery failed; retaining state for retry"
     FAILED=1
@@ -643,16 +701,49 @@ probe_latency() {
 
 check_disk() {
   local name="disk-root" used_pct
+  local state_file="${STATE_DIR}/${name}.state"
+  local prev_status="" prev_streak=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    prev_status="${STATUS:-}"
+    prev_streak="${DISK_STREAK:-0}"
+  fi
   used_pct="$(df -BP / | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
   if [[ -z "$used_pct" || ! "$used_pct" =~ ^[0-9]+$ ]]; then
     log "FAIL check=${name}: could not parse df"
     send_alert "$name" "FAIL" "Unable to parse root filesystem usage on $(hostname)."
     FAILED=1; return
   fi
-  if [[ "$used_pct" -ge "$DISK_WARN_PERCENT" ]]; then
-    log "FAIL check=${name}: / at ${used_pct}% (threshold ${DISK_WARN_PERCENT}%)"
-    send_alert "$name" "FAIL" "Root filesystem on $(hostname) is ${used_pct}% full (threshold ${DISK_WARN_PERCENT}%). Contabo-b dumps/WAL must stay off-host; free space or prune."
+  # Hysteresis + sustained breach (t1885u AC3):
+  # - PAGE (FAIL) when used_pct >= DISK_MAX_PERCENT (92%, i.e. <=8% free) sustained across
+  #   DISK_FAIL_CONSECUTIVE runs, staying in FAIL until <= DISK_RECOVER_PERCENT (90%).
+  # - DIGEST (WARN) when used_pct >= DISK_WARN_PERCENT (85%), staying in WARN until
+  #   <= DISK_WARN_RECOVER_PERCENT (83%). Never pages alexey@.
+  local crit_thr="$DISK_MAX_PERCENT"
+  local warn_thr="$DISK_WARN_PERCENT"
+  if [[ "$prev_status" == "FAIL" ]]; then
+    crit_thr=$(( DISK_RECOVER_PERCENT + 1 ))
+    warn_thr=$(( DISK_WARN_RECOVER_PERCENT + 1 ))
+  fi
+  if [[ "$used_pct" -ge "$crit_thr" ]]; then
+    local streak=$(( prev_streak + 1 ))
+    if [[ "$streak" -lt "$DISK_FAIL_CONSECUTIVE" ]]; then
+      log "WARN check=${name}: / at ${used_pct}% (>=${crit_thr}%) streak=${streak}/${DISK_FAIL_CONSECUTIVE} — holding PAGE until sustained breach"
+      enqueue_digest "$name" "PENDING_CRIT" "Root filesystem on $(hostname) is ${used_pct}% full (streak ${streak}/${DISK_FAIL_CONSECUTIVE})."
+      printf 'STATUS=%s\nLAST_ALERT=%s\nFAIL_SINCE=%s\nDISK_STREAK=%s\n' \
+        "${prev_status:-PENDING}" "${LAST_ALERT:-0}" "${FAIL_SINCE:-0}" "$streak" > "$state_file"
+      return
+    fi
+    log "FAIL check=${name}: / at ${used_pct}% (crit threshold ${DISK_MAX_PERCENT}%, streak=${streak})"
+    send_alert "$name" "FAIL" "Root filesystem on $(hostname) is ${used_pct}% full (crit threshold ${DISK_MAX_PERCENT}%, recover <=${DISK_RECOVER_PERCENT}%). Contabo-b dumps/WAL must stay off-host; free space or prune."
+    echo "DISK_STREAK=${streak}" >> "$state_file"
     FAILED=1; return
+  elif [[ "$used_pct" -ge "$warn_thr" ]]; then
+    log "WARN check=${name}: / at ${used_pct}% (warn threshold ${DISK_WARN_PERCENT}%, crit ${DISK_MAX_PERCENT}%) — digest only"
+    enqueue_digest "$name" "WARN" "Root filesystem on $(hostname) is ${used_pct}% full (warn ${DISK_WARN_PERCENT}%, crit ${DISK_MAX_PERCENT}%)."
+    printf 'STATUS=OK\nLAST_ALERT=%s\nFAIL_SINCE=0\nDISK_STREAK=0\n' "${LAST_ALERT:-0}" > "$state_file"
+    return
   fi
   log "OK check=${name}: / at ${used_pct}% (<${DISK_WARN_PERCENT}%)"
   mark_ok "$name"
@@ -1046,7 +1137,11 @@ fi
 check_created_containers
 
 if [[ "${SKIP_BACKUP_CHECKS:-0}" == "1" ]]; then
-  log "SKIP backup dump/WAL freshness (SKIP_BACKUP_CHECKS=1)"
+  if [[ "${SKIP_BACKUP_CHECKS_AUTO:-0}" == "1" ]]; then
+    log "SKIP backup dump/WAL freshness (auto: neither ${DUMP_DIR} nor ${WAL_STATE_DIR} exists on this host)"
+  else
+    log "SKIP backup dump/WAL freshness (SKIP_BACKUP_CHECKS=1)"
+  fi
 else
   check_dump_freshness
   check_wal_freshness

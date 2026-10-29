@@ -74,6 +74,8 @@ DEADMAN_MAX_LOG_AGE_SEC="${DEADMAN_MAX_LOG_AGE_SEC:-600}"
 # body is lowercased + whitespace-stripped before fixed-string match).
 DEADMAN_URLS="${DEADMAN_URLS:-courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\" website_ready=https://prod.datatalks.club/health/ready::\"status\":\"ready\" relay_health=https://relay.datatalks.club/health/::\"service\":\"relay\"}"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
+DEADMAN_HTTP_RETRIES="${DEADMAN_HTTP_RETRIES:-2}"
+DEADMAN_HTTP_RETRY_SLEEP_SEC="${DEADMAN_HTTP_RETRY_SLEEP_SEC:-0}"
 DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 
 # --- latency probes (f5d8e22b AC2: off-Contabo TTFB/total into VM) ---
@@ -96,6 +98,34 @@ ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
 ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ops-daily-digest.sh}"
+
+strip_personal_recipients() {
+  local raw="${1// /,}" tok
+  local -a kept=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    [[ -n "$tok" ]] || continue
+    case "${tok,,}" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) kept+=("$tok") ;;
+    esac
+  done
+  if [[ "${#kept[@]}" -eq 0 ]]; then
+    echo "${ALERT_OPS_TO:-dev@dtcdev.click}"
+  else
+    local IFS=','
+    echo "${kept[*]}"
+  fi
+}
+
+enqueue_digest() {
+  local chk="$1" lvl="$2" msg="$3"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    DIGEST_STATE_DIR="${DIGEST_STATE_DIR:-$STATE_DIR/digest}" \
+      "$DIGEST_SCRIPT" --enqueue "contabo-deadman" "$chk" "$lvl" "$msg" 2>/dev/null || true
+  fi
+}
 
 command -v ssh >/dev/null 2>&1 || { log "ERROR: missing required binary: ssh"; exit 1; }
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
@@ -138,6 +168,18 @@ send_alert() {
     to_csv="${to_override// /,}"
   else
     to_csv="${ALERT_TO// /,}"
+  fi
+  # Policy (t1885u / 3bf25bda AC2 & AC4, 9806fc14):
+  # 1. RECOVERED notifications, drills, and test checks NEVER email alexey@.
+  # 2. Any invocation using a non-prod STATE_DIR while real /usr/bin/msmtp is on PATH
+  #    strips alexey@ so ad-hoc test/drill runs cannot leak to personal inbox.
+  local msmtp_resolved
+  msmtp_resolved="$(command -v msmtp 2>/dev/null || true)"
+  if [[ "$is_recovery" -eq 1 || "$subject" == WARN* || "$name" == *drill* || "$name" == *DRILL* || "$name" == *test* || "$name" == *TEST* || "${DRILL_MODE:-0}" == "1" || "${TEST_MODE:-0}" == "1" ]]; then
+    enqueue_digest "$name" "$subject" "$body"
+    to_csv="$(strip_personal_recipients "$to_csv")"
+  elif [[ "$STATE_DIR" != "$HOME/.local/state/contabo-deadman" && "$msmtp_resolved" == "/usr/bin/msmtp" ]]; then
+    to_csv="$(strip_personal_recipients "$to_csv")"
   fi
   local to_header="${to_csv//,/, }"
   local -a to_args=()
@@ -218,7 +260,7 @@ mark_ok() {
     last_status="${STATUS:-}"
   fi
   if [[ "$last_status" == "FAIL" ]]; then
-    send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+    send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')." "$ALERT_OPS_TO"
   else
     printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
   fi
@@ -273,9 +315,19 @@ check_node() {
 
 check_url() {
   # $1=name $2=url $3=marker
-  local name="ext-${1}" url="$2" marker="$3" code rc body_file
+  local name="ext-${1}" url="$2" marker="$3" code="" rc=0 body_file attempt=0
   body_file="$(mktemp)" || { log "FAIL check=${name}: mktemp failed"; FAILED=1; return; }
-  code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+  while true; do
+    attempt=$(( attempt + 1 ))
+    code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+    if [[ "$rc" -eq 0 && "$code" =~ ^[23] ]]; then
+      break
+    fi
+    if [[ "$attempt" -gt "$DEADMAN_HTTP_RETRIES" ]]; then
+      break
+    fi
+    [[ "${DEADMAN_HTTP_RETRY_SLEEP_SEC:-0}" != "0" ]] && sleep "$DEADMAN_HTTP_RETRY_SLEEP_SEC"
+  done
   if [[ "$rc" -ne 0 ]]; then
     log "FAIL check=${name}: curl ${url}: rc=${rc} detail='$(echo "$code" | head -c 160)'"
     send_alert "$name" "FAIL" "External probe failed for '${1}' (${url}): curl rc=${rc}. Neither Contabo node could be confirmed from outside — possible provider/network outage."

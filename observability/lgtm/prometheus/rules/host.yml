@@ -2,17 +2,59 @@ groups:
   - name: contabo-host
     rules:
       - alert: HostDiskAlmostFull
-        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 25
+        # Hysteresis (t1885u): page at <8% free for 10m; hold until >=10% free.
+        expr: |
+          (
+            (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 8
+          )
+          or
+          (
+            ALERTS{alertname="HostDiskAlmostFull", alertstate="firing"} == 1
+            and
+            (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 10
+          )
         for: 10m
         labels:
-          severity: warning
+          severity: critical
+          alert_class: PAGE
         annotations:
-          summary: "Disk ≥75% used on {{ $labels.host }} ({{ $labels.mountpoint }})"
-      - alert: HostDown
-        expr: up{job="node"} == 0
-        for: 2m
+          summary: "Disk ≥92% used on {{ $labels.host }} ({{ $labels.mountpoint }})"
+      - alert: HostDiskWillFillIn6h
+        # Rapid growth (t1885u): <15% free AND predicted full within 6h (sustained 30m).
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 15
+          and
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 6 * 3600) < 0
+        for: 30m
         labels:
           severity: critical
+          alert_class: PAGE
+        annotations:
+          summary: "Disk predicted full within 6h on {{ $labels.host }} ({{ $labels.mountpoint }})"
+      - alert: HostDiskWarning
+        # Informational early warning (t1885u): DIGEST only (dev@dtcdev.click), never pages alexey@.
+        expr: |
+          (
+            (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 15
+          )
+          or
+          (
+            ALERTS{alertname="HostDiskWarning", alertstate="firing"} == 1
+            and
+            (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 17
+          )
+        for: 30m
+        labels:
+          severity: warning
+          alert_class: DIGEST
+        annotations:
+          summary: "Disk ≥85% used on {{ $labels.host }} ({{ $labels.mountpoint }})"
+      - alert: HostDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          alert_class: PAGE
         annotations:
           summary: "node_exporter down on {{ $labels.host }}"
       - alert: PostgresExporterDown
@@ -20,5 +62,6 @@ groups:
         for: 5m
         labels:
           severity: critical
+          alert_class: PAGE
         annotations:
           summary: "postgres_exporter down ({{ $labels.instance_name }})"

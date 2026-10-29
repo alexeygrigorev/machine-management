@@ -1,0 +1,6 @@
+# Daily Ops Digest — sends consolidated WARN/handled/predict/RECOVERED summary
+# to dev@dtcdev.click ONLY once per day at 08:00 Europe/Berlin (t1885u / 3bf25bda).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Berlin
+0 8 * * * root /usr/local/sbin/ops-daily-digest.sh --send >> /var/log/ops-daily-digest.log 2>&1

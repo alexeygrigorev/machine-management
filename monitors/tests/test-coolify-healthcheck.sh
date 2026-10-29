@@ -81,7 +81,12 @@ cat > "$TMP/stubbin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "200"; exit 0
 EOF
-chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/curl"
+cat > "$TMP/stubbin/msmtp" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null; exit 0
+EOF
+cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
+chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/curl" "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
 
 run_check() { # $1=envfile -> prints output, returns script rc
   local envf="$1" statedir
@@ -165,7 +170,9 @@ cat > "$TMP/cbin/docker" <<'EOF'
 # No-op docker for content tests: no containers anywhere (Created check green).
 exit 0
 EOF
-chmod +x "$TMP/cbin/docker"
+cp "$TMP/stubbin/msmtp" "$TMP/cbin/msmtp"
+cp "$TMP/stubbin/sendmail" "$TMP/cbin/sendmail"
+chmod +x "$TMP/cbin/docker" "$TMP/cbin/msmtp" "$TMP/cbin/sendmail"
 
 run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
   local statedir
@@ -267,7 +274,9 @@ case "${1:-}" in
 esac
 echo "stub docker: unsupported: $*" >&2; exit 99
 EOF
-chmod +x "$TMP/dbin/docker"
+cp "$TMP/stubbin/msmtp" "$TMP/dbin/msmtp"
+cp "$TMP/stubbin/sendmail" "$TMP/dbin/sendmail"
+chmod +x "$TMP/dbin/docker" "$TMP/dbin/msmtp" "$TMP/dbin/sendmail"
 
 run_ops() { # uses $STUB2_* env; $1=CHECK_AISL_Q value
   local statedir envf="$TMP/env-ops"
@@ -402,6 +411,23 @@ if [[ $rc -ne 0 && "$out" == *'FAIL latency probe=p1'* ]]; then
   pass "T20 slow with sustain=0 FAILs (drill)"
 else
   fail "T20 slow immediate (rc=$rc) -- $out"
+fi
+
+# T21: host-scoping guard (f4361152 / 3bf25bda AC4): when SKIP_BACKUP_CHECKS is unset
+# and neither DUMP_DIR nor WAL_STATE_DIR exists, backup/WAL checks auto-skip without FAIL.
+out=""; set +e
+out="$(env -u SKIP_BACKUP_CHECKS COOLIFY_HEALTHCHECK_ENV_FILE="/nonexistent" \
+  STATE_DIR="$(mktemp -d -p "$TMP")" LOCK_FILE="$TMP/lock-t21" \
+  DUMP_DIR="$TMP/absent-dumps" WAL_SHIPPER_STATE_DIR="$TMP/absent-wal" \
+  SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_DISK_CHECK=1 SKIP_CREATED_CHECK=1 \
+  CHECK_CMP_CALLBACKS=0 CHECK_AISL_Q=0 APP_URLS="" CONTENT_CHECKS="" LATENCY_PROBES="" LATENCY_PUSH_ENABLED=0 \
+  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+rc=$?; set -e
+if [[ $rc -eq 0 && "$out" == *"SKIP backup dump/WAL freshness (auto:"* && "$out" == *"ALL_OK"* ]]; then
+  pass "T21 unset SKIP_BACKUP_CHECKS auto-skips on host without dump/WAL dirs"
+else
+  fail "T21 auto-skip backup checks (rc=$rc) -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

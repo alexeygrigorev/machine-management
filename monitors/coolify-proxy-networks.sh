@@ -43,6 +43,14 @@ ALERT_SUBJECT_PREFIX="${ALERT_SUBJECT_PREFIX:-[coolify-proxy-networks]}"
 [[ "$ALERT_TO" == dev@dtcdev.click ]] || { log "ERROR: proxy-network alerts must go to dev@ only"; exit 1; }
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-/usr/local/sbin/ops-daily-digest.sh}"
+
+enqueue_digest() {
+  local src="$1" check="$2" sev="$3" summary="$4"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    "$DIGEST_SCRIPT" --enqueue "$src" "$check" "$sev" "$summary" 2>/dev/null || true
+  fi
+}
 
 command -v docker >/dev/null 2>&1 || { log "ERROR: missing required binary: docker"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { log "ERROR: missing required binary: python3"; exit 1; }
@@ -132,6 +140,7 @@ send_alert() {
     log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
+  enqueue_digest "coolify-proxy-networks" "$name" "${subject%% *}" "$full_subject"
   # Failed transport must retry next run, including a failed recovery.
   [[ "$sent" != no ]] || return 0
   if [[ "$is_recovery" -eq 1 ]]; then

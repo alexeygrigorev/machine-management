@@ -400,13 +400,36 @@ The Relay self-monitors (`relay-pg-dns-watchdog`, `coolify-healthcheck`, and
 
 Hetzner (RMTHZ) pages for its own disks from user cron (`*/5`, stable
 `/usr/local/sbin/hetzner-disk-check.sh`, state under
-`~/.local/state/hetzner-disk-check/`). Thresholds: free WARN <15% / CRIT <8%,
-inode free WARN <10% / CRIT <5%, plus CRIT when the 6h linear trend fills the
-disk within 24h. The first real WARN on `/` (~12% free) is expected and
-correct — do not raise thresholds to hide it. Repeat at most every 4h, one
+`~/.local/state/hetzner-disk-check/`). Thresholds: free WARN <15% (recover >=17%)
+/ CRIT <8% (recover >=10%), inode free WARN <10% (recover >=12%) / CRIT <5%
+(recover >=7%), plus CRIT when the 6h linear trend fills the disk within 24h.
+WARN and RECOVERED route to `dev@dtcdev.click` + daily digest only (never
+`alexey@`); CRIT pages `alexey@datatalks.club,dev@dtcdev.click` after 2
+consecutive breached runs (`DISK_BREACH_RUNS=2`). Repeat at most every 4h, one
 RECOVERED (flap-guarded). Prove the mail path with
 `DISK_DRILL=1 /usr/local/sbin/hetzner-disk-check.sh` (dev@ only), then run
 normally to clear. `install-node-exporter.sh` pins node_exporter to
 `127.0.0.1:9100` for the follow-up vmalert intake; verify with
 `curl -s 127.0.0.1:9100/metrics | grep node_filesystem_avail_bytes` and confirm
 no non-loopback `:9100` listener (`ss -tln | grep :9100`).
+
+## Alert audit: PAGE / DIGEST / DELETE & hysteresis (intake 3bf25bda / t1885u)
+
+Every alert rule across `monitors/` and `observability/` is classified as:
+
+- **PAGE** (`alexey@datatalks.club,dev@dtcdev.click`): real user-facing outage or
+  data-loss risk requiring immediate human action. Requires sustained breach
+  (e.g. `DISK_BREACH_RUNS=2` on Hetzner, `DISK_FAIL_CONSECUTIVE=2` on Contabo,
+  `DEADMAN_HTTP_RETRIES=2` on Contabo dead-man, `for: 10m`/`30m` in Prometheus)
+  and hysteresis (`DISK_CRIT_RECOVER_PCT=10`, `DISK_RECOVER_PERCENT=90`).
+- **DIGEST** (`dev@dtcdev.click` + `monitors/ops-daily-digest.sh`, never
+  `alexey@`): informational `WARN` notices (Hetzner `<15%` disk free, Contabo
+  `>=85%` disk used, `relay-pg-dns-watchdog` handled DB errors), `AUTOHEALED`
+  notices, `RECOVERED` transitions, and dev/staging endpoints (`*_dev`).
+  `monitors/ops-daily-digest.sh` (`monitors/ops-daily-digest.cron`, 08:00
+  Europe/Berlin) sends at most one daily summary to `dev@dtcdev.click` (silent on
+  quiet days).
+- **DELETE / Auto-scoped**: backup freshness checks (`dump-*`, `wal-*`) in
+  `coolify-healthcheck.sh` auto-skip when `SKIP_BACKUP_CHECKS` is unset and
+  neither `$DUMP_DIR` nor `$WAL_STATE_DIR` exists on the host (fixing Contabo-a
+  app-node false pages, intake `f4361152`).

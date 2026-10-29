@@ -385,6 +385,18 @@ else
   fail "D20 drill (rc=$rc inv=$n_inv row=[$row20])"
 fi
 
+# ---- D22: real check RECOVERED routes to ops-only (never alexey@ / T_ALARM) (t1885u) ----
+SD22="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
+row22_fail="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
+out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/good::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
+row22_rec="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
+if [[ "$row22_fail" == *"$T_ALARM"* && "$row22_rec" == *"RECOVERED (ext-svc)"* && "$row22_rec" == *"$T_OPS"* && "$row22_rec" != *"$T_ALARM"* ]]; then
+  pass "D22 real check FAIL pages ALERT_TO; RECOVERED routes to ALERT_OPS_TO only"
+else
+  fail "D22 RECOVERED routing (fail=[$row22_fail] rec=[$row22_rec])"
+fi
+
 # ---- D21: suite-wide recipient sweep (9806fc14) — no real datatalks.club
 # recipient may appear in ANY captured mail. The c0e34bb-era suite configured
 # the real ALERT_TO and mailed alexey@ from its FAIL-path tests (2026-10-27);

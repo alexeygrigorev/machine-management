@@ -109,7 +109,9 @@ run_check "$TMP/boundary" fail 1000000 0
 run_check "$TMP/boundary" good 1000600 0
 require test "$(mail_count "$TMP/boundary")" -eq 4
 require test "$(grep -c '^Subject: .* RECOVERED' "$TMP/boundary/mail")" -eq 2
-pass '600-second boundary sends exactly one RECOVERED per check'
+require test "$(grep -c '^To: dev@dtcdev.click$' "$TMP/boundary/mail")" -eq 2
+require test "$(grep -c '^To: alexey@datatalks.club, dev@dtcdev.click$' "$TMP/boundary/mail")" -eq 2
+pass '600-second boundary sends exactly one RECOVERED per check (to dev@ only, never alexey@)'
 run_check "$TMP/boundary" good 1000900 0
 require test "$(mail_count "$TMP/boundary")" -eq 4
 pass 'continued green does not repeat recovery mail'

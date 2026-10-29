@@ -39,12 +39,34 @@ ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/storagebox-sync}"
 DRY_RUN="${DRY_RUN:-0}"
 STORAGEBOX_STALE_DRILL="${STORAGEBOX_STALE_DRILL:-0}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-/usr/local/sbin/ops-daily-digest.sh}"
 
 mkdir -p "$STATE_DIR"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 NOW="${STORAGEBOX_NOW:-$(date +%s)}"
 case "$NOW" in ''|*[!0-9]*) NOW="$(date +%s)";; esac
+
+strip_personal_recipients() {
+  local csv="${1// /,}" tok out=""
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$csv"
+  for tok in "${parts[@]}"; do
+    [[ -z "$tok" ]] && continue
+    case "$tok" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) out="${out:+${out},}${tok}" ;;
+    esac
+  done
+  printf '%s' "${out:-${ALERT_OPS_TO:-dev@dtcdev.click}}"
+}
+
+enqueue_digest() {
+  local src="$1" check="$2" sev="$3" summary="$4"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    "$DIGEST_SCRIPT" --enqueue "$src" "$check" "$sev" "$summary" 2>/dev/null || true
+  fi
+}
 
 send_to() {
   # $1=to_csv $2=subject $3=body
@@ -66,6 +88,12 @@ send_to() {
     fi
   fi
   local full_subject="[storagebox-staleness] ${subject}"
+  if [[ "$is_recovery" -eq 1 || "$STORAGEBOX_STALE_DRILL" == "1" ]]; then
+    to_csv="$(strip_personal_recipients "$to_csv")"
+    [[ "$is_recovery" -eq 1 ]] && enqueue_digest "storagebox-staleness" "staleness" "RECOVERED" "$full_subject"
+  elif [[ "$STATE_DIR" != "$HOME/.local/state/storagebox-sync" && "$(command -v msmtp 2>/dev/null || true)" == "/usr/bin/msmtp" ]]; then
+    to_csv="$(strip_personal_recipients "$to_csv")"
+  fi
   to_csv="${to_csv// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()

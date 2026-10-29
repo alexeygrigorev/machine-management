@@ -62,11 +62,17 @@ SAMPLE_DIR="${SAMPLE_DIR:-$STATE_DIR/samples}"
 
 DISK_MOUNTS="${DISK_MOUNTS:-/ /boot /data}"
 DISK_WARN_FREE_PCT="${DISK_WARN_FREE_PCT:-15}"
+DISK_WARN_RECOVER_PCT="${DISK_WARN_RECOVER_PCT:-17}"
 DISK_CRIT_FREE_PCT="${DISK_CRIT_FREE_PCT:-8}"
+DISK_CRIT_RECOVER_PCT="${DISK_CRIT_RECOVER_PCT:-10}"
 INODE_WARN_FREE_PCT="${INODE_WARN_FREE_PCT:-10}"
+INODE_WARN_RECOVER_PCT="${INODE_WARN_RECOVER_PCT:-12}"
 INODE_CRIT_FREE_PCT="${INODE_CRIT_FREE_PCT:-5}"
+INODE_CRIT_RECOVER_PCT="${INODE_CRIT_RECOVER_PCT:-7}"
+DISK_BREACH_RUNS="${DISK_BREACH_RUNS:-2}"
 FILL_WINDOW_H="${FILL_WINDOW_H:-6}"
 FILL_CRIT_H="${FILL_CRIT_H:-24}"
+FILL_PAGE_H="${FILL_PAGE_H:-6}"
 FILL_MIN_SPAN_SEC="${FILL_MIN_SPAN_SEC:-1800}"
 # Recent-window confirmation for the fill trend: must independently predict
 # fill within FILL_CRIT_H, else the long-window slope is treated as a stale
@@ -81,9 +87,38 @@ ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"
 RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ops-daily-digest.sh}"
 
 DISK_DRILL="${DISK_DRILL:-0}"
 DISK_DF_BIN="${DISK_DF_BIN:-df}"
+
+# Strip personal alexey@ addresses for non-PAGE events (WARN, predict, RECOVERED, drills, or unisolated test runs).
+strip_personal_recipients() {
+  local raw="${1// /,}" tok
+  local -a kept=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    [[ -n "$tok" ]] || continue
+    case "${tok,,}" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) kept+=("$tok") ;;
+    esac
+  done
+  if [[ "${#kept[@]}" -eq 0 ]]; then
+    echo "${ALERT_OPS_TO:-dev@dtcdev.click}"
+  else
+    local IFS=','
+    echo "${kept[*]}"
+  fi
+}
+
+enqueue_digest() {
+  local chk="$1" lvl="$2" msg="$3"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    DIGEST_STATE_DIR="${DIGEST_STATE_DIR:-$STATE_DIR/digest}" \
+      "$DIGEST_SCRIPT" --enqueue "hetzner-disk-check" "$chk" "$lvl" "$msg" 2>/dev/null || true
+  fi
+}
 
 command -v flock >/dev/null 2>&1 || { log "ERROR: missing required binary: flock"; exit 1; }
 command -v awk >/dev/null 2>&1 || { log "ERROR: missing required binary: awk"; exit 1; }
@@ -99,22 +134,53 @@ NOW="${DISK_NOW:-$(date +%s)}"
 case "$NOW" in ''|*[!0-9]*) NOW="$(date +%s)";; esac
 
 send_to() {
-  # $1=to_csv $2=check-name $3=subject-suffix $4=body
-  local to_csv="$1" name="$2" subject="$3" body="$4"
+  # $1=to_csv $2=check-name $3=subject-suffix $4=body [$5=level_tag] [$6=crit_streak]
+  local to_csv="$1" name="$2" subject="$3" body="$4" level_tag="${5:-}" crit_streak="${6:-0}"
   local state_file="${STATE_DIR}/${name}.state"
-  local last_alert=0 last_status="" fail_since=0
+  local last_alert=0 last_status="" fail_since=0 prev_level="" prev_paged_personal=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
     last_alert="${LAST_ALERT:-0}"; last_status="${STATUS:-}"
-    fail_since="${FAIL_SINCE:-0}"
+    fail_since="${FAIL_SINCE:-0}"; prev_level="${PREV_LEVEL:-}"
+    prev_paged_personal="${PAGED_PERSONAL:-0}"
   fi
   local is_recovery=0
   [[ "$subject" == RECOVERED* ]] && is_recovery=1
+
+  # Policy (t1885u / 3bf25bda AC2 & AC3):
+  # 1. WARN, predict-only, RECOVERED, and drills are DIGEST/ops-only: NEVER email alexey@.
+  # 2. CRIT (PAGE) requires sustained breach (crit_streak >= DISK_BREACH_RUNS) before
+  #    paging alexey@; run 1 alerts ops/digest only and escalates to alexey@ on run >= DISK_BREACH_RUNS.
+  local wants_personal=0
+  case ",${to_csv,,}," in
+    *,alexey@*|*,*alexey.s.grigoriev@*) wants_personal=1 ;;
+  esac
+  local page_personal=0
+  if [[ "$is_recovery" -eq 1 || "$subject" == WARN* || "$level_tag" == "WARN" || "$DISK_DRILL" == "1" ]]; then
+    enqueue_digest "$name" "$subject" "$body"
+    to_csv="$(strip_personal_recipients "$to_csv")"
+  elif [[ "$wants_personal" -eq 1 ]]; then
+    if [[ "$crit_streak" -lt "$DISK_BREACH_RUNS" ]]; then
+      log "PENDING_BREACH check=${name} streak=${crit_streak}/${DISK_BREACH_RUNS}: holding personal PAGE until sustained breach"
+      enqueue_digest "$name" "PENDING_CRIT" "$body"
+      to_csv="$(strip_personal_recipients "$to_csv")"
+    else
+      page_personal=1
+    fi
+  fi
+
   if [[ "$is_recovery" -eq 0 && "$last_status" == "FAIL" ]]; then
-    local elapsed_min=$(( (NOW - last_alert) / 60 ))
-    if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
-      return 0  # still failing, recently alerted — dedupe
+    # If previous run only notified ops (PENDING_BREACH) and this run now escalates to personal PAGE, do not dedupe!
+    if [[ "$page_personal" -eq 1 && "$prev_paged_personal" -eq 0 ]]; then
+      : # escalate to personal PAGE now
+    else
+      local elapsed_min=$(( (NOW - last_alert) / 60 ))
+      if [[ "$elapsed_min" -lt "$ALERT_REPEAT_MIN" ]]; then
+        printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\nPREV_LEVEL=%s\nCRIT_STREAK=%s\nPAGED_PERSONAL=%s\n' \
+          "$last_alert" "$fail_since" "${level_tag:-$prev_level}" "$crit_streak" "$prev_paged_personal" > "$state_file"
+        return 0  # still failing, recently alerted — dedupe
+      fi
     fi
   fi
   local full_subject="[hetzner-disk-check] ${subject} (${name})"
@@ -178,7 +244,7 @@ send_to() {
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$is_recovery" -eq 1 ]]; then
     if [[ "$sent" != "no" ]]; then
-      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
+      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\nPREV_LEVEL=OK\nCRIT_STREAK=0\nPAGED_PERSONAL=0\n' > "$state_file"
     else
       log "WARN: RECOVERED mail for ${name} failed to send — keeping FAIL state so the next run retries"
     fi
@@ -191,8 +257,14 @@ send_to() {
     # LAST_ALERT so the next run retries immediately instead of waiting
     # ALERT_REPEAT_MIN with nobody paged.
     local new_last_alert="$NOW"
-    if [[ "$sent" == "no" ]]; then new_last_alert="$last_alert"; fi
-    printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\n' "$new_last_alert" "$new_fail_since" > "$state_file"
+    local new_paged_personal="$prev_paged_personal"
+    if [[ "$sent" == "no" ]]; then
+      new_last_alert="$last_alert"
+    elif [[ "$page_personal" -eq 1 ]]; then
+      new_paged_personal=1
+    fi
+    printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\nPREV_LEVEL=%s\nCRIT_STREAK=%s\nPAGED_PERSONAL=%s\n' \
+      "$new_last_alert" "$new_fail_since" "${level_tag:-$prev_level}" "$crit_streak" "$new_paged_personal" > "$state_file"
   fi
 }
 
@@ -200,9 +272,8 @@ send_alert() { send_to "$ALERT_TO" "$@"; }
 send_ops() { send_to "$ALERT_OPS_TO" "$@"; }
 
 mark_ok() {
-  # $1=check-name — sends RECOVERED if previous state was FAIL AND the outage
-  # lasted at least RECOVER_NOTIFY_MIN_SEC (same flap guard as
-  # coolify-healthcheck). Short flaps still leave STATUS=OK silently.
+  # $1=check-name — sends RECOVERED (to ops/digest, never alexey@) if previous
+  # state was FAIL AND the outage lasted at least RECOVER_NOTIFY_MIN_SEC.
   local name="$1"
   local state_file="${STATE_DIR}/${name}.state"
   local last_status="" fail_since=0 last_alert=0
@@ -217,11 +288,11 @@ mark_ok() {
     if [[ "$lasted" -ge "$RECOVER_NOTIFY_MIN_SEC" ]]; then
       send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ') after ${lasted}s."
     else
-      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
+      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\nPREV_LEVEL=OK\nCRIT_STREAK=0\nPAGED_PERSONAL=0\n' > "$state_file"
       log "RECOVERED-suppressed check=${name} lasted=${lasted}s (<${RECOVER_NOTIFY_MIN_SEC}s flap guard)"
     fi
   else
-    printf 'STATUS=OK\nLAST_ALERT=%s\n' "$last_alert" > "$state_file"
+    printf 'STATUS=OK\nLAST_ALERT=%s\nPREV_LEVEL=OK\nCRIT_STREAK=0\nPAGED_PERSONAL=0\n' "$last_alert" > "$state_file"
   fi
 }
 
@@ -397,19 +468,46 @@ check_mount() {
   free_pct="$(awk -v a="$avail" -v s="$size" 'BEGIN{printf "%.1f", (a*100)/s}')"
   record_sample "$(sanitize_mount "$mp")" "$avail" "$size"
 
+  local state_file="${STATE_DIR}/${name}.state"
+  local prev_level="OK" prev_streak=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    prev_level="${PREV_LEVEL:-OK}"
+    prev_streak="${CRIT_STREAK:-0}"
+  fi
+
   local level="OK" reason=""
   local inode_free_int="${inode_free_pct%.*}"
   [[ -z "$inode_free_int" ]] && inode_free_int=100
-  if awk -v f="$free_pct" -v c="$DISK_CRIT_FREE_PCT" 'BEGIN{exit !(f+0 < c+0)}'; then
-    level="CRIT"; reason="free ${free_pct}% < crit ${DISK_CRIT_FREE_PCT}%"
-  elif awk -v f="$free_pct" -v w="$DISK_WARN_FREE_PCT" 'BEGIN{exit !(f+0 < w+0)}'; then
-    level="WARN"; reason="free ${free_pct}% < warn ${DISK_WARN_FREE_PCT}%"
+
+  # Hysteresis thresholds (t1885u AC3): once in CRIT (<8%), stay in CRIT until
+  # >= DISK_CRIT_RECOVER_PCT (10%); once in WARN (<15%), stay in WARN until
+  # >= DISK_WARN_RECOVER_PCT (17%). Eliminates 14.9% <-> 15.1% boundary flapping.
+  local eff_crit_pct="$DISK_CRIT_FREE_PCT"
+  local eff_warn_pct="$DISK_WARN_FREE_PCT"
+  local eff_inode_crit_pct="$INODE_CRIT_FREE_PCT"
+  local eff_inode_warn_pct="$INODE_WARN_FREE_PCT"
+  if [[ "$prev_level" == "CRIT" ]]; then
+    eff_crit_pct="$DISK_CRIT_RECOVER_PCT"
+    eff_warn_pct="$DISK_WARN_RECOVER_PCT"
+    eff_inode_crit_pct="$INODE_CRIT_RECOVER_PCT"
+    eff_inode_warn_pct="$INODE_WARN_RECOVER_PCT"
+  elif [[ "$prev_level" == "WARN" ]]; then
+    eff_warn_pct="$DISK_WARN_RECOVER_PCT"
+    eff_inode_warn_pct="$INODE_WARN_RECOVER_PCT"
   fi
-  if awk -v f="$inode_free_int" -v c="$INODE_CRIT_FREE_PCT" 'BEGIN{exit !(f+0 < c+0)}'; then
-    level="CRIT"; reason="${reason:+$reason; }inode free ${inode_free_pct}% < crit ${INODE_CRIT_FREE_PCT}%"
-  elif awk -v f="$inode_free_int" -v w="$INODE_WARN_FREE_PCT" 'BEGIN{exit !(f+0 < w+0)}'; then
+
+  if awk -v f="$free_pct" -v c="$eff_crit_pct" 'BEGIN{exit !(f+0 < c+0)}'; then
+    level="CRIT"; reason="free ${free_pct}% < crit ${eff_crit_pct}%"
+  elif awk -v f="$free_pct" -v w="$eff_warn_pct" 'BEGIN{exit !(f+0 < w+0)}'; then
+    level="WARN"; reason="free ${free_pct}% < warn ${eff_warn_pct}%"
+  fi
+  if awk -v f="$inode_free_int" -v c="$eff_inode_crit_pct" 'BEGIN{exit !(f+0 < c+0)}'; then
+    level="CRIT"; reason="${reason:+$reason; }inode free ${inode_free_pct}% < crit ${eff_inode_crit_pct}%"
+  elif awk -v f="$inode_free_int" -v w="$eff_inode_warn_pct" 'BEGIN{exit !(f+0 < w+0)}'; then
     if [[ "$level" != "CRIT" ]]; then level="WARN"; fi
-    reason="${reason:+$reason; }inode free ${inode_free_pct}% < warn ${INODE_WARN_FREE_PCT}%"
+    reason="${reason:+$reason; }inode free ${inode_free_pct}% < warn ${eff_inode_warn_pct}%"
   fi
   local fill_h
   fill_h="$(fill_hours "$(sanitize_mount "$mp")" "$avail" "$size" || true)"
@@ -425,10 +523,15 @@ check_mount() {
     log "OK check=${name}: mount=${mp} free=${free_pct}% (${avail_gb} of ${size_gb}) inode=${inode_txt}"
     mark_ok "$name"
   else
-    local subj="FAIL"
-    [[ "$level" == "WARN" ]] && subj="WARN"
+    local subj="FAIL" crit_streak=0
+    if [[ "$level" == "WARN" ]]; then
+      subj="WARN"
+      crit_streak=0
+    else
+      crit_streak=$(( prev_streak + 1 ))
+    fi
     log "${subj} check=${name}: mount=${mp} free=${free_pct}% (${avail_gb} of ${size_gb}) inode=${inode_txt} ${reason}"
-    send_alert "$name" "$subj" "Disk ${level} on $(hostname) mount ${mp}: free ${free_pct}% (${avail_gb} of ${size_gb}), inode ${inode_txt}. ${reason}. Trend window ${FILL_WINDOW_H}h, fill threshold ${FILL_CRIT_H}h."
+    send_alert "$name" "$subj" "Disk ${level} on $(hostname) mount ${mp}: free ${free_pct}% (${avail_gb} of ${size_gb}), inode ${inode_txt}. ${reason}. Trend window ${FILL_WINDOW_H}h, fill threshold ${FILL_CRIT_H}h." "$level" "$crit_streak"
     FAILED=1
   fi
 }

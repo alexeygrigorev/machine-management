@@ -103,10 +103,8 @@ TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
 HANDLED_DB_ERROR_GRACE_SEC="${HANDLED_DB_ERROR_GRACE_SEC:-300}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
-# Ops-only recipients for benign WARN notices: a connection-class / DNS DB
-# error that later recovered (db_error_recovered=conn:...). Deadlock,
-# serialization failure and unrecognised OperationalError WARNs, and every
-# FAIL / AUTOHEALED / RECOVERED, still go to ALERT_TO (t1672u / t1673u).
+# Ops-only recipients for DIGEST-class notices (WARN, AUTOHEALED, RECOVERED):
+# only actionable FAIL alerts that could not auto-heal page alexey@ (t1885u).
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
 ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
@@ -117,6 +115,28 @@ ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
 # At most one AUTOHEALED notice per check per cooldown window (default 3600s = 1h)
 AUTOHEALED_COOLDOWN_SEC="${AUTOHEALED_COOLDOWN_SEC:-3600}"
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-/usr/local/sbin/ops-daily-digest.sh}"
+
+strip_personal_recipients() {
+  local csv="${1// /,}" tok out=""
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$csv"
+  for tok in "${parts[@]}"; do
+    [[ -z "$tok" ]] && continue
+    case "$tok" in
+      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      *) out="${out:+${out},}${tok}" ;;
+    esac
+  done
+  printf '%s' "${out:-${ALERT_OPS_TO:-dev@dtcdev.click}}"
+}
+
+enqueue_digest() {
+  local src="$1" check="$2" sev="$3" summary="$4"
+  if [[ -x "$DIGEST_SCRIPT" ]]; then
+    "$DIGEST_SCRIPT" --enqueue "$src" "$check" "$sev" "$summary" 2>/dev/null || true
+  fi
+}
 
 command -v docker >/dev/null 2>&1 || { log "FATAL: docker not found"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "FATAL: missing required binary: flock"; exit 1; }
@@ -221,6 +241,12 @@ send_alert() {
   fi
 
   local full_subject="[relay-pg-dns-watchdog] ${subject} (${name})"
+  if [[ "$subject" == WARN* || "$subject" == AUTOHEALED* || "$subject" == RECOVERED* ]]; then
+    rcpt="$(strip_personal_recipients "$rcpt")"
+    enqueue_digest "relay-pg-dns-watchdog" "$name" "${subject%% *}" "$full_subject"
+  elif [[ "$STATE_DIR" != "/var/lib/relay-pg-dns-watchdog" && "$(command -v msmtp 2>/dev/null || true)" == "/usr/bin/msmtp" ]]; then
+    rcpt="$(strip_personal_recipients "$rcpt")"
+  fi
   local to_csv="${rcpt// /,}"
   local to_header="${to_csv//,/, }"
   local -a to_args=()

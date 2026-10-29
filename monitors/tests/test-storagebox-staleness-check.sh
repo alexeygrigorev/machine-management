@@ -171,5 +171,21 @@ else
   pass "T9b future exits nonzero"
 fi
 
+# ---- T10 (t1885u): RECOVERED strips alexey@datatalks.club and sends only to dev@dtcdev.click ----
+run_check "$STALE"
+STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$TMP/state" \
+  STORAGEBOX_NOW="$NOW_EPOCH" bash "$SCRIPT" >/dev/null 2>&1 || true
+: > "$MAILBOX"
+printf '%s' "$FRESH" > "$TMP/sb/s3/.last-sync"
+if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$TMP/state" \
+  STORAGEBOX_NOW="$NOW_EPOCH" bash "$SCRIPT" >/tmp/t10.out 2>&1 \
+  && grep -q "RECOVERED storagebox mirror fresh" "$MAILBOX" \
+  && grep -q "dev@dtcdev.click" "$MAILBOX" \
+  && ! grep -q "alexey@datatalks.club" "$MAILBOX"; then
+  pass "T10 RECOVERED routes to dev@dtcdev.click only (never alexey@)"
+else
+  fail "T10 RECOVERED routing"; cat "$MAILBOX" 2>/dev/null
+fi
+
 echo "RESULT pass=$PASS fail=$FAILN"
 [[ "$FAILN" -eq 0 ]]

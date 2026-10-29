@@ -84,10 +84,11 @@ run 0 FIXTURE=45436 DRY_RUN=0
 rg -q '^STATUS=OK$' "$STATE_DIR/stale.state"
 [[ "$(rg -c '^MSMTP_ARGS:' "$MAIL_LOG")" == 2 ]]
 rg -q 'Subject: \[dr-fast-pg-raise\] RECOVERED' "$MAIL_LOG"
+rg -q '^MSMTP_ARGS: -a alerts -f alerts@dtcdev.click -- dev@dtcdev.click$' "$MAIL_LOG"
 cp "$MAIL_LOG" "$TMP/recovered-mail"
 run 0 FIXTURE=45436 DRY_RUN=0
 cmp "$MAIL_LOG" "$TMP/recovered-mail"
-echo 'PASS: msmtp primary alerts once, dedupes, and recovers once'
+echo 'PASS: msmtp primary alerts once, dedupes, and recovers once (RECOVERED dev-only)'
 
 # msmtp down -> sendmail takes over, same recipients and headers.
 rm -f "$MAIL_LOG" "$STATE_DIR/stale.state"

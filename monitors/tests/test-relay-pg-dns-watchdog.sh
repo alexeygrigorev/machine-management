@@ -973,5 +973,39 @@ fi
 # B1-l: real-failure classes unchanged (stale peer, older than PG, DNS miss,
 # queue stuck) are covered by T4, T5, dns_persistent and T8 above.
 
+# B3 (t1885u): WARN handled DB error, AUTOHEALED, and RECOVERED strip personal
+# recipients (alexey@) in prod, while unhealed FAIL still pages alexey@.
+sdir="$TMP/state-b3-prod"; mkdir -p "$sdir/var"; echo healthy > "$sdir/mode"
+cp "$FIXTURE" "$sdir/logs-$PE"
+set +e
+out="$(STUB_STATE_DIR="$sdir" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir/var" \
+  LOCK_FILE="$sdir/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" ALERT_OPS_TO="dev@dtcdev.click" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out" == *"ALERT check=warn-dep-$PE"*"to=dev@dtcdev.click"* && "$out" != *"to=alexey@"* ]] \
+  && grep -q '^ARGS: .*dev@dtcdev.click' "$sdir/mail/sent.log" \
+  && ! grep -q 'alexey@datatalks.club' "$sdir/mail/sent.log"; then
+  pass "B3a WARN handled DB error strips alexey@datatalks.club and sends only to dev@dtcdev.click"
+else
+  fail "B3a WARN personal strip -- $out -- $(cat "$sdir/mail/sent.log" 2>/dev/null)"
+fi
+
+sdir_ah="$TMP/state-b3-ah"; mkdir -p "$sdir_ah/var"; echo healthy > "$sdir_ah/mode"
+cp "$TMP/conn-after.log" "$sdir_ah/logs-$PE"
+set +e
+out_ah="$(STUB_STATE_DIR="$sdir_ah" RELAY_PG_DNS_WATCHDOG_ENV_FILE=/nonexistent STATE_DIR="$sdir_ah/var" \
+  LOCK_FILE="$sdir_ah/lock" RESTART_VERIFY_WAIT=0 \
+  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" ALERT_OPS_TO="dev@dtcdev.click" \
+  PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
+set -e
+if [[ "$out_ah" == *"ALERT check=dep-$PE subject='[relay-pg-dns-watchdog] AUTOHEALED"* \
+  && "$out_ah" == *"to=dev@dtcdev.click"* && "$out_ah" != *"to=alexey@"* ]] \
+  && ! grep -q 'alexey@datatalks.club' "$sdir_ah/mail/sent.log"; then
+  pass "B3b AUTOHEALED strips alexey@datatalks.club and sends only to dev@dtcdev.click"
+else
+  fail "B3b AUTOHEALED personal strip -- $out_ah -- $(cat "$sdir_ah/mail/sent.log" 2>/dev/null)"
+fi
+
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]
