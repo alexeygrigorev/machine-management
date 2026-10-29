@@ -329,6 +329,42 @@ sparse push samples remain visible outside the instant lookback. Verify with
 state untouched. Its query can only see samples retained by VictoriaMetrics
 (currently two days of hot data); the window does not extend storage retention.
 
+## Test/drill mail hygiene (intake 9806fc14)
+
+On 2026-10-27 two test/drill paths mailed real recipients (alexey@):
+
+1. **contabo-deadman test suite at the c0e34bb (8138f287) state** — the suite
+   configured the **real** `ALERT_TO` and stubbed only ssh/curl, so its
+   FAIL-path tests (D17 `http://[::1]/good`, D4 `https://example.test/good`)
+   sent two real `FAIL (ext-svc)` mails (~14:47 Berlin). Closed the same day
+   by `6049ee8` (AC0b): stub sendmail/msmtp, non-routable
+   `stub-*@invalid.test` recipients, fail-closed capture dir, and the D20
+   sentinel-MTA regression. `D21` now sweeps every captured mail and fails if
+   any real `datatalks.club` recipient appears anywhere in the suite.
+2. **Hub DB backup staleness check** (`/usr/local/sbin/hub-db-backup-staleness.sh`,
+   source: agent-hub `scripts/hub-db-backup-staleness.sh`) — a manual
+   "real-alert" verification ran it against empty `/tmp/stale-empty-*` dirs
+   with the real env and no `--dry-run`, mailing `[STALE]` to alexey@
+   (12:14 Berlin). Fixed in agent-hub (same intake): a test-path guard
+   routes EVERY send to `ALERT_OPS_TO` (dev@ only) whenever
+   `BACKUP_DIR`/`STORAGEBOX_DIR`/`STATE_DIR` is under `/tmp` or `/var/tmp`;
+   `HUB_DB_STALE_DRILL=1` proves the mail path with one ops-only FAIL and an
+   ops-only drill-cleared RECOVERED (with `LAST_ALERT=0`, so a real stale
+   episode in between is never deduped away);
+   `agent-hub/scripts/test-hub-db-backup-staleness.sh` keeps that suite
+   offline (stub MTAs, non-routable recipients, fail-closed capture).
+
+Rules of record for every monitor test or drill in this repo:
+
+- Tests never configure a real recipient: stub MTAs first on PATH plus
+  non-routable `*.invalid.test` recipients; capture stubs refuse to run
+  without a writable capture dir (AC0b pattern).
+- Drills page `ALERT_OPS_TO` (`dev@dtcdev.click`) only — deadman:
+  `DEADMAN_FORCE_FAIL=1` on the command line, never in cron or the env file;
+  Hub DB staleness: `HUB_DB_STALE_DRILL=1`.
+- Real FAILs keep paging `ALERT_TO` unchanged; nothing above mutes a prod
+  alert.
+
 ### DR stale-check alert transport
 
 `dr-raise-stale-check.sh` sends through a chain: msmtp with the dedicated

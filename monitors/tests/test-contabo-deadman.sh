@@ -385,5 +385,15 @@ else
   fail "D20 drill (rc=$rc inv=$n_inv row=[$row20])"
 fi
 
+# ---- D21: suite-wide recipient sweep (9806fc14) — no real datatalks.club
+# recipient may appear in ANY captured mail. The c0e34bb-era suite configured
+# the real ALERT_TO and mailed alexey@ from its FAIL-path tests (2026-10-27);
+# 6049ee8 closed that, this sweep keeps it closed. ----
+if grep -rq 'datatalks\.club' "$TMP" 2>/dev/null; then
+  fail "D21 real datatalks.club recipient leaked into captured mail/stubs"
+else
+  pass "D21 no real datatalks.club recipient anywhere in captured mail"
+fi
+
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]
