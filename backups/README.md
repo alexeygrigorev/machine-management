@@ -223,11 +223,13 @@ Escrow-copy restore drill (passphrases from the sandbox team store):
   --cp-bundle <coolify-cp-bundle-...tar.gz.gpg> --acme-bundle <acme-...json.gpg>
 # → reads both dr-escrow.* values from the team store, decrypts,
 #   verifies cp filenames (coolify.env + ssh-keys/) and the acme letsencrypt
-#   block (counts only), prints DRILL_OK. Use --cp-pass-file/--acme-pass-file
-#   only for the Hetzner-copy script test. Region/secret names overridable via
-#   --region/--cp-secret/--acme-secret (env: DR_ESCROW_REGION/_CP_SECRET/_ACME_SECRET;
-#   legacy --cp-param/--acme-param and DR_ESCROW_CP_PARAM/_ACME_PARAM still accepted,
-#   including old /dr-escrow/* SSM names).
+#   block (counts only), prints DRILL_OK. Region/secret names overridable via
+#   --region/--cp-secret/--acme-secret (env: DR_ESCROW_REGION/_CP_SECRET/_ACME_SECRET).
+#   The drill reads only from the team store — there are no passphrase-file or
+#   legacy SSM/Secrets Manager flags. To prove the local Hetzner copies still
+#   decrypt, decrypt a real bundle with gpg and the operator pass files directly
+#   (same verification: tar lists coolify.env + ssh-keys/, acme JSON has the
+#   letsencrypt block — counts only, never contents).
 ```
 
 Isolated restore drill (operator box only, never on a CP host —
