@@ -11,8 +11,8 @@ import sys
 import time
 import uuid
 
-from origin_transport import ORIGINS, Refused, aws, config_origin, probe
-from verify_origin import ssh
+from origin_transport import ORIGINS, Refused, probe
+from verify_origin import origin_state, ssh
 
 
 def fingerprint(host):
@@ -21,8 +21,7 @@ def fingerprint(host):
 
 
 def verify(scope):
-    snapshot = aws("cloudfront", "get-distribution", "--id", scope.distribution)
-    _, _, header = config_origin(snapshot, scope)
+    _, header = origin_state(scope)
     marker = uuid.uuid4().hex
     path = scope.path + "?origin_rollback_probe=" + marker
     target = "/data/coolify/proxy/dynamic/origin-rollback-" + uuid.uuid4().hex + ".yml"

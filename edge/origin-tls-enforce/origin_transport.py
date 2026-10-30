@@ -43,7 +43,7 @@ class Refused(RuntimeError):
 
 def aws(*args):
     result = subprocess.run(
-        ["aws", "--profile", os.environ.get("AWS_PROFILE", "main-temp"),
+        ["aws", "--profile", os.environ.get("AWS_PROFILE", "default"),
          "--region", "eu-west-1", *args, "--output", "json"],
         capture_output=True, text=True, timeout=90,
     )
@@ -137,7 +137,7 @@ def flip(scope, want):
     patched = patch_config(config, scope.origin_id, want)
     # /dev/stdin keeps the secret-bearing configuration out of files and argv.
     result = subprocess.run(
-        ["aws", "--profile", os.environ.get("AWS_PROFILE", "main-temp"),
+        ["aws", "--profile", os.environ.get("AWS_PROFILE", "default"),
          "--region", "eu-west-1", "cloudfront", "update-distribution",
          "--id", scope.distribution, "--if-match", snapshot["ETag"],
          "--distribution-config", "file:///dev/stdin", "--output", "json"],

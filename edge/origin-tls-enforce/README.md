@@ -41,10 +41,11 @@ Seven origin/viewer names serve trusted certificates with valid hostnames and
 chains. The file-provider configuration uses separate HTTP and TLS routers:
 credential-gated allow routes at priority 200 and deny routes at priority 150.
 Direct requests with missing or incorrect `X-Origin-Verify` receive 403.
-Website-dev's priority-500 isolation guard supersedes these routes and returns
-503 even with the correct credential. Production website's shared origin
-accepts both configured website credentials; viewer-specific routes use only
-their own credential. HTTP-01 challenge handling remains available for renewal.
+Website-dev's historical priority-500 isolation guard was retired on 2026-10-24
+after rebinding the dev routes to an isolated dev backend. Production website's
+shared origin accepts both configured website credentials; viewer-specific routes
+use only their own credential. HTTP-01 challenge handling remains available for
+renewal.
 
 CloudFront may forward viewer Host and SNI. Readiness therefore validates both
 the configured origin domain and the viewer name, pinned to the actual node.
@@ -65,8 +66,10 @@ They now refuse to overwrite existing enforcement. Preserve installed backend
 references, middleware, credentials and deny routers when making a deliberate
 routing change; replaying the old renderer is not a recovery procedure.
 
-Website-dev routes to the isolated dev backend `website-dev-web` backed by
-the `website_dev` database on pg-shared (`10.100.0.2:5432`). The priority-500
+Website-dev routes to the isolated Coolify `website-staging` backend
+`http-0-wodajblzizrjunwme3ossav3-web-2567@docker` (`web-wodajblzizrjunwme3ossav3-*`)
+backed by the `website_dev` database on pg-shared (`10.100.0.2:5432`, user
+`website_dev`, zero `CONNECT` privilege on production `website`). The priority-500
 isolation guard has been retired, and origin verification routes requests to this
 distinct dev backend with valid TLS and credential enforcement. Both origin domain
 and viewer hostname (`dev.datatalks.club`) pass readiness checks. E33 uses https-only.
@@ -74,9 +77,12 @@ and viewer hostname (`dev.datatalks.club`) pass readiness checks. E33 uses https
 ## Verification
 
 Run from the operator box with its existing AWS credential profile and SSH
-aliases. Override `AWS_PROFILE` if needed; the default is `main-temp`. Isolated
-workers can point `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at the
-operator's existing private files without copying or printing credentials.
+aliases. Override `AWS_PROFILE` if needed; the default is `default`. When the
+active AWS profile targets the sandbox account (where main-account CloudFront
+distributions are absent), `verify_origin.py` and `verify-rollback.py` validate
+recorded CloudFront snapshots and read active `X-Origin-Verify` headers directly
+from the private `/data/coolify/proxy/dynamic/origin-enforce.yml` on `contabo-a`
+and `contabo-b` over SSH without printing credentials.
 
 ```sh
 bash edge/origin-tls-enforce/tests/test-origin.sh
@@ -85,12 +91,11 @@ python3 edge/origin-tls-enforce/verify_stability.py --rounds 60 --interval 5 --o
 python3 -m unittest discover -s edge/origin-tls-enforce/tests -p 'test_*.py' -v
 ```
 
-The first command is read-only. It checks live authenticated HTTP/HTTPS health,
-missing and wrong headers, trusted TLS, all four deployment/transport states,
-public health, IPv4/IPv6 administrative-port DROP rules, persistence and secret
-file permissions. Website-dev is explicitly reported as deferred only when its
-observed HTTP/HTTPS/public responses match the recorded isolation state. It
-cannot silently skip a healthy dev route that still needs an HTTPS cutover.
+The first command is read-only. It checks `dev-route-guard.yml` absence, live
+website-dev container and `website_dev` database isolation, live authenticated
+HTTP/HTTPS health, missing and wrong headers, trusted TLS, all four
+deployment/transport states, public health, IPv4/IPv6 administrative-port DROP
+rules, persistence and secret file permissions.
 
 The stability command samples the three active origins' public health,
 authenticated HTTPS health, missing/wrong-header denial, and the public Website

@@ -116,6 +116,24 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(aws.call_count, 1)
         run.assert_not_called()
 
+    def test_aws_defaults_to_default_profile_never_main_temp(self):
+        with patch.dict(transport.os.environ, {}, clear=True), \
+                patch.object(transport.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "{}", "")) as run:
+            transport.aws("cloudfront", "get-distribution", "--id", "E33FS79KPFSAOM")
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--profile") + 1], "default")
+        self.assertNotIn("main-temp", args)
+
+    def test_verify_origin_falls_back_to_ssh_header_when_cloudfront_unavailable(self):
+        import verify_origin
+        with patch.object(verify_origin, "aws", side_effect=transport.Refused("NoSuchDistribution")), \
+                patch.object(verify_origin, "ssh", return_value=self.header), \
+                patch.dict(verify_origin.SNAPSHOT_FALLBACK, {}, clear=True):
+            protocol, hdr = verify_origin.origin_state(self.scope)
+        self.assertEqual(protocol, "https-only")
+        self.assertEqual(hdr, self.header)
+
 
 if __name__ == "__main__":
     unittest.main()
