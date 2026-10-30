@@ -78,6 +78,31 @@ Procedure (operator box Hetzner RMTHZ, `aws --profile main-temp`):
 
 See `edge/origin-tls-enforce/README.md` for transport/rollback verification (`test-origin.sh`, `verify-rollback.py`, `verify_stability.py`). Rotation 2026-10-25 stopped at dual-accept pending Alexey: report `~/tmp/agent-reports/relay-origin-verify-rotation-2026-10-25.md`.
 
+## X-Origin-Verify rotation (Website prod/dev, dual-accept live since 2026-10-27)
+
+Same procedure as above, applied to contabo-a (website): leaked values from
+agent tool output (hub intake `b429de1e`). Inventory: CloudFront
+`E1VNMGFFIXBOXX` (`prod.datatalks.club`) + `E33FS79KPFSAOM`
+(`dev.datatalks.club`) CustomHeaders → contabo-a
+`/data/coolify/proxy/dynamic/origin-enforce.yml` allow routers
+`origin-websiteprod-allow-*`, `origin-websitedev-allow-*` and shared
+`origin-website-allow-*`; `datatalks.club` apex is CloudFront→S3 (no header).
+
+State: dual-accept live on contabo-a since 2026-10-27 (old + new accepted,
+16 header refs, backup `origin-enforce.yml.bak-20261027-rotate` 0600 kept,
+new values staged 0600 in operator `~/tmp/secrets/website-rotate-20261027/`,
+report `~/tmp/agent-reports/origin-verify-rotation-2026-10-27.md`).
+Re-verified 2026-10-30 (drain): all origin/public probes pass, old still
+accepted by design.
+
+Note for step 4/6: since aws-infra `a30e685` (2026-10-27) the Terraform roots
+`main/website`, `main/dev`, `main/relay` are tombstoned — the website and
+relay CloudFront distributions are orphaned live config, so the Terraform
+option is gone. The CF switch (one distribution at a time, dev first, ETag
+read-modify-write `update-distribution`, values via files/stdin only) now
+requires an authorized MAIN AWS session (AWS gate) — stopped at dual-accept
+pending Alexey for both website and relay rotations.
+
 ## Proxy network durability (2026-10-25 relay-dev/cmp-dev incident)
 
 `coolify-proxy` (Traefik) lost its ephemeral attachments to Coolify service
