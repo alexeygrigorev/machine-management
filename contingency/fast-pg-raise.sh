@@ -64,8 +64,14 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   docker volume rm "${CONTAINER}-data" >/dev/null 2>&1 || true
 fi
 
+# Container hygiene (AGENTS.md): --rm plus agent.session label when AGENT_SESSION_ID is set.
+LABEL_ARGS=()
+if [[ -n "${AGENT_SESSION_ID:-}" ]]; then
+  LABEL_ARGS+=(--label "agent.session=${AGENT_SESSION_ID}")
+fi
+
 log "starting $CONTAINER on 127.0.0.1:$PORT"
-docker run -d --name "$CONTAINER" --restart=no \
+docker run -d --rm "${LABEL_ARGS[@]}" --name "$CONTAINER" --restart=no \
   -e POSTGRES_USER="$PGUSER" \
   -e POSTGRES_PASSWORD="$PGPASSWORD" \
   -e POSTGRES_DB=postgres \

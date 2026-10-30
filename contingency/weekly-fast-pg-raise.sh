@@ -58,6 +58,21 @@ ssh_b() {
   ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -i "$SSH_ID" "$CONTABO_B" "$@"
 }
 
+TEARDOWN_DONE=0
+teardown_resources() {
+  [[ "$TEARDOWN_DONE" == "1" ]] && return 0
+  TEARDOWN_DONE=1
+  if [[ -n "${REMOTE_DIR:-}" ]]; then
+    ssh_b "rm -rf '${REMOTE_DIR}'" || true
+  fi
+  if [[ "$TEARDOWN" == "1" ]]; then
+    log "teardown ${CONTAINER}"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "${CONTAINER}-data" >/dev/null 2>&1 || true
+  fi
+}
+trap teardown_resources EXIT
+
 log "start stamp=${STAMP} container=${CONTAINER} port=${PORT}"
 
 mapfile -t _pgc < <(ssh_b 'sudo -n docker ps --filter label=coolify.resourceName=pg-shared --format "{{.Names}}"; sudo -n docker ps --filter label=coolify.resourceName=pg-relay --format "{{.Names}}"')
@@ -136,13 +151,7 @@ RESULT=fail
 DB_SIZES_FILE="$SIZES_FILE" RESULT="$RESULT" RTO_SECONDS="$RTO" \
   bash "$PUSH_SH" || log "WARN: metric push failed (raise rc=${RC})"
 
-ssh_b "rm -rf '${REMOTE_DIR}'" || true
-
-if [[ "$TEARDOWN" == "1" ]]; then
-  log "teardown ${CONTAINER}"
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker volume rm "${CONTAINER}-data" >/dev/null 2>&1 || true
-fi
+teardown_resources
 
 find "$HOME/tmp" -maxdepth 1 -type d -name 'pg-fast-raise-weekly*' -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 
