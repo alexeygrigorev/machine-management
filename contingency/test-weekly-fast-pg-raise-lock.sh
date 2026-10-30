@@ -101,9 +101,10 @@ if [[ "$RUN" == *"weekly-fast-pg-raise.sh"* ]]; then
 else
   bad "cannot find script invocation in cron line: $CRON_LINE"
 fi
-# The cron line points at the production checkout path; for the test we run
-# the identical command with the script path swapped to this checkout.
-RUN_UNDER_TEST="${RUN//\/home\/alexey\/git\/machine-management\/contingency\/weekly-fast-pg-raise.sh/$SCRIPT}"
+# The cron line points at the stable installed copy (install-weekly-fast-pg-raise.sh,
+# 68147e6c); for the test we run the identical command with the script path
+# swapped to this checkout.
+RUN_UNDER_TEST="${RUN//\/usr\/local\/lib\/dr-fast-pg-raise\/contingency\/weekly-fast-pg-raise.sh/$SCRIPT}"
 if [[ "$RUN_UNDER_TEST" != "$RUN" ]]; then
   ok "test swaps production script path for checkout under test"
 else

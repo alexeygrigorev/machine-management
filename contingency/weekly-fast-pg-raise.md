@@ -78,10 +78,10 @@ state):
   `last_run` missing) from **"recent attempts but no success"** (a fresh
   `last_run` with stale/missing `last_success`, i.e. the raise runs but
   fails) — see `monitors/tests/test-dr-raise-missing-vs-failed.sh`.
-- Email **only** `dev@dtcdev.click` via existing msmtp → SES (`alerts@dtcdev.click`).
+- Email `ALERT_TO` via Relay (sender `alerts@dtcdev.click`); RECOVERED and non-production state dirs go to `dev@dtcdev.click` only.
 - Deduped to at most once per day while still failing; sends RECOVERED on clear.
 
-Read-only proof on contabo-a (queries real VM; sends no mail and changes no state):
+Read-only proof on Hetzner (queries the loopback VM; sends no mail and changes no state):
 
 ```bash
 sudo DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh
@@ -93,24 +93,19 @@ checks: `bash monitors/tests/test-dr-raise-stale-check.sh`.
 ## Install
 
 ```bash
-# Hetzner (as root or with sudo)
-install -m 0755 contingency/weekly-fast-pg-raise.sh /home/alexey/git/machine-management/contingency/
-# (prefer git pull of machine-management main)
-install -m 0644 contingency/weekly-fast-pg-raise.cron /etc/cron.d/weekly-fast-pg-raise
-mkdir -p /home/alexey/.local/state/dr-fast-pg-raise
-chown alexey:alexey /home/alexey/.local/state/dr-fast-pg-raise
+# Hetzner, from a fresh origin/main worktree (never the shared checkout)
+sudo ./contingency/install-weekly-fast-pg-raise.sh   # stable copy + weekly + mirror crons
+sudo ./monitors/install-dr-raise-stale-check.sh       # stale-check cron + env (no secrets)
+cat /usr/local/lib/dr-fast-pg-raise/REVISION          # deployed SHA
 
-# contabo-a
-sudo install -m 0755 monitors/dr-raise-stale-check.sh /usr/local/sbin/dr-raise-stale-check.sh
-sudo install -m 0644 monitors/dr-raise-stale-check.cron /etc/cron.d/dr-raise-stale-check
-sudo mkdir -p /var/lib/dr-raise-stale-check /var/log
-# optional: echo ALERT_TO=dev@dtcdev.click | sudo tee /etc/dr-raise-stale-check.env
+# contabo-a: legacy stale-check copy left installed (68147e6c follow-up);
+# no Contabo-side install from here.
 ```
 
 Manual one-shot (does not conflict with t1118u ports):
 
 ```bash
-TEARDOWN=1 bash ~/git/machine-management/contingency/weekly-fast-pg-raise.sh
+TEARDOWN=1 /usr/local/lib/dr-fast-pg-raise/contingency/weekly-fast-pg-raise.sh
 ```
 
 ## Locking (single owner — fixed 2026-10-27)
