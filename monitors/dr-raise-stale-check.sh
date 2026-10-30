@@ -12,7 +12,9 @@
 # A failed Relay request returns non-zero and leaves dedupe state unchanged
 # so the next run retries. Do not bypass Relay with direct SMTP here.
 #
-# Prefer running on contabo-a (local VM + dedicated Relay monitor client).
+# Runs on Hetzner (68147e6c), where the weekly push lands in the loopback VM
+# (400d): VM_URL must name the VM that holds the series. The old contabo-a
+# install read a ~2d VM, so weekly samples expired and it paged "missing".
 # Cron: daily 09:00 Europe/Berlin (see dr-raise-stale-check.cron).
 # DRY_RUN=1 queries and logs only; no email or state changes.
 set -euo pipefail
@@ -53,8 +55,9 @@ enqueue_digest() {
   fi
 }
 
-# Relay client/key for Contabo monitors, stored root-owned mode 0600. The CLI
-# loads it from disk; credentials never appear in process arguments or logs.
+# Relay client config (Hetzner: the operator's Hetzner Maintenance client,
+# mode 0600). The CLI loads it from disk; credentials never appear in process
+# arguments or logs.
 # The CloudFront WAF blocks raw IP-literal URLs, so sanitize every body.
 sanitize_for_relay() {
   # Defang http(s)://<ip-literal> so the WAF body rules let the message pass.

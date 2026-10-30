@@ -1,0 +1,9 @@
+# Hourly mirror of the DR fast-pg-raise series from the Hetzner loopback VM
+# (400d) into contabo-a VM (~2d hot) so RTO/last success stay visible on the
+# obs vmui and the legacy contabo-a stale-check copy (68147e6c AC5).
+# Installed to /etc/cron.d/dr-raise-metrics-mirror on Hetzner by
+# install-weekly-fast-pg-raise.sh; runs the stable copy, never a checkout.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Europe/Berlin
+17 * * * * alexey /usr/local/lib/dr-fast-pg-raise/contingency/mirror-dr-raise-metrics.sh >> /home/alexey/.local/state/dr-fast-pg-raise/mirror.log 2>&1

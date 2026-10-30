@@ -324,10 +324,18 @@ then remove the fixture and rerun the normal installed check. Never change
 the production healthcheck log or leave a drill override in cron/env.
 
 The weekly PG raise monitor uses an eight-day `max_over_time` query so recent
-sparse push samples remain visible outside the instant lookback. Verify with
-`DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh` on a; this leaves mail and
-state untouched. Its query can only see samples retained by VictoriaMetrics
-(currently two days of hot data); the window does not extend storage retention.
+sparse push samples remain visible outside the instant lookback. It runs on
+**Hetzner** (`/etc/cron.d/dr-raise-stale-check`, daily 09:00 Berlin, user
+`alexey`, state `/var/lib/dr-raise-stale-check`) against the Hetzner loopback
+VM (400d) that receives the weekly push. Install with
+`sudo ./monitors/install-dr-raise-stale-check.sh` from a fresh origin/main
+worktree; verify with `DRY_RUN=1 /usr/local/sbin/dr-raise-stale-check.sh`
+(no mail, no state change). Its query can only see retained samples: until
+68147e6c it ran on contabo-a, whose ~2d hot VM dropped every weekly sample,
+and paged "missing" while DR was healthy. The legacy contabo-a copy stays
+installed (no Contabo-side change); the hourly
+`contingency/mirror-dr-raise-metrics.sh` keeps its VM — and the obs vmui —
+fed with the real values, so it reads OK too.
 
 ## Test/drill mail hygiene (intake 9806fc14)
 
@@ -367,8 +375,8 @@ Rules of record for every monitor test or drill in this repo:
 
 ### DR stale-check alert transport
 
-`dr-raise-stale-check.sh` sends through the dedicated Contabo monitors Relay
-client, using sender `alerts` (`DTC Alerts <alerts@dtcdev.click>`). This check
+`dr-raise-stale-check.sh` sends through a Relay client (on Hetzner: the
+Hetzner Maintenance client, `~/.config/datamailer/config.toml`), using sender `alerts` (`DTC Alerts <alerts@dtcdev.click>`). This check
 does not monitor Relay itself, so it has no direct SMTP bypass. A failed
 Relay request exits non-zero, logs an explicit error, and leaves dedupe
 state unchanged so the next run retries.

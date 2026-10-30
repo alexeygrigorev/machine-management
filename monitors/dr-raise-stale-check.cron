@@ -1,6 +1,9 @@
 # Dead-man: alert if weekly fast PG raise has no success within ~8 days (t1119u).
-# Daily 09:00 Europe/Berlin on contabo-a (local VictoriaMetrics + msmtp→SES).
+# Daily 09:00 Europe/Berlin on HETZNER, as alexey, against the Hetzner loopback
+# VM (400d) that receives the weekly push; Relay via the Hetzner Maintenance
+# client (sender alerts). Installed by install-dr-raise-stale-check.sh.
+# (Until 68147e6c this ran on contabo-a against its ~2d VM and paged falsely.)
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Berlin
-0 9 * * * root /usr/local/sbin/dr-raise-stale-check.sh >> /var/log/dr-raise-stale-check.log 2>&1
+0 9 * * * alexey /usr/local/sbin/dr-raise-stale-check.sh >> /home/alexey/.local/state/dr-raise-stale-check/cron.log 2>&1

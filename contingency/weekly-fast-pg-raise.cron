@@ -6,7 +6,12 @@
 # single lock owner ($LOCK). Wrapping it in an outer `flock -n` on the same
 # file re-creates the 2026-10-22 silent-no-op bug (script's `flock -n 9`
 # always fails while the outer lock is held). Keep this line flock-free.
+#
+# Runs the STABLE copy installed by install-weekly-fast-pg-raise.sh, never
+# a git checkout: the shared ~/git/machine-management checkout lagged
+# origin/main by 100+ commits, so cron ran a push script without the local
+# VM leg (68147e6c AC6).
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Berlin
-30 4 * * 0 alexey /home/alexey/git/machine-management/contingency/weekly-fast-pg-raise.sh >> /home/alexey/.local/state/dr-fast-pg-raise/weekly.log 2>&1
+30 4 * * 0 alexey /usr/local/lib/dr-fast-pg-raise/contingency/weekly-fast-pg-raise.sh >> /home/alexey/.local/state/dr-fast-pg-raise/weekly.log 2>&1

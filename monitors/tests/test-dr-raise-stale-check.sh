@@ -179,3 +179,12 @@ DATAMAILER_RC=1 bash "$REPO/monitors/dr-raise-stale-check.sh" --test-alert > "$T
 rg -q 'ERROR: TEST Relay alert delivery failed' "$TMP/output"
 [[ ! -e "$STATE_DIR/stale.state" ]]
 echo 'PASS: test alert failure is loud with no state changes'
+
+# Deployment wiring (68147e6c): the check reads the VM that holds the series,
+# and cron never runs a git checkout that can lag origin/main.
+grep -q '^0 9 \* \* \* alexey /usr/local/sbin/dr-raise-stale-check.sh' "$REPO/monitors/dr-raise-stale-check.cron"
+grep -q '^VM_URL=http://127.0.0.1:8428$' "$REPO/monitors/install-dr-raise-stale-check.sh"
+grep -q ' alexey /usr/local/lib/dr-fast-pg-raise/contingency/weekly-fast-pg-raise.sh ' "$REPO/contingency/weekly-fast-pg-raise.cron"
+grep -q ' alexey /usr/local/lib/dr-fast-pg-raise/contingency/mirror-dr-raise-metrics.sh ' "$REPO/contingency/dr-raise-metrics-mirror.cron"
+reject_match -q '^[^#].*/git/' "$REPO/contingency/weekly-fast-pg-raise.cron" "$REPO/contingency/dr-raise-metrics-mirror.cron" "$REPO/monitors/dr-raise-stale-check.cron"
+echo 'PASS: crons run stable copies against the VM that holds the DR series'

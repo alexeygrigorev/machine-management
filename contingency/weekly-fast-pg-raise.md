@@ -21,9 +21,19 @@
 | `contingency/fast-pg-raise.sh` | Core raise (pinned `postgres:16.15-alpine`) |
 | `contingency/weekly-fast-pg-raise.sh` | Orchestrator (dump → raise → metrics → teardown) |
 | `contingency/push-dr-raise-metrics.sh` | VM import helper |
-| `contingency/weekly-fast-pg-raise.cron` | Hetzner `/etc/cron.d/` unit |
+| `contingency/weekly-fast-pg-raise.cron` | Hetzner `/etc/cron.d/` unit (runs the stable copy) |
+| `contingency/mirror-dr-raise-metrics.sh` | Hourly copy of the newest DR series Hetzner VM → contabo-a VM (obs vmui) |
+| `contingency/dr-raise-metrics-mirror.cron` | Hetzner `/etc/cron.d/` unit, hourly :17 |
+| `contingency/install-weekly-fast-pg-raise.sh` | `sudo` on Hetzner: stable copy in `/usr/local/lib/dr-fast-pg-raise/` + both crons |
 | `monitors/dr-raise-stale-check.sh` | 8-day dead-man → email |
-| `monitors/dr-raise-stale-check.cron` | contabo-a daily 09:00 |
+| `monitors/dr-raise-stale-check.cron` | Hetzner daily 09:00 (loopback VM) |
+
+Cron runs the stable copy, **never a git checkout**: until 68147e6c the unit
+pointed at `~/git/machine-management`, which lagged origin/main by 100+
+commits, so the Sunday run would have used a push script without the local
+VM leg. Re-run `sudo ./contingency/install-weekly-fast-pg-raise.sh` from a
+fresh origin/main worktree after changing any of these scripts
+(`/usr/local/lib/dr-fast-pg-raise/REVISION` records the deployed SHA).
 
 ## Metrics (VictoriaMetrics)
 
@@ -36,6 +46,11 @@
 | `dr_fast_pg_raise_last_run_unixtime{host,result}` | Last attempt (pass or fail) |
 
 **vmui** (WireGuard): `http://10.100.0.1:8428/vmui/`
+
+On the contabo-a obs vmui the series come from the hourly mirror (its own VM
+keeps ~2d); the Hetzner loopback VM `127.0.0.1:8428` is the 400d source of truth.
+RTO + last success age at a glance: `dr_fast_pg_raise_rto_seconds` and
+`time() - max(dr_fast_pg_raise_last_success_unixtime)`.
 
 Example queries:
 
