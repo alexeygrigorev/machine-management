@@ -49,8 +49,10 @@ fresh origin/main worktree after changing any of these scripts
 
 On the contabo-a obs vmui the series come from the hourly mirror (its own VM
 keeps ~2d); the Hetzner loopback VM `127.0.0.1:8428` is the 400d source of truth.
-RTO + last success age at a glance: `dr_fast_pg_raise_rto_seconds` and
-`time() - max(dr_fast_pg_raise_last_success_unixtime)`.
+The mirror writes one sample per hour, so a bare instant query (vmui Table/JSON
+tab) is empty for most of the hour; the Graph tab is continuous. RTO + last
+success age at a glance, any tab: `last_over_time(dr_fast_pg_raise_rto_seconds[2h])`
+and `time() - max(last_over_time(dr_fast_pg_raise_last_success_unixtime[2h]))`.
 
 Example queries:
 
