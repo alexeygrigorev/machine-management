@@ -120,6 +120,10 @@ WARN on `/`, throttled to once per six hours. The GC defaults to dry-run and wri
 `~/tmp/agent-reports/`. Review the inventory and obtain Alexey's approval before
 setting `RMTHZ_GC_MODE=apply` in `~/.config/rmthz-disk-gc.env`.
 
+The disk checker retains up to 2,500 samples per mount, over eight days at its
+five-minute cron cadence, so a full seven-day root-free-space window remains
+available for disk-GC acceptance proof.
+
 Worktree removal requires a clean status, HEAD ancestry to `origin/main`, age
 over 48 hours, no Git lock, no process cwd, and readable Hub session/open-intake
 snapshots proving no live session or open intake references it. Any uncertainty

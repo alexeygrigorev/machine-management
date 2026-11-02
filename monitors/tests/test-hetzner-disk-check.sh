@@ -40,6 +40,7 @@ check_grep "$REPO/monitors/install-node-exporter.sh" '127.0.0.1:9100' "T2l node_
 check_grep "$SCRIPT" 'FILL_CONFIRM_WINDOW_H="${FILL_CONFIRM_WINDOW_H:-1}"' "T2m recent-window confirmation default"
 check_grep "$SCRIPT" 'step-robust' "T2n step-robust gate present"
 check_grep "$SCRIPT" 'DISK_NOW' "T2o DISK_NOW replay override present"
+check_grep "$SCRIPT" 'SAMPLE_RETENTION=2500' "T2p disk samples retain over seven days"
 
 # ---- stub bin ----
 TMP="$(mktemp -d)"
@@ -111,6 +112,12 @@ chmod +x "$TMP/stubbin/df" "$TMP/stubbin/datamailer"
 export DATAMAILER_BIN="$TMP/stubbin/datamailer"
 export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
 export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
+cat > "$TMP/stubbin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_OUT:-/dev/null}"
+exit 0
+EOF
+chmod +x "$TMP/stubbin/systemctl"
 
 write_vals() { printf '%s\n' "$@" > "$TMP/vals"; }
 GB=$((1073741824))
@@ -125,6 +132,7 @@ run_iso() {
   STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$envf" \
     STATE_DIR="$st" SAMPLE_DIR="$st/samples" \
     LOCK_FILE="$TMP/lock-$RANDOM" MSMTP_OUT="$MAILBOX" \
+    SYSTEMCTL_OUT="$TMP/systemctl.log" \
     PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >"$LAST_OUT" 2>&1
   echo -n "$?" > "$LAST_RC"
   set -e
@@ -476,6 +484,29 @@ if grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'dev@dtcdev.click' "$MA
   pass "T14e CRIT run 2/2 (sustained breach) pages alexey@ + dev@"
 else
   fail "T14e CRIT run 2/2 -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
+fi
+
+echo "---- T15: retain seven days of five-minute disk samples ----"
+ST15="$(mkstate)"; mkdir -p "$ST15/samples"
+now="$(date +%s)"
+for ((i=2500; i>=1; i--)); do
+  printf '%s %s %s\n' "$((now - i*300))" "$((50*GB))" "$((100*GB))"
+done > "$ST15/samples/root.log"
+cat > "$TMP/envT15" <<EOF
+DISK_MOUNTS="/"
+DISK_NOW=$now
+RECOVER_NOTIFY_MIN_SEC=0
+EOF
+write_vals "/|ext4|$((100*GB))|$((50*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST15" "$TMP/envT15"
+sample_count="$(wc -l < "$ST15/samples/root.log")"
+sample_first="$(awk 'NR==1 {print $1}' "$ST15/samples/root.log")"
+sample_last="$(tail -n 1 "$ST15/samples/root.log" | awk '{print $1}')"
+if [[ "$sample_count" -eq 2500 && "$sample_first" -le "$((now - 7*24*3600))" \
+  && "$sample_last" -eq "$now" ]]; then
+  pass "T15 root sample history retains >=7d after append (2500 rows)"
+else
+  fail "T15 sample retention count=$sample_count first=$sample_first last=$sample_last now=$now"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"
