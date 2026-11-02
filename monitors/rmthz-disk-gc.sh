@@ -42,6 +42,12 @@ exec 9>"$STATE_DIR/lock"
 flock -n 9 || { echo "GC already running; skipping"; exit 0; }
 
 now_epoch=$(date +%s)
+WEEKLY_DUE=0
+if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
+  last_week=$(cat "$STATE_DIR/weekly.stamp" 2>/dev/null || echo 0)
+  [[ "$last_week" =~ ^[0-9]+$ ]] || last_week=0
+  if (( now_epoch - last_week > 6*86400 )); then WEEKLY_DUE=1; fi
+fi
 printf 'run=%s mode=%s trigger=%s root=' "$(date -u +%FT%TZ)" "$MODE" "$TRIGGER"
 df -B1 --output=avail / | tail -n 1 | tr -d ' '
 
@@ -54,6 +60,13 @@ record() {
   [[ -z "${report_tmp:-}" ]] || printf '%s\n' "$row" >> "$report_tmp"
 }
 size_bytes() { du -s -B1 -- "$1" 2>/dev/null | awk '{print $1+0}'; }
+worktree_size_bytes() {
+  local output bytes
+  output=$(du -s -B1 -- "$1" 2>/dev/null) || return 1
+  bytes=${output%%$'\t'*}
+  [[ "$bytes" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$bytes"
+}
 newest_mtime() {
   python3 - "$1" <<'PY'
 import os, sys
@@ -304,27 +317,21 @@ trap 'rm -f -- "$report_tmp"' EXIT
 printf '\nWorktree candidates (~/git/*-wt-*):\n'
 shopt -s nullglob
 worktrees=("$HOME"/git/*-wt-*)
-declare -A WORKTREE_SIZE_BYTES=()
-if ((${#worktrees[@]})); then
-  mapfile -t worktree_sizes < <(du -s -B1 -- "${worktrees[@]}" 2>/dev/null || true)
-  for size_line in "${worktree_sizes[@]}"; do
-    size_bytes_value=${size_line%%$'\t'*}
-    size_path=${size_line#*$'\t'}
-    [[ "$size_bytes_value" =~ ^[0-9]+$ && "$size_path" != "$size_line" ]] && WORKTREE_SIZE_BYTES["$size_path"]="$size_bytes_value"
-  done
-fi
 for wt in "${worktrees[@]}"; do
   [[ -d "$wt" ]] || continue
   top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
   if [[ -z "$top" || "$(realpath "$top")" != "$(realpath "$wt")" ]]; then
-    record "$wt" "$(size_bytes "$wt")" "orphaned worktree directory; report only" ORPHAN
+    if bytes=$(worktree_size_bytes "$wt"); then
+      record "$wt" "$bytes" "orphaned worktree directory; report only" ORPHAN
+    else
+      record "$wt" 0 "orphaned directory; size scan failed; report only" ORPHAN
+    fi
     continue
   fi
   git_dir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
   common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [[ -n "$git_dir" && -n "$common" && "$(realpath "$git_dir")" == "$(realpath "$common")" ]]; then
-    bytes=${WORKTREE_SIZE_BYTES[$wt]:-0}
-    record "$wt" "$bytes" "main checkout, not a linked worktree; report only" SKIPPED
+    record "$wt" 0 "main checkout, not a linked worktree; size deferred" SKIPPED
     continue
   fi
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -334,7 +341,14 @@ for wt in "${worktrees[@]}"; do
     rc=$?
     case "$rc" in
       1) locked="" ;;
-      3) record "$wt" "${WORKTREE_SIZE_BYTES[$wt]:-0}" "not registered by git worktree list; orphan report only" ORPHAN; continue ;;
+      3)
+        if bytes=$(worktree_size_bytes "$wt"); then
+          record "$wt" "$bytes" "not registered by git worktree list; orphan report only" ORPHAN
+        else
+          record "$wt" 0 "unregistered directory; size scan failed; orphan report only" ORPHAN
+        fi
+        continue
+        ;;
       *) locked=unknown ;;
     esac
   fi
@@ -344,23 +358,28 @@ for wt in "${worktrees[@]}"; do
   if [[ "$last_head_activity" =~ ^[0-9]+$ ]]; then age=$(( (now_epoch - last_head_activity) / 86400 )); fi
   reason="candidate"
   safe=1 candidate=1
+  dirty=0 merged=1
   [[ -n "$branch" ]] || { safe=0; candidate=0; reason="detached or unreadable HEAD"; }
   [[ -z "$locked" ]] || { safe=0; candidate=0; reason="git worktree locked or lock state unavailable"; }
-  [[ "$status" == "" ]] || { safe=0; candidate=0; reason="dirty or unreadable status"; }
+  [[ "$status" == "" ]] || { safe=0; candidate=0; dirty=1; reason="dirty or unreadable status"; }
   (( age > 2 )) || { safe=0; candidate=0; reason="idle less than 48h or HEAD activity time unavailable"; }
-  git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; candidate=0; reason="HEAD not proven ancestor of origin/main"; }
+  git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; candidate=0; merged=0; reason="HEAD not proven ancestor of origin/main"; }
   live_cwd_in "$(realpath "$wt")" && { safe=0; candidate=0; reason="live process cwd inside worktree"; }
   if [[ "$hub_safe" -eq 1 ]]; then
     hub_refs_worktree "$(realpath "$wt")" && { safe=0; candidate=0; reason="Hub session/intake references worktree or open-state ambiguous"; }
   else
     safe=0
-    reason="all Git/process gates pass; Hub session/intake safety unavailable"
+    if (( candidate )); then reason="all Git/process gates pass; Hub session/intake safety unavailable"; fi
   fi
-  if [[ -z "${WORKTREE_SIZE_BYTES[$wt]:-}" ]]; then
-    record "$wt" 0 "worktree size unavailable; skipped" SKIPPED
+  if (( safe || (candidate && hub_safe != 1) || (WEEKLY_DUE && (dirty || !merged)) )); then
+    if ! bytes=$(worktree_size_bytes "$wt"); then
+      record "$wt" 0 "size scan failed; cleanup skipped" SKIPPED
+      continue
+    fi
+  else
+    record "$wt" 0 "$reason; size deferred to weekly report" SKIPPED
     continue
   fi
-  bytes=${WORKTREE_SIZE_BYTES[$wt]}
   if (( safe )); then
     record "$wt" "$bytes" "finished clean merged worktree; branch=${branch}; idle>${age}d" WOULD_REMOVE
     if [[ "$MODE" == apply ]]; then
@@ -378,8 +397,10 @@ for wt in "${worktrees[@]}"; do
     fi
   elif (( candidate && hub_safe != 1 )); then
     record "$wt" "$bytes" "$reason; report-only hold" HUB_HOLD
+  elif (( WEEKLY_DUE && (dirty || !merged) )); then
+    record "$wt" "$bytes" "$reason; needs Alexey's OK" NEEDS_OK
   else
-    record "$wt" "$bytes" "$reason" SKIPPED
+    record "$wt" 0 "$reason; size deferred to weekly report" SKIPPED
   fi
 done
 
@@ -431,10 +452,7 @@ while IFS=$'\t' read -r bytes db_path; do
 done < <(find /tmp "$HOME/tmp" -maxdepth 5 -type f \( -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.sqlite3-*' -o -name '*-wal' -o -name '*-shm' \) -printf '%s\t%p\n' 2>/dev/null || true)
 
 # Weekly-only jobs use a state stamp. No volumes/containers are touched.
-if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
-  last_week=$(cat "$STATE_DIR/weekly.stamp" 2>/dev/null || echo 0)
-  [[ "$last_week" =~ ^[0-9]+$ ]] || last_week=0
-  if (( now_epoch - last_week > 6*86400 )); then
+if (( WEEKLY_DUE )); then
     if [[ "$MODE" == dry-run ]]; then
       for cache in "$HOME/.cache/uv" "$HOME/.cache/pip" "$HOME/.npm"; do
         [[ -d "$cache" ]] && record "$cache" "$(size_bytes "$cache")" "weekly package-cache prune candidate (tool lock check required)" WOULD_PRUNE
@@ -520,8 +538,7 @@ if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
         fi
       fi
       printf '%s\n' "$now_epoch" > "$STATE_DIR/weekly.stamp"
-    fi
-  fi
+fi
 fi
 
 cp -- "$report_tmp" "$REPORT_DIR/rmthz-disk-gc-$(date -u +%Y%m%dT%H%M%SZ).txt"
