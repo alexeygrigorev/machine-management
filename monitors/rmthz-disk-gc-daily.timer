@@ -1,0 +1,11 @@
+[Unit]
+Description=Run RMTHZ disk GC daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=rmthz-disk-gc-daily.service
+
+[Install]
+WantedBy=timers.target
