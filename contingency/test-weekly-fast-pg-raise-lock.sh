@@ -96,6 +96,11 @@ if [[ "$LOGFILE" == "/home/alexey/.local/state/dr-fast-pg-raise/weekly.log" ]]; 
 else
   bad "unexpected cron log target: $LOGFILE"
 fi
+if [[ "$CMD" == "mkdir -p /home/alexey/.local/state/dr-fast-pg-raise && "* ]]; then
+  ok "cron creates its log dir before redirecting (missing dir = silent no-run)"
+else
+  bad "cron does not mkdir -p its log dir"
+fi
 if [[ "$RUN" == *"weekly-fast-pg-raise.sh"* ]]; then
   ok "cron invokes weekly-fast-pg-raise.sh: $RUN"
 else

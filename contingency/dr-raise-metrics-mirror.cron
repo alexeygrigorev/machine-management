@@ -6,4 +6,4 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Europe/Berlin
-17 * * * * alexey /usr/local/lib/dr-fast-pg-raise/contingency/mirror-dr-raise-metrics.sh >> /home/alexey/.local/state/dr-fast-pg-raise/mirror.log 2>&1
+17 * * * * alexey mkdir -p /home/alexey/.local/state/dr-fast-pg-raise && /usr/local/lib/dr-fast-pg-raise/contingency/mirror-dr-raise-metrics.sh >> /home/alexey/.local/state/dr-fast-pg-raise/mirror.log 2>&1
