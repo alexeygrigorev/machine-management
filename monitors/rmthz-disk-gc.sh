@@ -289,7 +289,7 @@ worktree_lock_state() {
       esac
     done <<<"$listing"
   fi
-  [[ -n "${REGISTERED_WORKTREES[$target]:-}" ]] || return 2
+  [[ -n "${REGISTERED_WORKTREES[$target]:-}" ]] || return 3
   [[ -n "${LOCKED_WORKTREES[$target]:-}" ]]
 }
 
@@ -328,7 +328,16 @@ for wt in "${worktrees[@]}"; do
     continue
   fi
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  if worktree_lock_state "$wt"; then locked=yes; else rc=$?; (( rc == 1 )) && locked="" || locked=unknown; fi
+  if worktree_lock_state "$wt"; then
+    locked=yes
+  else
+    rc=$?
+    case "$rc" in
+      1) locked="" ;;
+      3) record "$wt" "${WORKTREE_SIZE_BYTES[$wt]:-0}" "not registered by git worktree list; orphan report only" ORPHAN; continue ;;
+      *) locked=unknown ;;
+    esac
+  fi
   status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo UNKNOWN)
   last_head_activity=$(git -C "$wt" reflog --date=unix --format=%gd -1 HEAD 2>/dev/null | sed -nE 's/.*@\{([0-9]+)\}.*/\1/p')
   age=0
