@@ -334,6 +334,13 @@ for wt in "${worktrees[@]}"; do
     record "$wt" 0 "main checkout, not a linked worktree; size deferred" SKIPPED
     continue
   fi
+  # A live cwd is an unconditional removal hold. On ordinary daily/WARN runs,
+  # record it before status/reflog/merge probes; reserve the full Git inventory
+  # for the weekly approval report, which needs dirty/unmerged sizes.
+  if (( !WEEKLY_DUE )) && live_cwd_in "$(realpath "$wt")"; then
+    record "$wt" 0 "live process cwd inside worktree; size deferred to weekly report" SKIPPED
+    continue
+  fi
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   if worktree_lock_state "$wt"; then
     locked=yes
@@ -364,7 +371,9 @@ for wt in "${worktrees[@]}"; do
   [[ "$status" == "" ]] || { safe=0; candidate=0; dirty=1; reason="dirty or unreadable status"; }
   (( age > 2 )) || { safe=0; candidate=0; reason="idle less than 48h or HEAD activity time unavailable"; }
   git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; candidate=0; merged=0; reason="HEAD not proven ancestor of origin/main"; }
-  live_cwd_in "$(realpath "$wt")" && { safe=0; candidate=0; reason="live process cwd inside worktree"; }
+  if (( WEEKLY_DUE )) && live_cwd_in "$(realpath "$wt")"; then
+    safe=0 candidate=0 reason="live process cwd inside worktree"
+  fi
   if [[ "$hub_safe" -eq 1 ]]; then
     hub_refs_worktree "$(realpath "$wt")" && { safe=0; candidate=0; reason="Hub session/intake references worktree or open-state ambiguous"; }
   else
