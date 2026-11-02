@@ -491,7 +491,13 @@ check_mount() {
       if [[ ! "$gc_last" =~ ^[0-9]+$ ]]; then gc_last=0; fi
       if [[ ! "$gc_interval" =~ ^[0-9]+$ ]]; then gc_interval=21600; fi
       if (( gc_now - gc_last >= gc_interval )); then
-        if systemctl --user start rmthz-disk-gc.service >/dev/null 2>&1; then
+        # User crontab does not inherit the interactive systemd bus variables.
+        # Address this user's local bus directly so the WARN hook works there.
+        local gc_runtime_dir="/run/user/$(id -u)"
+        if [[ -S "$gc_runtime_dir/bus" ]] && \
+          XDG_RUNTIME_DIR="$gc_runtime_dir" \
+          DBUS_SESSION_BUS_ADDRESS="unix:path=$gc_runtime_dir/bus" \
+          systemctl --user start rmthz-disk-gc.service >/dev/null 2>&1; then
           printf '%s\n' "$gc_now" > "$gc_stamp"
         else
           log "INFO: root disk WARN; rmthz-disk-gc.service unavailable (GC not started)"
