@@ -67,14 +67,25 @@ Contabo-b `/data/coolify/proxy/dynamic/origin-enforce.yml` allow routers
 monitor sends the header (monitors check public health only); prod-website
 `E1VNMGFFIXBOXX` and dev-website `E33FS79KPFSAOM` use distinct values.
 
-Procedure (operator box Hetzner RMTHZ, `aws --profile main-temp`):
+Procedure (operator box Hetzner RMTHZ; use only an explicitly authorized MAIN
+AWS session through AWS Gate. Never use `main-temp` for this rotation.):
 
 1. Backup: `ssh contabo-b 'sudo cp -a /data/coolify/proxy/dynamic/origin-enforce.yml /data/coolify/proxy/dynamic/origin-enforce.yml.bak-YYYYMMDD-rotate && sudo chmod 0600 ...bak...'` (0600 on host).
 2. Generate one new 48-char alnum value per side (prod, dev) into 0600 files, env vars only (never print/log/commit; e.g. `python3 -c "import secrets,string;..."`).
 3. Dual-accept first: edit each allow router to accept old OR new (`Header(old) || Header(new)`), keep deny routers, `install -m 0600`, wait 5s, check `docker logs coolify-proxy` for origin errors. Verify direct origin: no-header 403, old 200, new 200, wrong 403 on http+https for all four hostnames; public health 200.
-4. Switch CloudFront to new value (one distribution at a time, dev first): read-modify-write via ETag (`get-distribution-config` + `update-distribution`), or via Terraform (`taint random_password...` + apply). Verify public health 200, then direct origin with new 200.
+4. Switch CloudFront to the new value one distribution at a time, dev first:
+   read-modify-write only the target distribution's origin CustomHeader using
+   `get-distribution-config` + `update-distribution` and its ETag. Keep config
+   and response files mode `0600`; pass values through files or environment
+   variables and never print them or put them in command arguments. Wait for
+   each distribution to reach `Deployed`, then verify public health 200 and
+   direct origin with the new value returns 200. The current Terraform roots
+   are tombstoned, so do not use Terraform for this rotation.
 5. Single-accept only new: remove old `Header()` alternative, reinstall 0600, verify no-header 403, old 403, new 200, public 200. Keep host backups 0600.
-6. If distributions are Terraform-managed such that an out-of-band CloudFront change would conflict/drift (main/relay `random_password.origin_verify`, main/dev `random_password.relay_origin_verify`), STOP after step 3 and record the exact `update-distribution` / Terraform change for Alexey. Do not run the pending MAIN AWS terraform apply, DMARC or F10 gate.
+6. If a future Terraform root manages either live distribution, or an
+   out-of-band update could conflict with a pending apply, STOP after step 3
+   and record the exact scoped CloudFront change needed for Alexey. Do not run
+   the pending MAIN AWS Terraform apply, DMARC or the F10 gate.
 
 See `edge/origin-tls-enforce/README.md` for transport/rollback verification (`test-origin.sh`, `verify-rollback.py`, `verify_stability.py`). Rotation 2026-10-25 stopped at dual-accept pending Alexey: report `~/tmp/agent-reports/relay-origin-verify-rotation-2026-10-25.md`.
 
