@@ -113,8 +113,8 @@ once Relay delivery + log volume look healthy.
 ### RMTHZ disk GC and alert ownership
 
 Install with `./monitors/install-rmthz-disk-gc.sh`. It enables a daily user timer;
-the existing `hetzner-disk-check.sh` starts the one-shot GC service only for a
-WARN on `/`. The GC defaults to dry-run and writes candidate/removal records
+the existing `hetzner-disk-check.sh` starts the one-shot GC service for a
+WARN on `/`, throttled to once per six hours. The GC defaults to dry-run and writes candidate/removal records
 (UTC time, action, byte size, reason, path) to
 `~/.local/state/rmthz-disk-gc/removals.tsv`; dated inventories go to
 `~/tmp/agent-reports/`. Review the inventory and obtain Alexey's approval before
@@ -123,11 +123,16 @@ setting `RMTHZ_GC_MODE=apply` in `~/.config/rmthz-disk-gc.env`.
 Worktree removal requires a clean status, HEAD ancestry to `origin/main`, age
 over 48 hours, no Git lock, no process cwd, and readable Hub session/open-intake
 snapshots proving no live session or open intake references it. Any uncertainty
-skips removal. Unregistered `*-wt-*` directories are report-only. The temp,
+skips removal. Unregistered `*-wt-*` directories are report-only even when
+Hub's complete session/intake snapshot is unavailable. The temp,
 cache, RDS export and Docker rules are restricted to the paths and operations
 in the script: Docker volumes/containers are untouched and Coolify-labelled
 images are retained. Engine histories, databases, backups, placement-recovery,
 production data and other non-regenerable paths are not cleanup candidates.
+When Hub snapshots are unavailable, clean/merged/idle worktrees that pass the
+local Git and process checks are recorded as `HUB_HOLD`; this explicitly
+records missing Hub proof and never enables removal. Process cwd and Git lock
+state are snapshotted once per run to bound the worktree scan.
 
 The root filesystem has one alert owner: `hetzner-disk-check` (`disk-root`).
 Any external `A2_disk_pressure` / `A2_disk_warn` rule that pages on the same
@@ -138,14 +143,19 @@ The RDS export retention target is the newest three regular files in each
 `/tmp/rds-export/<app>/` directory. The GC reports older exports as
 `NEEDS_OK`; AC3 protects existing RDS dumps from automatic deletion. Apply a
 producer-side cap after explicit approval, so the daily GC is a backstop rather
-than the only cap. The cleanup job never enters other `/tmp` trees.
+than the only cap. The cleanup job never enters other `/tmp` trees. Database
+files under `/tmp` and `~/tmp` are listed individually in the protected
+inventory; engine state roots are reported as protected aggregates.
 
 Codex and Claude histories and JSONL conversation records are intentionally
 outside automatic cleanup. For ordinary rotating text logs only, use a
 logrotate policy with `size 100M`, `rotate 7`, `compress`, and `missingok`; do
 not apply that rule to session databases, SQLite files, JSONL histories, or
-engine state directories. Those need a separate size/age inventory and
-Alexey's approval before any retention policy removes them.
+engine state directories. Proposed JSONL cap for review is 200 MiB per file or
+90 days, whichever comes first; it is not active until Alexey approves the
+specific inventory and retention behavior. Those files need a separate
+size/age inventory and Alexey's approval before any retention policy removes
+them.
 | `install-node-exporter.sh` | Hetzner node_exporter (apt, pinned to `127.0.0.1:9100` only, never public) |
 
 ## Proxy attachment pager (2026-10-25 relay-dev/cmp-dev incident)

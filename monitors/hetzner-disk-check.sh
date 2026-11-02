@@ -485,8 +485,18 @@ check_mount() {
     # The root WARN is the single trigger for the RMTHZ disk GC. The user
     # service owns dry-run/apply mode and its lock; a missing service is benign.
     if [[ "$mp" == "/" && "$level" == "WARN" ]] && command -v systemctl >/dev/null 2>&1; then
-      systemctl --user start rmthz-disk-gc.service >/dev/null 2>&1 || \
-        log "INFO: root disk WARN; rmthz-disk-gc.service unavailable (GC not started)"
+      local gc_stamp="$STATE_DIR/rmthz-disk-gc-last-warn-start"
+      local gc_last=0 gc_now="$(date +%s)" gc_interval="${RMTHZ_GC_WARN_INTERVAL_SEC:-21600}"
+      [[ -f "$gc_stamp" ]] && read -r gc_last < "$gc_stamp" || true
+      if [[ ! "$gc_last" =~ ^[0-9]+$ ]]; then gc_last=0; fi
+      if [[ ! "$gc_interval" =~ ^[0-9]+$ ]]; then gc_interval=21600; fi
+      if (( gc_now - gc_last >= gc_interval )); then
+        if systemctl --user start rmthz-disk-gc.service >/dev/null 2>&1; then
+          printf '%s\n' "$gc_now" > "$gc_stamp"
+        else
+          log "INFO: root disk WARN; rmthz-disk-gc.service unavailable (GC not started)"
+        fi
+      fi
     fi
     FAILED=1
   fi

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Conservative RMTHZ disk GC. Dry-run is the default; --apply is explicit.
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'EOF'
@@ -44,7 +45,6 @@ now_epoch=$(date +%s)
 printf 'run=%s mode=%s trigger=%s root=' "$(date -u +%FT%TZ)" "$MODE" "$TRIGGER"
 df -B1 --output=avail / | tail -n 1 | tr -d ' '
 
-human_size() { du -sh -- "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
 record() {
   local path="$1" bytes="$2" reason="$3" action="$4"
   printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$action" "$bytes" "$reason" "$path" >> "$LOG"
@@ -54,26 +54,110 @@ record() {
   [[ -z "${report_tmp:-}" ]] || printf '%s\n' "$row" >> "$report_tmp"
 }
 size_bytes() { du -s -B1 -- "$1" 2>/dev/null | awk '{print $1+0}'; }
-is_open() {
+newest_mtime() {
   python3 - "$1" <<'PY'
+import os, sys
+import time
+root = sys.argv[1]
+latest = os.stat(root, follow_symlinks=False).st_mtime
+started = time.monotonic()
+seen = 0
+pending = [root]
+while pending:
+    base = pending.pop()
+    try: entries = os.scandir(base)
+    except OSError: continue
+    with entries:
+        for entry in entries:
+            seen += 1
+            if seen > 50000 or time.monotonic() - started > 5:
+                print('incomplete')
+                raise SystemExit(2)
+            try:
+                st = entry.stat(follow_symlinks=False)
+                latest = max(latest, st.st_mtime)
+                if entry.is_dir(follow_symlinks=False): pending.append(entry.path)
+            except OSError:
+                print('incomplete')
+                raise SystemExit(2)
+print(int(latest))
+PY
+}
+has_protected_content() {
+  local found
+  found=$(timeout 5s find "$1" \( -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+      -o -type d \( -iname '*backup*' -o -iname '*placement-recovery*' \) \) -print -quit 2>/dev/null) || return 0
+  [[ -n "$found" ]]
+}
+docker_builder_reclaimable_bytes() {
+  local reclaimable
+  reclaimable=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null | awk -F '\t' '$1=="Build Cache"{print $2; exit}')
+  python3 - "$reclaimable" <<'PY'
+import re, sys
+m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)', sys.argv[1], re.I)
+if not m: print(0); raise SystemExit
+unit = m.group(2).upper()
+base = 1024 if unit.endswith('IB') else 1000
+power = {'B': 0, 'KB': 1, 'KIB': 1, 'MB': 2, 'MIB': 2, 'GB': 3, 'GIB': 3, 'TB': 4, 'TIB': 4}[unit]
+print(int(float(m.group(1)) * base**power))
+PY
+}
+declare -A OPEN_PATHS=()
+OPEN_SCAN_READY=0
+OPEN_SCAN_FAILED=0
+load_open_snapshot() {
+  (( OPEN_SCAN_READY )) && return 0
+  OPEN_SCAN_READY=1
+  local -a opened=()
+  mapfile -t opened < <(python3 - "${temp_candidates[@]}" "$HOME/.cache/uv" "$HOME/.cache/pip" "$HOME/.npm" <<'PY'
 import glob, os, sys
-target = os.path.realpath(sys.argv[1])
+targets = {os.path.realpath(p): p for p in sys.argv[1:] if os.path.isdir(p)}
+found = set()
+uncertain = False
+def check(path):
+    if not path or not path.startswith('/'): return
+    path = os.path.normpath(path.removesuffix(' (deleted)'))
+    while path != '/':
+        if path in targets:
+            found.add(targets[path]); return
+        path = os.path.dirname(path)
 for proc in glob.glob('/proc/[0-9]*'):
     for name in ('cwd', 'fd/*'):
         for item in glob.glob(os.path.join(proc, name)):
-            try: opened = os.path.realpath(os.readlink(item))
-            except (OSError, PermissionError): continue
-            if opened == target or opened.startswith(target + os.sep):
-                raise SystemExit(0)
-raise SystemExit(1)
+            try: check(os.readlink(item))
+            except PermissionError: uncertain = True
+            except OSError: continue
+    try:
+        with open(os.path.join(proc, 'maps'), errors='replace') as maps:
+            for line in maps:
+                parts = line.rstrip().split(None, 5)
+                if len(parts) == 6: check(parts[5])
+    except PermissionError: uncertain = True
+    except OSError: pass
+for path in sorted(found): print(path)
+print('__OPEN_SCAN_COMPLETE__' if not uncertain else '__OPEN_SCAN_INCOMPLETE__')
 PY
+)
+  if [[ "${opened[-1]:-}" != '__OPEN_SCAN_COMPLETE__' ]]; then
+    OPEN_SCAN_FAILED=1
+    return 0
+  fi
+  local last=$(( ${#opened[@]} - 1 ))
+  unset "opened[$last]"
+  local p
+  for p in "${opened[@]}"; do OPEN_PATHS["$p"]=1; done
+}
+is_open() {
+  load_open_snapshot
+  (( OPEN_SCAN_FAILED )) && return 0
+  [[ -n "${OPEN_PATHS[$1]:-}" ]]
 }
 remove_path() {
   local path="$1" reason="$2" bytes
   [[ -e "$path" || -L "$path" ]] || return 0
   bytes=$(size_bytes "$path")
-  if [[ "$MODE" == dry-run ]]; then record "$path" "$bytes" "$reason" WOULD_REMOVE; return; fi
   if is_open "$path"; then record "$path" "$bytes" "$reason (open; skipped)" SKIPPED; return; fi
+  if [[ "$MODE" == dry-run ]]; then record "$path" "$bytes" "$reason" WOULD_REMOVE; return; fi
   rm -rf --one-file-system -- "$path"
   record "$path" "$bytes" "$reason" REMOVED
 }
@@ -93,14 +177,43 @@ if [[ -n "$hub_sessions_json" && -n "$hub_open_intakes_json" ]] && \
   hub_safe=1
 fi
 
+declare -A LIVE_CWD_WORKTREES=()
+LIVE_CWD_READY=0
+LIVE_CWD_FAILED=0
 live_cwd_in() {
-  local target="$1" proc cwd
-  for proc in /proc/[0-9]*; do
-    [[ -r "$proc/cwd" ]] || continue
-    cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
-    case "$cwd" in "$target"|"$target"/*) return 0 ;; esac
-  done
-  return 1
+  local target="$1"
+  if [[ "$LIVE_CWD_READY" -eq 0 ]]; then
+    LIVE_CWD_READY=1
+    local -a snapshot=()
+    mapfile -t snapshot < <(python3 - "${worktrees[@]}" <<'PY'
+import glob, os, sys
+targets = {os.path.realpath(p): p for p in sys.argv[1:] if os.path.isdir(p)}
+found, uncertain = set(), False
+def check(path):
+    if not path or not path.startswith('/'): return
+    path = os.path.normpath(path.removesuffix(' (deleted)'))
+    while path != '/':
+        if path in targets:
+            found.add(path); return
+        path = os.path.dirname(path)
+for proc in glob.glob('/proc/[0-9]*'):
+    try: check(os.readlink(os.path.join(proc, 'cwd')))
+    except PermissionError: uncertain = True
+    except OSError: continue
+for path in sorted(found): print(path)
+print('__LIVE_CWD_COMPLETE__' if not uncertain else '__LIVE_CWD_INCOMPLETE__')
+PY
+)
+    if [[ "${snapshot[-1]:-}" != '__LIVE_CWD_COMPLETE__' ]]; then
+      LIVE_CWD_FAILED=1
+    else
+      local last=$(( ${#snapshot[@]} - 1 )) p
+      unset "snapshot[$last]"
+      for p in "${snapshot[@]}"; do LIVE_CWD_WORKTREES["$p"]=1; done
+    fi
+  fi
+  (( LIVE_CWD_FAILED )) && return 0
+  [[ -n "${LIVE_CWD_WORKTREES[$target]:-}" ]]
 }
 hub_refs_worktree() {
   local target="$1"
@@ -109,6 +222,21 @@ hub_refs_worktree() {
 import json, os, sys
 target = os.path.realpath(sys.argv[1])
 data = [json.loads(sys.argv[2]).get("sessions", []), json.loads(sys.argv[3])]
+def collect_open_intakes(value):
+    if isinstance(value, list): return value
+    if isinstance(value, dict):
+        for key in ("items", "tasks", "intakes"):
+            if isinstance(value.get(key), list): return value[key]
+        if value.get("status") == "open": return [value]
+        for item in value.values():
+            if isinstance(item, dict):
+                found = collect_open_intakes(item)
+                if found is not None: return found
+    return None
+open_intakes = collect_open_intakes(data[1])
+if open_intakes is None:
+    # A successful response without an enumerable intake list is not proof.
+    raise SystemExit(0)
 def walk(v):
     if isinstance(v, dict):
         for k, x in v.items():
@@ -119,8 +247,43 @@ def walk(v):
     elif isinstance(v, list):
         for x in v: walk(x)
 for item in data: walk(item)
+# A positive open-intake list must expose its complete linked-worktree/session
+# inventory. Otherwise we cannot establish that a path has no unresolved link.
+def has_link_manifest(item):
+    if isinstance(item, dict):
+        for key, value in item.items():
+            if key.lower() in ("worktrees", "worktree_paths", "linked_worktrees", "worktree_links", "linked_sessions"):
+                return True
+            if has_link_manifest(value): return True
+    elif isinstance(item, list):
+        return any(has_link_manifest(x) for x in item)
+    return False
+if open_intakes and not all(has_link_manifest(item) for item in open_intakes):
+    raise SystemExit(0)
 raise SystemExit(1)
 PY
+}
+
+declare -A SCANNED_COMMON_DIRS=()
+declare -A LOCKED_WORKTREES=()
+worktree_lock_state() {
+  local target="$1" common listing line current
+  target=$(realpath "$target")
+  common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 2
+  common=$(realpath "$common")
+  if [[ -z "${SCANNED_COMMON_DIRS[$common]:-}" ]]; then
+    listing=$(git -C "$target" worktree list --porcelain 2>/dev/null) || return 2
+    SCANNED_COMMON_DIRS["$common"]=1
+    current=""
+    while IFS= read -r line; do
+      case "$line" in
+        'worktree '*) current=$(realpath "${line#worktree }") ;;
+        locked*) [[ -n "$current" ]] && LOCKED_WORKTREES["$current"]=1 ;;
+        '') current="" ;;
+      esac
+    done <<<"$listing"
+  fi
+  [[ -n "${LOCKED_WORKTREES[$target]:-}" ]]
 }
 
 report_tmp=$(mktemp "$REPORT_DIR/rmthz-disk-gc.XXXXXX")
@@ -134,13 +297,15 @@ trap 'rm -f -- "$report_tmp"' EXIT
 printf '\nWorktree candidates (~/git/*-wt-*):\n'
 shopt -s nullglob
 worktrees=("$HOME"/git/*-wt-*)
-if [[ "$hub_safe" -ne 1 ]]; then
-  printf 'Hub open-intake/session snapshot unavailable; listing sizes only.\n'
-  while IFS=$'\t' read -r bytes wt; do
-    [[ -d "$wt" ]] || continue
-    record "$wt" "$bytes" "Hub open-intake/session snapshot unavailable; safety unverified" SKIPPED
-  done < <(du -s -B1 -- "${worktrees[@]}" 2>/dev/null || true)
-else
+declare -A WORKTREE_SIZE_BYTES=()
+if ((${#worktrees[@]})); then
+  mapfile -t worktree_sizes < <(du -s -B1 -- "${worktrees[@]}" 2>/dev/null || true)
+  for size_line in "${worktree_sizes[@]}"; do
+    size_bytes_value=${size_line%%$'\t'*}
+    size_path=${size_line#*$'\t'}
+    [[ "$size_bytes_value" =~ ^[0-9]+$ && "$size_path" != "$size_line" ]] && WORKTREE_SIZE_BYTES["$size_path"]="$size_bytes_value"
+  done
+fi
 for wt in "${worktrees[@]}"; do
   [[ -d "$wt" ]] || continue
   top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
@@ -149,37 +314,47 @@ for wt in "${worktrees[@]}"; do
     continue
   fi
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  locked=$(git -C "$wt" worktree list --porcelain 2>/dev/null | awk -v p="$(realpath "$wt")" '$1=="worktree"{w=$2} $1=="locked" && w==p{print "yes"}' || true)
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if worktree_lock_state "$wt"; then locked=yes; else rc=$?; (( rc == 1 )) && locked="" || locked=unknown; fi
   status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo UNKNOWN)
   last_head_activity=$(git -C "$wt" reflog --date=unix --format=%gd -1 HEAD 2>/dev/null | sed -nE 's/.*@\{([0-9]+)\}.*/\1/p')
   age=0
   if [[ "$last_head_activity" =~ ^[0-9]+$ ]]; then age=$(( (now_epoch - last_head_activity) / 86400 )); fi
   reason="candidate"
-  safe=1
-  [[ -n "$branch" ]] || { safe=0; reason="detached or unreadable HEAD"; }
-  [[ -z "$locked" ]] || { safe=0; reason="git worktree locked"; }
-  [[ "$status" == "" ]] || { safe=0; reason="dirty or unreadable status"; }
-  (( age > 2 )) || { safe=0; reason="idle less than 48h or HEAD activity time unavailable"; }
-  git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; reason="HEAD not proven ancestor of origin/main"; }
-  live_cwd_in "$(realpath "$wt")" && { safe=0; reason="live process cwd inside worktree"; }
-  [[ "$hub_safe" -eq 1 ]] || { safe=0; reason="Hub session/intake snapshot unavailable or not parseable"; }
-  hub_refs_worktree "$(realpath "$wt")" && { safe=0; reason="Hub session/intake references worktree or open-state ambiguous"; }
-  bytes=$(size_bytes "$wt")
+  safe=1 candidate=1
+  [[ -n "$branch" ]] || { safe=0; candidate=0; reason="detached or unreadable HEAD"; }
+  [[ -z "$locked" ]] || { safe=0; candidate=0; reason="git worktree locked or lock state unavailable"; }
+  [[ "$status" == "" ]] || { safe=0; candidate=0; reason="dirty or unreadable status"; }
+  (( age > 2 )) || { safe=0; candidate=0; reason="idle less than 48h or HEAD activity time unavailable"; }
+  git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; candidate=0; reason="HEAD not proven ancestor of origin/main"; }
+  live_cwd_in "$(realpath "$wt")" && { safe=0; candidate=0; reason="live process cwd inside worktree"; }
+  if [[ "$hub_safe" -eq 1 ]]; then
+    hub_refs_worktree "$(realpath "$wt")" && { safe=0; candidate=0; reason="Hub session/intake references worktree or open-state ambiguous"; }
+  else
+    safe=0
+    reason="all Git/process gates pass; Hub session/intake safety unavailable"
+  fi
+  if [[ -z "${WORKTREE_SIZE_BYTES[$wt]:-}" ]]; then
+    record "$wt" 0 "worktree size unavailable; skipped" SKIPPED
+    continue
+  fi
+  bytes=${WORKTREE_SIZE_BYTES[$wt]}
   if (( safe )); then
     record "$wt" "$bytes" "finished clean merged worktree; branch=${branch}; idle>${age}d" WOULD_REMOVE
     if [[ "$MODE" == apply ]]; then
       git -C "$wt" worktree remove "$wt"
-      if git -C "$(dirname "$wt")" branch -d "$branch"; then
+      if [[ -n "$common" ]] && git --git-dir="$common" branch -d "$branch"; then
         record "$wt" "$bytes" "removed merged worktree and deleted branch ${branch}" REMOVED
       else
         record "$wt" "$bytes" "worktree removed; branch -d refused for ${branch}" SKIPPED
       fi
     fi
+  elif (( candidate && hub_safe != 1 )); then
+    record "$wt" "$bytes" "$reason; report-only hold" HUB_HOLD
   else
     record "$wt" "$bytes" "$reason" SKIPPED
   fi
 done
-fi
 
 # Regenerable temp locations from AC4, strictly bounded to named roots.
 printf '\nTemporary candidates older than three days:\n'
@@ -187,9 +362,22 @@ temp_candidates=( "$HOME"/git/*/.local/tmp "$HOME"/git/*/.tmp/worktrees /tmp/tsx
 for p in "${temp_candidates[@]}"; do
   [[ -e "$p" ]] || continue
   [[ -d "$p" ]] || continue
-  age=$(( (now_epoch - $(stat -c %Y "$p" 2>/dev/null || echo "$now_epoch")) / 86400 ))
+  root_age=$(( (now_epoch - $(stat -c %Y "$p" 2>/dev/null || echo "$now_epoch")) / 86400 ))
+  (( root_age > 3 )) || continue
+  latest_mtime=$(newest_mtime "$p" 2>/dev/null || true)
+  if [[ ! "$latest_mtime" =~ ^[0-9]+$ ]]; then
+    record "$p" "$(size_bytes "$p")" "age scan incomplete; safety unverified" SKIPPED
+    continue
+  fi
+  age=$(( (now_epoch - latest_mtime) / 86400 ))
   (( age > 3 )) || continue
-  if is_open "$p"; then record "$p" "$(size_bytes "$p")" "older than 3d but open/in-use" SKIPPED; else remove_path "$p" "regenerable temp older than 3d"; fi
+  if has_protected_content "$p"; then
+    record "$p" "$(size_bytes "$p")" "contains a protected database/backup path" SKIPPED
+  elif is_open "$p"; then
+    record "$p" "$(size_bytes "$p")" "older than 3d but open/in-use" SKIPPED
+  else
+    remove_path "$p" "regenerable temp older than 3d"
+  fi
 done
 
 # Report the newest-three retention candidates for review. AC3 protects current
@@ -205,66 +393,82 @@ if [[ -d /tmp/rds-export ]]; then
 fi
 
 # Protected data classes are inventory-only and require Alexey's explicit OK.
-protected_paths=("$HOME/.codex" "$HOME/.zcodex" "$HOME/.zodex" "$HOME/.godex" "$HOME/.claude" "$HOME/.gemini" "$HOME/.local/share/opencode" "$HOME/prod" "$HOME"/git/*placement-recovery* "$HOME"/git/*backup* /tmp/rds-export)
+protected_paths=("$HOME/.codex" "$HOME/.zcodex" "$HOME/.zodex" "$HOME/.godex" "$HOME/.claude" "$HOME/.gemini" "$HOME/.opencode" "$HOME/.config/opencode" "$HOME/.local/share/opencode" "$HOME/prod" "$HOME"/git/*placement-recovery* "$HOME"/git/*backup* /tmp/rds-export)
 for protected in "${protected_paths[@]}"; do
   [[ -e "$protected" ]] || continue
   record "$protected" "$(size_bytes "$protected")" "protected data inventory; needs Alexey's OK" NEEDS_OK
 done
+while IFS=$'\t' read -r bytes db_path; do
+  [[ -n "$db_path" ]] || continue
+  record "$db_path" "$bytes" "database file protected; needs Alexey's OK" NEEDS_OK
+done < <(find /tmp "$HOME/tmp" -maxdepth 5 -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -printf '%s\t%p\n' 2>/dev/null || true)
 
 # Weekly-only jobs use a state stamp. No volumes/containers are touched.
 if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
   last_week=$(cat "$STATE_DIR/weekly.stamp" 2>/dev/null || echo 0)
+  [[ "$last_week" =~ ^[0-9]+$ ]] || last_week=0
   if (( now_epoch - last_week > 6*86400 )); then
     if [[ "$MODE" == dry-run ]]; then
       for cache in "$HOME/.cache/uv" "$HOME/.cache/pip" "$HOME/.npm"; do
         [[ -d "$cache" ]] && record "$cache" "$(size_bytes "$cache")" "weekly package-cache prune candidate (tool lock check required)" WOULD_PRUNE
       done
       if command -v docker >/dev/null 2>&1; then
-        builder_du=$(docker builder du 2>/dev/null || true)
-        printf '%s\n' "$builder_du" | sed 's/^/DRY-RUN docker builder: /'
-        [[ -z "$report_tmp" ]] || printf '%s\n' "$builder_du" | sed 's/^/DRY-RUN docker builder: /' >> "$report_tmp"
-        while IFS= read -r image_id; do
-          [[ -n "$image_id" ]] || continue
-          labels=$(docker image inspect --format '{{json .Config.Labels}}' "$image_id" 2>/dev/null || echo '{}')
-          if [[ "${labels,,}" == *coolify* ]]; then
-            record "$image_id" 0 "Coolify-labelled dangling image retained" SKIPPED
-          else
-            record "$image_id" "$(docker image inspect --format '{{.Size}}' "$image_id" 2>/dev/null || echo 0)" "dangling image candidate; Docker reports dangling=true" WOULD_PRUNE
-          fi
-        done < <(docker image ls --filter dangling=true --quiet | sort -u)
+        docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+        if [[ "$docker_root" == /data || "$docker_root" == /data/* ]]; then
+          builder_du=$(docker builder du 2>/dev/null || true)
+          printf '%s\n' "$builder_du" | sed 's/^/DRY-RUN docker builder: /'
+          [[ -z "$report_tmp" ]] || printf '%s\n' "$builder_du" | sed 's/^/DRY-RUN docker builder: /' >> "$report_tmp"
+          while IFS= read -r image_id; do
+            [[ -n "$image_id" ]] || continue
+            labels=$(docker image inspect --format '{{json .Config.Labels}}' "$image_id" 2>/dev/null || echo '{}')
+            if [[ "${labels,,}" == *coolify* ]]; then
+              record "$image_id" 0 "Coolify-labelled dangling image retained" SKIPPED
+            else
+              record "$image_id" "$(docker image inspect --format '{{.Size}}' "$image_id" 2>/dev/null || echo 0)" "dangling image candidate; Docker reports dangling=true" WOULD_PRUNE
+            fi
+          done < <(docker image ls --filter dangling=true --quiet | sort -u)
+        else
+          record "docker" 0 "Docker root is not on /data; GC skipped (root=${docker_root:-unknown})" SKIPPED
+        fi
       fi
     else
       if command -v uv >/dev/null 2>&1; then
-        if is_open "$HOME/.cache/uv"; then record "$HOME/.cache/uv" "$(size_bytes "$HOME/.cache/uv")" "uv cache is open/in-use" SKIPPED
+        if is_open "$HOME/.cache/uv" || pgrep -af '(^|/)uv (pip|sync|run|tool|cache)' >/dev/null; then record "$HOME/.cache/uv" "$(size_bytes "$HOME/.cache/uv")" "uv cache is open or uv process is active" SKIPPED
         else before=$(size_bytes "$HOME/.cache/uv"); uv cache prune 2>&1 | sed 's/^/uv: /'; after=$(size_bytes "$HOME/.cache/uv"); record "$HOME/.cache/uv" "$((before-after))" "uv cache prune (aggregate reclaimed size)" REMOVED; fi
       fi
       if command -v pip >/dev/null 2>&1; then
-        if is_open "$HOME/.cache/pip"; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open/in-use" SKIPPED
+        if is_open "$HOME/.cache/pip" || pgrep -af '(^|/)(pip|pip3)( |$)' >/dev/null; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open or pip process is active" SKIPPED
         else before=$(size_bytes "$HOME/.cache/pip"); pip cache purge 2>&1 | sed 's/^/pip: /'; after=$(size_bytes "$HOME/.cache/pip"); record "$HOME/.cache/pip" "$((before-after))" "pip cache purge (aggregate reclaimed size)" REMOVED; fi
       fi
       if command -v npm >/dev/null 2>&1; then
-        if ! is_open "$HOME/.npm" && ! pgrep -af '[n]pm (install|ci|cache)' >/dev/null && [[ ! -e "$HOME/.npm/_locks" ]]; then
+        if ! is_open "$HOME/.npm" && ! pgrep -af '[n]pm (install|ci|cache)' >/dev/null && [[ ! -e "$HOME/.npm/_locks" ]] && [[ ! -e "$HOME/.npm/_cacache/tmp" ]]; then
           before=$(size_bytes "$HOME/.npm"); npm cache clean --force 2>&1 | sed 's/^/npm: /'; after=$(size_bytes "$HOME/.npm"); record "$HOME/.npm" "$((before-after))" "npm cache clean after process and lock checks (aggregate reclaimed size)" REMOVED
         else
           record "$HOME/.npm" "$(size_bytes "$HOME/.npm")" "npm cache lock or npm process present" SKIPPED
         fi
       fi
       if command -v docker >/dev/null 2>&1; then
-        builder_before=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null | awk -F '\t' '$1=="Build Cache"{print $2; exit}' | numfmt --from=iec 2>/dev/null || echo 0)
-        docker builder prune --filter until=168h -f
-        builder_after=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null | awk -F '\t' '$1=="Build Cache"{print $2; exit}' | numfmt --from=iec 2>/dev/null || echo 0)
-        builder_removed=$((builder_before-builder_after)); (( builder_removed < 0 )) && builder_removed=0
-        record "docker-builder-cache" "$builder_removed" "docker builder prune --filter until=168h (aggregate reclaimed size)" REMOVED
-        while IFS= read -r image_id; do
-          [[ -n "$image_id" ]] || continue
-          labels=$(docker image inspect --format '{{json .Config.Labels}}' "$image_id" 2>/dev/null || echo '{}')
-          if [[ "${labels,,}" == *coolify* ]]; then
-            record "$image_id" 0 "Coolify-labelled dangling image retained" SKIPPED
-          else
-            docker image rm "$image_id"
-            record "$image_id" 0 "dangling image pruned" REMOVED
-          fi
-        done < <(docker image ls --filter dangling=true --quiet | sort -u)
+        docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+        if [[ "$docker_root" == /data || "$docker_root" == /data/* ]]; then
+          builder_before=$(docker_builder_reclaimable_bytes || echo 0)
+          docker builder prune --filter until=168h -f
+          builder_after=$(docker_builder_reclaimable_bytes || echo 0)
+          builder_removed=$((builder_before-builder_after)); (( builder_removed < 0 )) && builder_removed=0
+          record "docker-builder-cache" "$builder_removed" "docker builder prune --filter until=168h (aggregate reclaimed size)" REMOVED
+          while IFS= read -r image_id; do
+            [[ -n "$image_id" ]] || continue
+            labels=$(docker image inspect --format '{{json .Config.Labels}}' "$image_id" 2>/dev/null || echo '{}')
+            image_size=$(docker image inspect --format '{{.Size}}' "$image_id" 2>/dev/null || echo 0)
+            if [[ "${labels,,}" == *coolify* ]]; then
+              record "$image_id" "$image_size" "Coolify-labelled dangling image retained" SKIPPED
+            else
+              docker image rm "$image_id"
+              record "$image_id" "$image_size" "dangling image pruned" REMOVED
+            fi
+          done < <(docker image ls --filter dangling=true --quiet | sort -u)
+        else
+          record "docker" 0 "Docker root is not on /data; GC skipped (root=${docker_root:-unknown})" SKIPPED
+        fi
       fi
       printf '%s\n' "$now_epoch" > "$STATE_DIR/weekly.stamp"
     fi
