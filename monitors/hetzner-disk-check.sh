@@ -62,6 +62,9 @@ STATE_DIR="${STATE_DIR:-$HOME/.local/state/hetzner-disk-check}"
 LOCK_FILE="${LOCK_FILE:-$HOME/.local/state/hetzner-disk-check.lock}"
 LOG_FILE="${LOG_FILE:-$HOME/.local/state/hetzner-disk-check/cron.log}"
 SAMPLE_DIR="${SAMPLE_DIR:-$STATE_DIR/samples}"
+# Keep more than seven days at the five-minute cron cadence, with headroom for
+# delayed or missed runs. AC7 relies on the retained root history for proof.
+SAMPLE_RETENTION=2500
 
 DISK_MOUNTS="${DISK_MOUNTS:-/ /boot /data}"
 DISK_WARN_FREE_PCT="${DISK_WARN_FREE_PCT:-15}"
@@ -264,7 +267,7 @@ record_sample() {
   fi
   if [[ "$last_t" -eq 0 || $(( NOW - last_t )) -ge 240 ]]; then
     echo "$NOW $avail $size" >> "$f"
-    tail -n 200 "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+    tail -n "$SAMPLE_RETENTION" "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
   fi
 }
 
