@@ -106,6 +106,46 @@ once Relay delivery + log volume look healthy.
 | `hetzner-disk-check.cron` | user-crontab `*/5 * * * *` entry pointing at the stable `/usr/local/sbin` copy |
 | `hetzner-disk-check.env.example` | placeholders for `~/.hetzner-disk-check.env` (defaults are the prod values) |
 | `install-hetzner-disk-check.sh` | Hetzner installer (stable path + user cron + live run; run on RMTHZ as your user) |
+| `rmthz-disk-gc.sh` | Conservative RMTHZ cleanup planner; defaults to dry-run, with explicit `--apply` and a per-action state log |
+| `rmthz-disk-gc*.service` / `rmthz-disk-gc-daily.timer` | User units for root-disk WARN and daily GC triggers |
+| `install-rmthz-disk-gc.sh` | Installs the units and script without running cleanup; first runs remain dry-run |
+
+### RMTHZ disk GC and alert ownership
+
+Install with `./monitors/install-rmthz-disk-gc.sh`. It enables a daily user timer;
+the existing `hetzner-disk-check.sh` starts the one-shot GC service only for a
+WARN on `/`. The GC defaults to dry-run and writes candidate/removal records
+(UTC time, action, byte size, reason, path) to
+`~/.local/state/rmthz-disk-gc/removals.tsv`; dated inventories go to
+`~/tmp/agent-reports/`. Review the inventory and obtain Alexey's approval before
+setting `RMTHZ_GC_MODE=apply` in `~/.config/rmthz-disk-gc.env`.
+
+Worktree removal requires a clean status, HEAD ancestry to `origin/main`, age
+over 48 hours, no Git lock, no process cwd, and readable Hub session/open-intake
+snapshots proving no live session or open intake references it. Any uncertainty
+skips removal. Unregistered `*-wt-*` directories are report-only. The temp,
+cache, RDS export and Docker rules are restricted to the paths and operations
+in the script: Docker volumes/containers are untouched and Coolify-labelled
+images are retained. Engine histories, databases, backups, placement-recovery,
+production data and other non-regenerable paths are not cleanup candidates.
+
+The root filesystem has one alert owner: `hetzner-disk-check` (`disk-root`).
+Any external `A2_disk_pressure` / `A2_disk_warn` rule that pages on the same
+RMTHZ `/` free-space condition should be disabled or routed into this check's
+single alert stream; those A2 rules are not defined in this repository.
+
+The RDS export retention target is the newest three regular files in each
+`/tmp/rds-export/<app>/` directory. The GC reports older exports as
+`NEEDS_OK`; AC3 protects existing RDS dumps from automatic deletion. Apply a
+producer-side cap after explicit approval, so the daily GC is a backstop rather
+than the only cap. The cleanup job never enters other `/tmp` trees.
+
+Codex and Claude histories and JSONL conversation records are intentionally
+outside automatic cleanup. For ordinary rotating text logs only, use a
+logrotate policy with `size 100M`, `rotate 7`, `compress`, and `missingok`; do
+not apply that rule to session databases, SQLite files, JSONL histories, or
+engine state directories. Those need a separate size/age inventory and
+Alexey's approval before any retention policy removes them.
 | `install-node-exporter.sh` | Hetzner node_exporter (apt, pinned to `127.0.0.1:9100` only, never public) |
 
 ## Proxy attachment pager (2026-10-25 relay-dev/cmp-dev incident)

@@ -1,0 +1,7 @@
+[Unit]
+Description=Conservative RMTHZ disk garbage collection
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/rmthz-disk-gc.env
+ExecStart=%h/.local/bin/rmthz-disk-gc.sh --trigger disk-warn
