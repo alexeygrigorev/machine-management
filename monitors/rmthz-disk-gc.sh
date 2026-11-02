@@ -66,7 +66,9 @@ pending = [root]
 while pending:
     base = pending.pop()
     try: entries = os.scandir(base)
-    except OSError: continue
+    except OSError:
+        print('incomplete')
+        raise SystemExit(2)
     with entries:
         for entry in entries:
             seen += 1
@@ -85,13 +87,13 @@ PY
 }
 has_protected_content() {
   local found
-  found=$(timeout 5s find "$1" \( -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+  found=$(timeout 5s find "$1" \( -type f \( -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.sqlite3-*' -o -name '*-wal' -o -name '*-shm' \) \
       -o -type d \( -iname '*backup*' -o -iname '*placement-recovery*' \) \) -print -quit 2>/dev/null) || return 0
   [[ -n "$found" ]]
 }
 docker_builder_reclaimable_bytes() {
   local reclaimable
-  reclaimable=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null | awk -F '\t' '$1=="Build Cache"{print $2; exit}')
+  reclaimable=$(docker system df --format '{{.Type}}|{{.Reclaimable}}' 2>/dev/null | awk -F '|' '$1=="Build Cache"{print $2; exit}')
   python3 - "$reclaimable" <<'PY'
 import re, sys
 m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)', sys.argv[1], re.I)
@@ -158,7 +160,11 @@ remove_path() {
   bytes=$(size_bytes "$path")
   if is_open "$path"; then record "$path" "$bytes" "$reason (open; skipped)" SKIPPED; return; fi
   if [[ "$MODE" == dry-run ]]; then record "$path" "$bytes" "$reason" WOULD_REMOVE; return; fi
-  rm -rf --one-file-system -- "$path"
+  record "$path" "$bytes" "$reason; removal starting" REMOVE_PENDING
+  if ! rm -rf --one-file-system -- "$path"; then
+    record "$path" "$bytes" "$reason; removal command failed" REMOVE_FAILED
+    return 1
+  fi
   record "$path" "$bytes" "$reason" REMOVED
 }
 
@@ -264,7 +270,7 @@ raise SystemExit(1)
 PY
 }
 
-declare -A SCANNED_COMMON_DIRS=()
+declare -A SCANNED_COMMON_DIRS=() REGISTERED_WORKTREES=()
 declare -A LOCKED_WORKTREES=()
 worktree_lock_state() {
   local target="$1" common listing line current
@@ -277,12 +283,13 @@ worktree_lock_state() {
     current=""
     while IFS= read -r line; do
       case "$line" in
-        'worktree '*) current=$(realpath "${line#worktree }") ;;
+        'worktree '*) current=$(realpath "${line#worktree }"); REGISTERED_WORKTREES["$current"]=1 ;;
         locked*) [[ -n "$current" ]] && LOCKED_WORKTREES["$current"]=1 ;;
         '') current="" ;;
       esac
     done <<<"$listing"
   fi
+  [[ -n "${REGISTERED_WORKTREES[$target]:-}" ]] || return 2
   [[ -n "${LOCKED_WORKTREES[$target]:-}" ]]
 }
 
@@ -313,8 +320,14 @@ for wt in "${worktrees[@]}"; do
     record "$wt" "$(size_bytes "$wt")" "orphaned worktree directory; report only" ORPHAN
     continue
   fi
-  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  git_dir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
   common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [[ -n "$git_dir" && -n "$common" && "$(realpath "$git_dir")" == "$(realpath "$common")" ]]; then
+    bytes=${WORKTREE_SIZE_BYTES[$wt]:-0}
+    record "$wt" "$bytes" "main checkout, not a linked worktree; report only" SKIPPED
+    continue
+  fi
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   if worktree_lock_state "$wt"; then locked=yes; else rc=$?; (( rc == 1 )) && locked="" || locked=unknown; fi
   status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo UNKNOWN)
   last_head_activity=$(git -C "$wt" reflog --date=unix --format=%gd -1 HEAD 2>/dev/null | sed -nE 's/.*@\{([0-9]+)\}.*/\1/p')
@@ -342,11 +355,16 @@ for wt in "${worktrees[@]}"; do
   if (( safe )); then
     record "$wt" "$bytes" "finished clean merged worktree; branch=${branch}; idle>${age}d" WOULD_REMOVE
     if [[ "$MODE" == apply ]]; then
-      git -C "$wt" worktree remove "$wt"
+      record "$wt" "$bytes" "merged clean idle worktree removal starting" REMOVE_PENDING
+      if ! git -C "$wt" worktree remove "$wt"; then
+        record "$wt" "$bytes" "git worktree remove failed" REMOVE_FAILED
+        continue
+      fi
+      record "$wt" "$bytes" "merged clean idle worktree removed" REMOVED
       if [[ -n "$common" ]] && git --git-dir="$common" branch -d "$branch"; then
-        record "$wt" "$bytes" "removed merged worktree and deleted branch ${branch}" REMOVED
+        record "branch:$branch" 0 "branch -d after merged worktree removal" REMOVED
       else
-        record "$wt" "$bytes" "worktree removed; branch -d refused for ${branch}" SKIPPED
+        record "branch:$branch" 0 "worktree removed; branch -d refused" SKIPPED
       fi
     fi
   elif (( candidate && hub_safe != 1 )); then
@@ -401,7 +419,7 @@ done
 while IFS=$'\t' read -r bytes db_path; do
   [[ -n "$db_path" ]] || continue
   record "$db_path" "$bytes" "database file protected; needs Alexey's OK" NEEDS_OK
-done < <(find /tmp "$HOME/tmp" -maxdepth 5 -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -printf '%s\t%p\n' 2>/dev/null || true)
+done < <(find /tmp "$HOME/tmp" -maxdepth 5 -type f \( -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.sqlite3-*' -o -name '*-wal' -o -name '*-shm' \) -printf '%s\t%p\n' 2>/dev/null || true)
 
 # Weekly-only jobs use a state stamp. No volumes/containers are touched.
 if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
@@ -434,15 +452,28 @@ if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
     else
       if command -v uv >/dev/null 2>&1; then
         if is_open "$HOME/.cache/uv" || pgrep -af '(^|/)uv (pip|sync|run|tool|cache)' >/dev/null; then record "$HOME/.cache/uv" "$(size_bytes "$HOME/.cache/uv")" "uv cache is open or uv process is active" SKIPPED
-        else before=$(size_bytes "$HOME/.cache/uv"); uv cache prune 2>&1 | sed 's/^/uv: /'; after=$(size_bytes "$HOME/.cache/uv"); record "$HOME/.cache/uv" "$((before-after))" "uv cache prune (aggregate reclaimed size)" REMOVED; fi
+        else
+          before=$(size_bytes "$HOME/.cache/uv")
+          record "$HOME/.cache/uv" "$before" "uv cache prune starting" REMOVE_PENDING
+          if uv cache prune 2>&1 | sed 's/^/uv: /'; then after=$(size_bytes "$HOME/.cache/uv"); record "$HOME/.cache/uv" "$((before-after))" "uv cache prune (aggregate reclaimed size)" REMOVED
+          else record "$HOME/.cache/uv" "$before" "uv cache prune failed" REMOVE_FAILED; exit 1; fi
+        fi
       fi
       if command -v pip >/dev/null 2>&1; then
-        if is_open "$HOME/.cache/pip" || pgrep -af '(^|/)(pip|pip3)( |$)' >/dev/null; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open or pip process is active" SKIPPED
-        else before=$(size_bytes "$HOME/.cache/pip"); pip cache purge 2>&1 | sed 's/^/pip: /'; after=$(size_bytes "$HOME/.cache/pip"); record "$HOME/.cache/pip" "$((before-after))" "pip cache purge (aggregate reclaimed size)" REMOVED; fi
+        if is_open "$HOME/.cache/pip" || pgrep -af '(^|/)(pip|pip3)( |$)|python(3(\.[0-9]+)?)? -m pip' >/dev/null; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open or pip process is active" SKIPPED
+        else
+          before=$(size_bytes "$HOME/.cache/pip")
+          record "$HOME/.cache/pip" "$before" "pip cache purge starting" REMOVE_PENDING
+          if pip cache purge 2>&1 | sed 's/^/pip: /'; then after=$(size_bytes "$HOME/.cache/pip"); record "$HOME/.cache/pip" "$((before-after))" "pip cache purge (aggregate reclaimed size)" REMOVED
+          else record "$HOME/.cache/pip" "$before" "pip cache purge failed" REMOVE_FAILED; exit 1; fi
+        fi
       fi
       if command -v npm >/dev/null 2>&1; then
-        if ! is_open "$HOME/.npm" && ! pgrep -af '[n]pm (install|ci|cache)' >/dev/null && [[ ! -e "$HOME/.npm/_locks" ]] && [[ ! -e "$HOME/.npm/_cacache/tmp" ]]; then
-          before=$(size_bytes "$HOME/.npm"); npm cache clean --force 2>&1 | sed 's/^/npm: /'; after=$(size_bytes "$HOME/.npm"); record "$HOME/.npm" "$((before-after))" "npm cache clean after process and lock checks (aggregate reclaimed size)" REMOVED
+        if ! is_open "$HOME/.npm" && ! pgrep -af '(^|/)npm( |$)' >/dev/null && [[ ! -e "$HOME/.npm/_locks" ]] && [[ ! -e "$HOME/.npm/_cacache/tmp" ]]; then
+          before=$(size_bytes "$HOME/.npm")
+          record "$HOME/.npm" "$before" "npm cache clean starting after process and lock checks" REMOVE_PENDING
+          if npm cache clean --force 2>&1 | sed 's/^/npm: /'; then after=$(size_bytes "$HOME/.npm"); record "$HOME/.npm" "$((before-after))" "npm cache clean after process and lock checks (aggregate reclaimed size)" REMOVED
+          else record "$HOME/.npm" "$before" "npm cache clean failed" REMOVE_FAILED; exit 1; fi
         else
           record "$HOME/.npm" "$(size_bytes "$HOME/.npm")" "npm cache lock or npm process present" SKIPPED
         fi
@@ -451,7 +482,11 @@ if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
         docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
         if [[ "$docker_root" == /data || "$docker_root" == /data/* ]]; then
           builder_before=$(docker_builder_reclaimable_bytes || echo 0)
-          docker builder prune --filter until=168h -f
+          record "docker-builder-cache" "$builder_before" "docker builder prune --filter until=168h starting" REMOVE_PENDING
+          if ! docker builder prune --filter until=168h -f; then
+            record "docker-builder-cache" "$builder_before" "docker builder prune failed" REMOVE_FAILED
+            exit 1
+          fi
           builder_after=$(docker_builder_reclaimable_bytes || echo 0)
           builder_removed=$((builder_before-builder_after)); (( builder_removed < 0 )) && builder_removed=0
           record "docker-builder-cache" "$builder_removed" "docker builder prune --filter until=168h (aggregate reclaimed size)" REMOVED
@@ -462,8 +497,13 @@ if [[ "$TRIGGER" == daily && $(date +%u) == 7 ]]; then
             if [[ "${labels,,}" == *coolify* ]]; then
               record "$image_id" "$image_size" "Coolify-labelled dangling image retained" SKIPPED
             else
-              docker image rm "$image_id"
-              record "$image_id" "$image_size" "dangling image pruned" REMOVED
+              record "$image_id" "$image_size" "dangling image removal starting" REMOVE_PENDING
+              if docker image rm "$image_id"; then
+                record "$image_id" "$image_size" "dangling image pruned" REMOVED
+              else
+                record "$image_id" "$image_size" "dangling image prune failed" REMOVE_FAILED
+                exit 1
+              fi
             fi
           done < <(docker image ls --filter dangling=true --quiet | sort -u)
         else

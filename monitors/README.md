@@ -124,7 +124,8 @@ Worktree removal requires a clean status, HEAD ancestry to `origin/main`, age
 over 48 hours, no Git lock, no process cwd, and readable Hub session/open-intake
 snapshots proving no live session or open intake references it. Any uncertainty
 skips removal. Unregistered `*-wt-*` directories are report-only even when
-Hub's complete session/intake snapshot is unavailable. The temp,
+Hub's complete session/intake snapshot is unavailable; a main checkout whose
+path happens to match `*-wt-*` is report-only too. The temp,
 cache, RDS export and Docker rules are restricted to the paths and operations
 in the script: Docker volumes/containers are untouched and Coolify-labelled
 images are retained. Engine histories, databases, backups, placement-recovery,
@@ -132,7 +133,9 @@ production data and other non-regenerable paths are not cleanup candidates.
 When Hub snapshots are unavailable, clean/merged/idle worktrees that pass the
 local Git and process checks are recorded as `HUB_HOLD`; this explicitly
 records missing Hub proof and never enables removal. Process cwd and Git lock
-state are snapshotted once per run to bound the worktree scan.
+state are snapshotted once per run to bound the worktree scan. Destructive
+operations write `REMOVE_PENDING` before invocation and `REMOVED` or
+`REMOVE_FAILED` afterward so an interrupted run remains auditable.
 
 The root filesystem has one alert owner: `hetzner-disk-check` (`disk-root`).
 Any external `A2_disk_pressure` / `A2_disk_warn` rule that pages on the same
