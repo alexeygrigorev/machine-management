@@ -9,3 +9,5 @@ id_*
 **/tmp/secrets/
 **/.secrets/
 .vps-root-pw
+__pycache__/
+*.py[cod]

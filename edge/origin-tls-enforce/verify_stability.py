@@ -14,7 +14,8 @@ import sys
 import time
 import uuid
 
-from origin_transport import ORIGINS, Refused, aws, config_origin, probe
+from origin_transport import ORIGINS, Refused, probe
+from verify_origin import origin_state
 
 
 def timestamp():
@@ -23,11 +24,12 @@ def timestamp():
 
 def targets():
     # Website-dev has a separate isolation prerequisite; verify_origin checks
-    # its exact deferred state. Never misreport its deliberate 503 as healthy.
+    # its exact state.
     result = []
     for scope in (ORIGINS[0], ORIGINS[2], ORIGINS[3]):
-        _, _, header = config_origin(
-            aws("cloudfront", "get-distribution", "--id", scope.distribution), scope)
+        protocol, header = origin_state(scope)
+        if protocol != "https-only":
+            raise Refused(f"{scope.distribution} expected https-only, observed {protocol}")
         name = scope.origin_id.removesuffix("-alb")
         result.extend([
             (name + "-public-health", scope, True, None, scope.path, "200"),

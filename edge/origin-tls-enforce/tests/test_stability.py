@@ -70,6 +70,12 @@ class StabilityTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", str(evidence) + output.getvalue())
         self.assertEqual(len(evidence["samples"]), 2)
 
+    def test_targets_uses_origin_state_ssh_fallback(self):
+        with patch.object(stability, "origin_state", return_value=("https-only", "synthetic-secret")) as state:
+            checks = stability.targets()
+        self.assertEqual(state.call_count, 3)
+        self.assertEqual(len(checks), 13)
+
 
 if __name__ == "__main__":
     unittest.main()

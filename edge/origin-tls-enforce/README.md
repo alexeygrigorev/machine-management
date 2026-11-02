@@ -79,10 +79,11 @@ and viewer hostname (`dev.datatalks.club`) pass readiness checks. E33 uses https
 Run from the operator box with its existing AWS credential profile and SSH
 aliases. Override `AWS_PROFILE` if needed; the default is `default`. When the
 active AWS profile targets the sandbox account (where main-account CloudFront
-distributions are absent), `verify_origin.py` and `verify-rollback.py` validate
-recorded CloudFront snapshots and read active `X-Origin-Verify` headers directly
-from the private `/data/coolify/proxy/dynamic/origin-enforce.yml` on `contabo-a`
-and `contabo-b` over SSH without printing credentials.
+distributions are absent), `verify_origin.py`, `verify_stability.py` and
+`verify-rollback.py` validate recorded CloudFront snapshots and read active
+`X-Origin-Verify` headers directly from the private
+`/data/coolify/proxy/dynamic/origin-enforce.yml` on `contabo-a` and `contabo-b`
+over SSH without printing credentials.
 
 ```sh
 bash edge/origin-tls-enforce/tests/test-origin.sh
