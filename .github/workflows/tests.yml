@@ -1,0 +1,39 @@
+name: Test suite
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check pytest pyyaml
+      - name: Run Python tests
+        shell: bash
+        run: |
+          mapfile -d '' test_files < <(find . -type f -name 'test*.py' \
+            -not -path './.git/*' -print0 | sort -z)
+          python -m pytest -q "${test_files[@]}"
+      - name: Run shell test suites
+        shell: bash
+        run: |
+          mapfile -d '' test_files < <(find backups contingency deployments edge monitors tests wg-bridge \
+            -type f -name 'test*.sh' -not -path './edge/tests/test-edge.sh' \
+            -print0 | sort -z)
+          for test_file in "${test_files[@]}"; do
+            echo "::group::${test_file}"
+            bash "$test_file"
+            echo "::endgroup::"
+          done
