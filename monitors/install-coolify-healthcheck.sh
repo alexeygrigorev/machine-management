@@ -13,8 +13,8 @@
 #
 # No secrets in git: this script never writes credentials; the env file on the
 # node starts as placeholders and must be edited out-of-band (Drive doc).
-# SMTP: the node needs sendmail or msmtp to actually deliver to dev@ — without
-# an MTA, failures are logged only (script warns). Configure msmtp out-of-band.
+# Non-Relay checks send through the root-owned Relay client config. Checks of
+# Relay itself retain the independent sandbox SES SMTP path.
 set -euo pipefail
 
 HOST="${1:-}"
@@ -28,7 +28,18 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
 
 echo "== copy healthcheck script to ${HOST} =="
 scp "${HERE}/coolify-healthcheck.sh" "${HOST}:/tmp/coolify-healthcheck.sh"
-"${SSH[@]}" "$HOST" sudo install -m 0755 /tmp/coolify-healthcheck.sh /usr/local/sbin/coolify-healthcheck.sh
+scp "${HERE}/relay-alert-lib.sh" "${HOST}:/tmp/relay-alert-lib.sh"
+scp "${HERE}/ops-daily-digest.sh" "${HOST}:/tmp/ops-daily-digest.sh"
+"${SSH[@]}" "$HOST" 'sudo bash -s' <<'EOF'
+set -euo pipefail
+for path in /usr/local/sbin/coolify-healthcheck.sh /usr/local/sbin/ops-daily-digest.sh; do
+  [[ ! -e "$path" || -e "${path}.pre-alerts-from" ]] || cp -a "$path" "${path}.pre-alerts-from"
+done
+install -m 0755 /tmp/coolify-healthcheck.sh /usr/local/sbin/coolify-healthcheck.sh
+install -m 0755 /tmp/ops-daily-digest.sh /usr/local/sbin/ops-daily-digest.sh
+install -m 0644 /tmp/relay-alert-lib.sh /usr/local/sbin/relay-alert-lib.sh
+rm -f /tmp/coolify-healthcheck.sh /tmp/ops-daily-digest.sh /tmp/relay-alert-lib.sh
+EOF
 
 echo "== env file (placeholders only; never overwritten) =="
 scp "${HERE}/coolify-healthcheck.env.example" "${HOST}:/tmp/coolify-healthcheck.env.example"
@@ -39,12 +50,34 @@ if [[ ! -f /etc/coolify-healthcheck.env ]]; then
   chmod 600 /etc/coolify-healthcheck.env
   echo "created /etc/coolify-healthcheck.env (PLACEHOLDERS — edit on node, chmod 600)"
 else
-  echo "keep existing /etc/coolify-healthcheck.env (not overwritten)"
+  if grep -Eq '^ALERT_FROM=(noreply@datatalks\.club|no-reply@dtcdev\.click)$' /etc/coolify-healthcheck.env \
+    || ! grep -q '^RELAY_MONITOR_CONFIG=' /etc/coolify-healthcheck.env; then
+    [[ -e /etc/coolify-healthcheck.env.pre-alerts-from ]] || cp -a /etc/coolify-healthcheck.env /etc/coolify-healthcheck.env.pre-alerts-from
+    python3 - <<'PYENV'
+from pathlib import Path
+import re
+p = Path('/etc/coolify-healthcheck.env')
+s = p.read_text()
+s = re.sub(r'^ALERT_FROM=(noreply@datatalks\.club|no-reply@dtcdev\.click)$',
+           'ALERT_FROM=alerts@dtcdev.click', s, flags=re.M)
+for key, value in [('ALERT_FROM_NAME', '"DTC Alerts"'), ('ALERT_MSMTP_ACCOUNT', 'alerts'),
+                   ('RELAY_MONITOR_CONFIG', '/etc/relay-monitors.toml')]:
+    if not re.search(r'^' + key + '=', s, re.M):
+        s += '\n' + key + '=' + value + '\n'
+p.write_text(s)
+PYENV
+    chmod 600 /etc/coolify-healthcheck.env
+    echo "migrated alert sender fields in /etc/coolify-healthcheck.env; recipients preserved"
+  else
+    echo "kept existing /etc/coolify-healthcheck.env (no sender migration needed)"
+  fi
 fi
 mkdir -p /var/lib/coolify-healthcheck
 command -v curl >/dev/null || echo "WARN: curl missing on node — install (apt install curl)"
 command -v pg_isready >/dev/null || echo "WARN: pg_isready missing on node — install (apt install postgresql-client) or rely on docker exec"
-command -v sendmail >/dev/null || command -v msmtp >/dev/null || echo "WARN: no MTA (sendmail/msmtp) on node — alerts will be LOG-ONLY until msmtp is configured (see monitors/README.md)"
+command -v datamailer >/dev/null || [[ -x /usr/local/bin/datamailer ]] || echo "WARN: datamailer missing — non-Relay alerts cannot be sent"
+[[ -r /etc/relay-monitors.toml ]] || echo "WARN: Relay monitor client config is not readable"
+command -v sendmail >/dev/null || command -v msmtp >/dev/null || echo "WARN: no MTA (sendmail/msmtp) on node — Relay self-monitor alerts cannot be sent"
 EOF
 
 echo "== cron entry (every 5 min Europe/Berlin) =="
@@ -54,7 +87,7 @@ scp "${HERE}/coolify-healthcheck.cron" "${HOST}:/tmp/coolify-healthcheck.cron"
 echo "== verify =="
 "${SSH[@]}" "$HOST" 'sudo bash -n /usr/local/sbin/coolify-healthcheck.sh && echo SYNTAX_OK; cat /etc/cron.d/coolify-healthcheck'
 echo
-echo "NEXT: edit real values in /etc/coolify-healthcheck.env on ${HOST}, configure msmtp"
+echo "NEXT: edit real values in /etc/coolify-healthcheck.env on ${HOST}, configure the Relay client"
 echo "for delivery to alexey@datatalks.club and dev@dtcdev.click, then run:"
 echo "  ssh ${HOST} 'sudo /usr/local/sbin/coolify-healthcheck.sh'"
 echo "expect ALL_OK (or CHECKS_FAILED with entries) in /var/log/coolify-healthcheck.log."

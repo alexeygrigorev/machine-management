@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression tests for monitors/hetzner-disk-check.sh (t1493u, intake 57cf5788).
-# Runs the real script with stub df/msmtp on PATH (no root, no network, no mail).
+# Runs the real script with stub df/Relay CLI (no root, no network, no mail).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,8 +94,11 @@ elif [[ "$args" == *"-B1"* ]]; then one_b "$mp"; exit $?
 fi
 echo "stub df: unsupported args: $*" >&2; exit 99
 EOF
-cat > "$TMP/stubbin/msmtp" <<'EOF'
+cat > "$TMP/stubbin/datamailer" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
 OUT="${MSMTP_OUT:-/dev/null}"
 {
   echo "ARGS: $*"
@@ -104,7 +107,10 @@ OUT="${MSMTP_OUT:-/dev/null}"
 } >> "$OUT"
 exit 0
 EOF
-chmod +x "$TMP/stubbin/df" "$TMP/stubbin/msmtp"
+chmod +x "$TMP/stubbin/df" "$TMP/stubbin/datamailer"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
 
 write_vals() { printf '%s\n' "$@" > "$TMP/vals"; }
 GB=$((1073741824))
@@ -170,13 +176,14 @@ STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$TMP/envT4" STATE_DIR="$ST4" SAMPLE
 set -e
 out1="$(cat "$TMP/o1")"; out2="$(cat "$TMP/o2")"
 mails="$(grep -c '^ARGS:' "$MAILBOX" || true)"
-if [[ "$rc1" -ne 0 && "$out1" == *WARN* && "$out1" == *disk-root* && "$mails" -eq 1 ]] \
-  && grep -q 'prod-a@example.test' "$MAILBOX" && grep -q 'prod-b@example.test' "$MAILBOX"; then
+if [[ "$rc1" -ne 0 && "$out1" == *WARN* && "$out1" == *disk-root* && "$mails" -eq 2 ]] \
+  && grep -q '^ARGS: send --from alerts --to prod-a@example.test --subject ' "$MAILBOX" \
+  && grep -q '^ARGS: send --from alerts --to prod-b@example.test --subject ' "$MAILBOX"; then
   pass "T4 warn pages prod once (rc=$rc1)"
 else
   fail "T4 warn (rc1=$rc1 rc2=$rc2 mails=$mails) -- $out1 || $out2"
 fi
-if [[ "$rc2" -ne 0 && "$mails" -eq 1 ]]; then
+if [[ "$rc2" -ne 0 && "$mails" -eq 2 ]]; then
   pass "T4b second failing run deduped (no mail spam)"
 else
   fail "T4b dedupe (rc2=$rc2 mails=$mails)"
@@ -295,8 +302,8 @@ if [[ "$out" == *SKIP* ]]; then pass "T9 tmpfs excluded"; else fail "T9 tmpfs (r
 
 # ---- T10: failed send must not start the dedupe window (review FIX1) ----
 mkdir -p "$TMP/stubbin-fail"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/stubbin-fail/msmtp"
-chmod +x "$TMP/stubbin-fail/msmtp"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/stubbin-fail/datamailer"
+chmod +x "$TMP/stubbin-fail/datamailer"
 write_vals \
   "/|ext4|$((436*GB))|$((52*GB))|29097984|20604622|/dev/nvme0n1p3"
 ST10="$(mkstate)"
@@ -307,13 +314,13 @@ ALERT_OPS_TO=ops@example.test
 RECOVER_NOTIFY_MIN_SEC=0
 EOF
 set +e
-STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$TMP/envT10" STATE_DIR="$ST10" SAMPLE_DIR="$ST10/samples" LOCK_FILE="$TMP/lock-t10a" MSMTP_OUT="$MAILBOX" PATH="$TMP/stubbin-fail:$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >"$TMP/o10a" 2>&1; rc10a=$?
-STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$TMP/envT10" STATE_DIR="$ST10" SAMPLE_DIR="$ST10/samples" LOCK_FILE="$TMP/lock-t10b" MSMTP_OUT="$MAILBOX" PATH="$TMP/stubbin-fail:$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >"$TMP/o10b" 2>&1; rc10b=$?
+STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$TMP/envT10" STATE_DIR="$ST10" SAMPLE_DIR="$ST10/samples" LOCK_FILE="$TMP/lock-t10a" MSMTP_OUT="$MAILBOX" DATAMAILER_BIN="$TMP/stubbin-fail/datamailer" PATH="$TMP/stubbin-fail:$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >"$TMP/o10a" 2>&1; rc10a=$?
+STUB_VALS="$TMP/vals" HETZNER_DISK_ENV_FILE="$TMP/envT10" STATE_DIR="$ST10" SAMPLE_DIR="$ST10/samples" LOCK_FILE="$TMP/lock-t10b" MSMTP_OUT="$MAILBOX" DATAMAILER_BIN="$TMP/stubbin-fail/datamailer" PATH="$TMP/stubbin-fail:$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" >"$TMP/o10b" 2>&1; rc10b=$?
 set -e
 out10a="$(cat "$TMP/o10a")"; out10b="$(cat "$TMP/o10b")"
 last_alert="$(grep LAST_ALERT "$ST10/disk-root.state" | cut -d= -f2)"
 if [[ "$rc10a" -ne 0 && "$rc10b" -ne 0 && "$last_alert" == "0" \
-  && "$out10a" == *WARN*msmtp*failed* && "$out10b" == *WARN*msmtp*failed* ]]; then
+  && "$out10a" == *WARN*Relay*delivery*failed* && "$out10b" == *WARN*Relay*delivery*failed* ]]; then
   pass "T10 failed send retries immediately (no 4h mute)"
 else
   fail "T10 failed-send retry (rc=$rc10a/$rc10b last=$last_alert) -- $out10a || $out10b"

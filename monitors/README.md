@@ -1,7 +1,7 @@
 # Permanent continuous healthcheck (Postgres + services)
 
 Frequent cron job that keeps watch over Coolify Contabo Postgres and apps
-and emails **alexey@datatalks.club** and **dev@dtcdev.click** on failure — with dedupe so one outage
+and alerts **alexey@datatalks.club** and **dev@dtcdev.click** on failure — with dedupe so one outage
 does not spam. This is the **continuous** monitor (every 5 min), unlike
 [`backups/`](../backups/) which dumps daily.
 
@@ -50,17 +50,21 @@ This repo keeps **placeholders only** (`coolify-healthcheck.env.example`).
 
 ## Mail delivery
 
-The script uses `sendmail` (or `msmtp`) on the node. Without an MTA it
-**logs alerts only** and warns — so before relying on it:
+Healthcheck alerts for services other than Relay, proxy-network alerts, and
+the Ops Digest use the Relay sender `alerts` (`DTC Alerts
+<alerts@dtcdev.click>`). Relay self-checks (`pg-relay`, Relay HTTP/content and
+latency checks) use direct sandbox SES SMTP so they can page during a Relay
+outage. Contabo's Relay client config is `/etc/relay-monitors.toml`, root-owned
+mode `0600`; create and manage the sender and client through Relay's own
+admin/API/CLI. The Hetzner Maintenance client uses
+`~/.config/datamailer/config.toml` mode `0600`.
 
-1. `apt install msmtp-mta` (or equivalent) on the node.
-2. Configure SMTP out-of-band (`/etc/msmtprc`, root-only `600`) with real
-   relay credentials from the Drive secrets doc — never in git. The monitors use
-   a dedicated msmtp account `alerts` sending `From: DTC Alerts <alerts@dtcdev.click>`
-   and envelope sender `alerts@dtcdev.click` via sandbox SES SMTP `email-smtp.us-east-1.amazonaws.com`.
-3. Force a failure (e.g. point one `APP_URLS` entry at a dead port) with
-   isolated state and ops-only recipients, confirm transport acceptance,
-   then restore the URL and healthy state.
+The independent checks of Relay require the `alerts` msmtp account in
+`/etc/msmtprc` (root-only `0600`) with From `DTC Alerts
+<alerts@dtcdev.click>` through sandbox SES SMTP `email-smtp.us-east-1.amazonaws.com`.
+Do not use that account for other alert sources. Test Relay delivery with an
+ops-only recipient and isolated state, then restore the normal target and
+state.
 
 ## Enable (once targets exist on Contabo)
 
@@ -74,7 +78,9 @@ The script uses `sendmail` (or `msmtp`) on the node. Without an MTA it
    (repeat for `contabo-a` if you want the UI/app angle from the primary too).
 2. On the node, fill `/etc/coolify-healthcheck.env` (real container names,
    DB names, public app URLs from the Drive doc); `chmod 600`.
-3. Set up msmtp per above; test delivery with a forced failure + recovery.
+3. Configure the Relay client as above; verify its sender `alerts` and test
+   delivery with an ops-only forced failure + recovery. Keep SES SMTP only for
+   checks of Relay itself.
 4. Manual first run: `sudo /usr/local/sbin/coolify-healthcheck.sh` → log ends
    `ALL_OK`, state files appear under `/var/lib/coolify-healthcheck/`.
 5. Confirm cron installed: `cat /etc/cron.d/coolify-healthcheck`; next hour
@@ -82,7 +88,7 @@ The script uses `sendmail` (or `msmtp`) on the node. Without an MTA it
    (12 runs/hour at the default cadence).
 
 Tuning: change `*/5` to `*/1`/`*/2` in the cron file for 1–2 min cadence
-once SMTP + log volume look healthy.
+once Relay delivery + log volume look healthy.
 
 ## Files
 
@@ -119,16 +125,16 @@ The installer migrates the old default state path and sender with backups,
 preserves recipients, and keeps `/etc/cron.d/coolify-proxy-networks` separate
 from the keeper's `/etc/cron.d/coolify-proxy-network-keep`.
 
-Mail uses the working healthcheck transport: msmtp account `alerts`, explicit
-envelope sender `alerts@dtcdev.click`, and `DTC Alerts` display name, with a
-sendmail fallback. Failed sends retain state for retry, including recovery. As in the main check,
+Mail uses Relay sender `alerts`, configured as `DTC Alerts
+<alerts@dtcdev.click>`. Failed sends retain state for retry, including
+recovery. As in the main check,
 FAIL is immediate and RECOVERED is mailed for outages lasting at least 600 s
 (`RECOVER_NOTIFY_MIN_SEC`); shorter recoveries update state silently.
 Recipients are restricted to `dev@dtcdev.click`. An isolated drill can supply
 `COOLIFY_PROXY_NETWORKS_ENV_FILE` with its own state/lock, a nonexistent
 `PROXY_CONTAINER`, and `ALERT_SUBJECT_PREFIX='[DRILL coolify-proxy-networks]'`;
 then set the drill container back to `coolify-proxy` to verify recovery.
-This checks the real MTA without detaching an app or changing production state.
+This checks Relay without detaching an app or changing production state.
 
 Install: `./monitors/install-coolify-proxy-networks.sh [contabo-a] [contabo-b]`
 Test: `bash monitors/tests/test-coolify-proxy-networks.sh`

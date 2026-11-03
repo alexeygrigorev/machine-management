@@ -20,8 +20,9 @@
 #      paging, so an idle DB is not a FAIL while a real archiving/shipper
 #      stop still pages (a3348a3e/t1862u).
 #
-# Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click)
-# via sendmail/msmtp when available. Dedupe/rate-limit: an alert fires once
+# Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click).
+# Relay checks use direct SES SMTP; all other checks use Relay's `alerts` sender.
+# Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
 # while still failing; a RECOVERED notice goes out on transition back to OK.
 # No alert spam for a single ongoing outage.
@@ -37,6 +38,8 @@ if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   set -a; source "$ENV_FILE"; set +a
 fi
+# shellcheck disable=SC1090
+source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-alert-lib.sh}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
@@ -279,68 +282,74 @@ send_alert() {
   local effective_to="$ALERT_TO"
   local msmtp_resolved
   msmtp_resolved="$(command -v msmtp 2>/dev/null || true)"
+  local datamailer_resolved
+  datamailer_resolved="$(command -v datamailer 2>/dev/null || true)"
   if [[ "$is_recovery" -eq 1 || "$subject" == WARN* || "$name" == *_dev || "$name" == *-dev || "$name" == *DRILL* || "$name" == *TEST* || "${DRILL_MODE:-0}" == "1" || "${TEST_MODE:-0}" == "1" ]]; then
     enqueue_digest "$name" "$subject" "$body"
     effective_to="$(strip_personal_recipients "$ALERT_TO")"
-  elif [[ ! -f "$ENV_FILE" && "$msmtp_resolved" == "/usr/bin/msmtp" && "${COOLIFY_HEALTHCHECK_ALLOW_UNCONFIGURED_PROD_MAIL:-0}" != "1" ]]; then
-    log "WARN check=${name}: unconfigured host (${ENV_FILE} absent, real msmtp) — stripping personal recipients"
+  elif [[ ! -f "$ENV_FILE" && ( "$msmtp_resolved" == "/usr/bin/msmtp" || "$datamailer_resolved" == "/usr/local/bin/datamailer" ) && "${COOLIFY_HEALTHCHECK_ALLOW_UNCONFIGURED_PROD_MAIL:-0}" != "1" ]]; then
+    log "WARN check=${name}: unconfigured host (${ENV_FILE} absent, real mail transport) — stripping personal recipients"
     effective_to="$(strip_personal_recipients "$ALERT_TO")"
   fi
   local to_csv="${effective_to// /,}"
-  local to_header="${to_csv//,/, }"
-  local -a to_args=()
-  IFS=',' read -r -a to_args <<< "$to_csv"
-
-  local envelope_from from_header
-  local from_pat='<([^>]+)>'
-  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
-    envelope_from="${BASH_REMATCH[1]}"
-    from_header="$ALERT_FROM"
-  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
-    envelope_from="$ALERT_FROM"
-    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
-  else
-    envelope_from="$ALERT_FROM"
-    from_header="$ALERT_FROM"
-  fi
-
-  local msmtp_args=()
-  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
-
-  if command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
-      sent="msmtp"
+  if [[ "${name,,}" == *relay* ]]; then
+    # Relay self-checks must stay independent of Relay for outage paging.
+    local to_header="${to_csv//,/, }"
+    local -a to_args=()
+    IFS=',' read -r -a to_args <<< "$to_csv"
+    local envelope_from from_header
+    local from_pat='<([^>]+)>'
+    if [[ "$ALERT_FROM" =~ $from_pat ]]; then
+      envelope_from="${BASH_REMATCH[1]}"
+      from_header="$ALERT_FROM"
+    elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
+      envelope_from="$ALERT_FROM"
+      from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
     else
-      log "WARN: msmtp failed for ${name}"
+      envelope_from="$ALERT_FROM"
+      from_header="$ALERT_FROM"
     fi
-  elif command -v sendmail >/dev/null 2>&1; then
-    local sendmail_args=("-t")
-    local sendmail_bin
-    sendmail_bin="$(command -v sendmail)"
-    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
-      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-    fi
-    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
-      sent="sendmail"
+    local msmtp_args=()
+    [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+    [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
+    if command -v msmtp >/dev/null 2>&1; then
+      if {
+        echo "From: ${from_header}"
+        echo "To: ${to_header}"
+        echo "Subject: ${full_subject}"
+        echo ""
+        printf '%s\n' "$body"
+      } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
+        sent="msmtp"
+      else
+        log "WARN: direct SES mail failed for Relay check ${name}"
+      fi
+    elif command -v sendmail >/dev/null 2>&1; then
+      local sendmail_args=(-t)
+      local sendmail_bin
+      sendmail_bin="$(command -v sendmail)"
+      if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
+        [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+      fi
+      [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
+      if {
+        echo "From: ${from_header}"
+        echo "To: ${to_header}"
+        echo "Subject: ${full_subject}"
+        echo ""
+        printf '%s\n' "$body"
+      } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
+        sent="sendmail"
+      else
+        log "WARN: direct SES mail failed for Relay check ${name}"
+      fi
     else
-      log "WARN: sendmail failed for ${name}"
+      log "WARN: no MTA (sendmail/msmtp) for Relay self-monitor ${name}"
     fi
+  elif relay_send_alert "$to_csv" "$full_subject" "$body"; then
+    sent="relay"
   else
-    log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
+    log "WARN: Relay delivery failed for ${name}"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$sent" == "no" ]]; then

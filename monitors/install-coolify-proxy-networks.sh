@@ -20,17 +20,24 @@ for H in $HOSTS; do
   echo "== copy proxy-networks pager to ${H} =="
   STAGING="$("${SSH[@]}" "$H" 'mktemp -d /tmp/proxy-network-monitor.XXXXXXXX')"
   scp "${HERE}/coolify-proxy-networks.sh" "${H}:${STAGING}/monitor.sh"
+  scp "${HERE}/relay-alert-lib.sh" "${H}:${STAGING}/relay-alert-lib.sh"
+  scp "${HERE}/ops-daily-digest.sh" "${H}:${STAGING}/ops-daily-digest.sh"
   scp "${HERE}/coolify-proxy-networks.env.example" "${H}:${STAGING}/monitor.env"
   scp "${HERE}/coolify-proxy-networks.cron" "${H}:${STAGING}/monitor.cron"
   "${SSH[@]}" "$H" "sudo bash -s -- '$STAGING'" <<'EOF'
 set -euo pipefail
 staging="$1"
 backup="$(date -u +%Y%m%dT%H%M%S)-$$"
-for path in /usr/local/sbin/coolify-proxy-networks.sh /etc/cron.d/coolify-proxy-networks /etc/coolify-proxy-networks.env; do
+for path in /usr/local/sbin/coolify-proxy-networks.sh /usr/local/sbin/ops-daily-digest.sh /etc/cron.d/coolify-proxy-networks /etc/coolify-proxy-networks.env; do
   [[ ! -e "$path" ]] || cp -a "$path" "${path}.bak-${backup}"
+done
+for path in /usr/local/sbin/coolify-proxy-networks.sh /usr/local/sbin/ops-daily-digest.sh /etc/coolify-proxy-networks.env; do
+  [[ ! -e "$path" || -e "${path}.pre-alerts-from" ]] || cp -a "$path" "${path}.pre-alerts-from"
 done
 bash -n "$staging/monitor.sh"
 install -m 0755 "$staging/monitor.sh" /usr/local/sbin/coolify-proxy-networks.sh
+install -m 0755 "$staging/ops-daily-digest.sh" /usr/local/sbin/ops-daily-digest.sh
+install -m 0644 "$staging/relay-alert-lib.sh" /usr/local/sbin/relay-alert-lib.sh
 if [[ ! -f /etc/coolify-proxy-networks.env ]]; then
   install -m 0600 "$staging/monitor.env" /etc/coolify-proxy-networks.env
 else
@@ -43,11 +50,11 @@ p = Path('/etc/coolify-proxy-networks.env')
 s = p.read_text()
 s = re.sub(r'^STATE_DIR=/var/lib/coolify-healthcheck/?$',
            'STATE_DIR=/var/lib/coolify-proxy-networks', s, flags=re.M)
-s = re.sub(r'^ALERT_FROM=noreply@datatalks\.club$',
-           'ALERT_FROM=alerts@dtcdev.click', s, flags=re.M)
-for key, value in [('ALERT_FROM_NAME', '"DTC Alerts"'), ('ALERT_MSMTP_ACCOUNT', 'alerts')]:
-    if not re.search(r'^' + key + '=', s, re.M):
-        s += '\n' + key + '=' + value + '\n'
+s = re.sub(r'^ALERT_FROM=.*$', '', s, flags=re.M)
+s = re.sub(r'^ALERT_FROM_NAME=.*$', '', s, flags=re.M)
+s = re.sub(r'^ALERT_MSMTP_ACCOUNT=.*$', '', s, flags=re.M)
+if not re.search(r'^RELAY_MONITOR_CONFIG=', s, re.M):
+    s += '\nRELAY_MONITOR_CONFIG=/etc/relay-monitors.toml\n'
 p.write_text(s)
 PYENV
 fi
@@ -55,7 +62,8 @@ mkdir -p /var/lib/coolify-proxy-networks
 # Distinct from the keeper's /etc/cron.d/coolify-proxy-network-keep.
 install -m 0644 "$staging/monitor.cron" /etc/cron.d/coolify-proxy-networks
 command -v python3 >/dev/null
-command -v msmtp >/dev/null || command -v sendmail >/dev/null || echo "WARN: no MTA on node"
+command -v datamailer >/dev/null || [[ -x /usr/local/bin/datamailer ]] || echo "WARN: datamailer missing on node"
+[[ -r /etc/relay-monitors.toml ]] || echo "WARN: Relay monitor client config is not readable"
 cat /etc/cron.d/coolify-proxy-networks
 echo "BACKUP_SUFFIX=$backup (staging retained; no deletions)"
 EOF

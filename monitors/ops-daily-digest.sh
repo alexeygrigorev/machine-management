@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Daily Ops Digest — aggregates DIGEST-class informational/warning/recovery
-# events into a single daily email to dev@dtcdev.click ONLY (t1885u / 3bf25bda).
+# events into a single daily Relay message to dev@dtcdev.click ONLY.
 #
 # Policy (Alexey t1885u):
 #   - Every PAGE alert that fires to alexey@ must be a real must-fix-now problem.
@@ -19,6 +19,9 @@
 #   ops-daily-digest.sh --dry-run
 set -euo pipefail
 
+# shellcheck disable=SC1090
+source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-alert-lib.sh}"
+
 if [[ "$(id -u)" -eq 0 ]]; then
   DEFAULT_STATE_DIR="/var/lib/ops-daily-digest"
 else
@@ -28,9 +31,6 @@ fi
 DIGEST_STATE_DIR="${DIGEST_STATE_DIR:-$DEFAULT_STATE_DIR}"
 DIGEST_QUEUE_FILE="${DIGEST_QUEUE_FILE:-${DIGEST_STATE_DIR}/queue.tsv}"
 DIGEST_TO="${DIGEST_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
-ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
-ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 HOST_TAG="${HOST_TAG:-$(hostname -s 2>/dev/null || hostname)}"
 
 # Hard safety guard (AC2 / AC4): DIGEST can NEVER reach alexey@ personal inboxes.
@@ -128,30 +128,9 @@ if [[ "$MODE" == "--dry-run" ]]; then
   exit 0
 fi
 
-FROM_HEADER="${ALERT_FROM_NAME} <${ALERT_FROM}>"
-IFS=',' read -r -a TO_ARGS <<< "$SAFE_TO"
 SENT="no"
-
-if command -v msmtp >/dev/null 2>&1; then
-  if {
-    echo "From: ${FROM_HEADER}"
-    echo "To: ${SAFE_TO//,/, }"
-    echo "Subject: ${SUBJECT}"
-    echo ""
-    printf '%s\n' "$BODY"
-  } | msmtp -a "$ALERT_MSMTP_ACCOUNT" -f "$ALERT_FROM" -- "${TO_ARGS[@]}" 2>/dev/null; then
-    SENT="msmtp"
-  fi
-elif command -v sendmail >/dev/null 2>&1; then
-  if {
-    echo "From: ${FROM_HEADER}"
-    echo "To: ${SAFE_TO//,/, }"
-    echo "Subject: ${SUBJECT}"
-    echo ""
-    printf '%s\n' "$BODY"
-  } | sendmail -t -f "$ALERT_FROM" 2>/dev/null; then
-    SENT="sendmail"
-  fi
+if relay_send_alert "$SAFE_TO" "$SUBJECT" "$BODY"; then
+  SENT="relay"
 fi
 
 if [[ "$SENT" == "no" ]]; then

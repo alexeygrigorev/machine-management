@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Regression tests for monitors/ops-daily-digest.sh (t1885u / intake 3bf25bda).
+# Regression tests for monitors/ops-daily-digest.sh Relay transport.
 # Verifies:
 #   - T1: bash -n syntax check
 #   - T2: quiet day (empty queue) sends 0 emails
 #   - T3: --enqueue appends JSONL and --dry-run formats summary without mailing or clearing
-#   - T4: --send delivers to dev@dtcdev.click only (hard-strips alexey@ even if DIGEST_TO includes it) and archives queue
+#   - T4: --send uses Relay sender `alerts`, delivers to dev@ only (hard-strips alexey@), and archives queue
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,8 +25,11 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/stubbin" "$TMP/state"
-cat > "$TMP/stubbin/msmtp" <<'EOF'
+cat > "$TMP/stubbin/datamailer" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
 {
   echo "ARGS: $*"
   cat
@@ -34,8 +37,10 @@ cat > "$TMP/stubbin/msmtp" <<'EOF'
 } >> "${STUB_MAILBOX:?}"
 exit 0
 EOF
-chmod +x "$TMP/stubbin/msmtp"
-cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
+chmod +x "$TMP/stubbin/datamailer"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
 
 MAILBOX="$TMP/mailbox"
 : > "$MAILBOX"
@@ -59,16 +64,16 @@ else
   fail "T3 dry-run -- $dry_out"
 fi
 
-# T4: --send with DIGEST_TO containing alexey@ strips alexey@ and sends only to dev@dtcdev.click
+# T4: --send with DIGEST_TO containing alexey@ strips alexey@ and sends only to dev@.
 send_out="$(STUB_MAILBOX="$MAILBOX" DIGEST_STATE_DIR="$TMP/state" \
-  DIGEST_TO="alexey@datatalks.club,dev@dtcdev.click" \
+  DIGEST_TO="alexey@invalid.test,dev@invalid.test" \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" --send 2>&1)"
-if [[ "$send_out" == *"SENT ops-daily-digest via=msmtp to=dev@dtcdev.click items=3"* && "$send_out" != *"alexey@"* ]] \
-  && grep -q '^To: dev@dtcdev.click$' "$MAILBOX" \
-  && ! grep -q 'alexey@datatalks.club' "$MAILBOX" \
+if [[ "$send_out" == *"SENT ops-daily-digest via=relay to=dev@invalid.test items=3"* && "$send_out" != *"alexey@"* ]] \
+  && grep -q '^ARGS: send --from alerts --to dev@invalid.test --subject ' "$MAILBOX" \
+  && ! grep -q 'alexey@invalid.test' "$MAILBOX" \
   && ! grep -q '^ARGS: .*alexey@' "$MAILBOX" \
   && [[ ! -s "$TMP/state/queue.tsv" ]]; then
-  pass "T4 --send strips alexey@datatalks.club, delivers to dev@dtcdev.click only, and rotates queue.tsv"
+  pass "T4 --send strips alexey@, delivers to dev@invalid.test only, and rotates queue.tsv"
 else
   fail "T4 --send -- $send_out -- $(cat "$MAILBOX" 2>/dev/null)"
 fi

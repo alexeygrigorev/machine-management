@@ -13,11 +13,10 @@
 #   4. Runs once live (expect FAIL while the mirror is stale since 23 Oct —
 #      that FAIL is correct and must page; do NOT mute it).
 #
-# Private msmtp setup (by hand, values stay in ~/.secrets, never in git):
-#   - ~/.msmtprc (chmod 600) must define account `alerts` sending
-#     From DTC Alerts <alerts@dtcdev.click> via SES SMTP (same as
-#     coolify-healthcheck / hetzner-disk-check).
-#   - Drill: `STORAGEBOX_STALE_DRILL=1 /usr/local/sbin/storagebox-staleness-check.sh`
+# Relay setup: the Hetzner Maintenance client config must be provisioned via
+# Relay's own client/API flow at ~/.config/datamailer/config.toml (0600).
+# ~/.msmtprc is reserved for monitors that watch Relay itself.
+# Drill: `STORAGEBOX_STALE_DRILL=1 /usr/local/sbin/storagebox-staleness-check.sh`
 #     pages dev@dtcdev.click only; re-run without it to clear.
 set -euo pipefail
 
@@ -28,7 +27,14 @@ CRON_SRC="$HERE/storagebox-staleness-check.cron"
 FAIL=0
 
 echo "== install script to stable path =="
+for path in "$SCRIPT" /usr/local/sbin/ops-daily-digest.sh; do
+  if sudo test -e "$path" && ! sudo test -e "${path}.pre-alerts-from"; then
+    sudo cp -a "$path" "${path}.pre-alerts-from"
+  fi
+done
 sudo install -m 0755 "$SCRIPT_SRC" "$SCRIPT"
+sudo install -m 0755 "$HERE/ops-daily-digest.sh" /usr/local/sbin/ops-daily-digest.sh
+sudo install -m 0644 "$HERE/relay-alert-lib.sh" /usr/local/sbin/relay-alert-lib.sh
 bash -n "$SCRIPT" && echo SYNTAX_OK
 
 echo "== state dir =="
@@ -36,18 +42,11 @@ mkdir -p "$HOME/.local/state/storagebox-sync"
 touch "$HOME/.local/state/storagebox-sync/staleness.log"
 echo "state: $HOME/.local/state/storagebox-sync"
 
-echo "== mail path =="
-if command -v msmtp >/dev/null 2>&1; then
-  echo "msmtp present"
-  if [[ -f "$HOME/.msmtprc" ]]; then
-    echo "~/.msmtprc present ($(stat -c%a "$HOME/.msmtprc"))"
-  else
-    echo "WARN: ~/.msmtprc MISSING — create it privately; alerts will be LOG-ONLY until then"
-  fi
-elif command -v sendmail >/dev/null 2>&1; then
-  echo "sendmail present (msmtp preferred)"
+echo "== Relay path =="
+if [[ -x "${DATAMAILER_BIN:-$HOME/.local/bin/datamailer}" ]]; then
+  echo "datamailer present"
 else
-  echo "WARN: no MTA — install msmtp (sudo apt-get install msmtp-mta), then create ~/.msmtprc privately"
+  echo "WARN: datamailer missing — configure the Relay Maintenance client before relying on alerts"
   FAIL=1
 fi
 

@@ -20,11 +20,22 @@ cat > "$TMP/bin/date" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == '+%s' ]]; then echo "$STUB_NOW"; else /bin/date "$@"; fi
 EOF
-cat > "$TMP/bin/msmtp" <<'EOF'
+cat > "$TMP/bin/datamailer" <<'EOF'
 #!/usr/bin/env bash
-echo "MSMTP_ARGS: $*" >> "$STUB_MAIL"
+set -euo pipefail
+from=""; to=""; subject=""; prev=""
+for arg in "$@"; do
+  case "$prev" in --from) from="$arg";; --to) to="$arg";; --subject) subject="$arg";; esac
+  prev="$arg"
+done
+printf 'RELAY_FROM: %s\nRELAY_TO: %s\nRELAY_SUBJECT: %s\n' "$from" "$to" "$subject" >> "$STUB_MAIL"
 cat >> "$STUB_MAIL"
 printf '\n---\n' >> "$STUB_MAIL"
+EOF
+cat > "$TMP/bin/msmtp" <<'EOF'
+#!/usr/bin/env bash
+echo 'unexpected direct SMTP path' >&2
+exit 99
 EOF
 cp "$TMP/bin/msmtp" "$TMP/bin/sendmail"
 cat > "$TMP/bin/curl" <<'EOF'
@@ -51,6 +62,8 @@ if [[ -n "$out" ]]; then printf '%s' "$body" > "$out"; fi
 printf '%s' "$code"
 EOF
 chmod +x "$TMP/bin/"*
+export DATAMAILER_BIN="$TMP/bin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
 
 run_check() { # state-dir, response, epoch, skip-public
   local dir="$1" rc
@@ -60,7 +73,7 @@ run_check() { # state-dir, response, epoch, skip-public
     STATE_DIR="$dir" LOCK_FILE="$dir/lock" \
     SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_BACKUP_CHECKS=1 SKIP_DISK_CHECK=1 \
     CHECK_AISL_Q=0 CHECK_CMP_CALLBACKS=0 LATENCY_PROBES= LATENCY_PUSH_ENABLED=0 \
-    ALERT_TO=alexey@datatalks.club,dev@dtcdev.click ALERT_REPEAT_MIN=60 \
+    ALERT_TO=alexey@example.invalid.test,dev@invalid.test ALERT_REPEAT_MIN=60 \
     RECOVER_NOTIFY_MIN_SEC=600 SKIP_PUBLIC_HTTP_CHECKS="$4" \
     APP_URLS='aishl=https://aishl.test/ping loopback=http://127.0.0.1/health/' \
     CONTENT_CHECKS='aishl_home=https://aishl.test/::"status":"ok" wg=http://10.100.0.2/health/::"status":"ok"' \
@@ -76,7 +89,7 @@ run_check() { # state-dir, response, epoch, skip-public
     require test "$rc" -eq 1
   fi
 }
-mail_count() { grep -c '^Subject:' "$1/mail" || true; }
+mail_count() { grep -c '^RELAY_SUBJECT:' "$1/mail" || true; }
 
 # Same public outage on both hosts: two distinct checks, one pager each.
 run_check "$TMP/a" fail 1000000 1
@@ -87,47 +100,47 @@ require grep -q 'OK check=content-wg' "$TMP/a/log"
 pass 'contabo-a skips public HTTP and content, retains loopback/WG checks'
 
 run_check "$TMP/b" fail 1000000 0
-require test "$(mail_count "$TMP/b")" -eq 2
-require grep -q '^Subject: .* FAIL (http-aishl)' "$TMP/b/mail"
-require grep -q '^Subject: .* FAIL (content-aishl_home)' "$TMP/b/mail"
-require test "$(grep -c '^To: alexey@datatalks.club, dev@dtcdev.click$' "$TMP/b/mail")" -eq 2
-require test "$(grep -c '^From: DTC Alerts <alerts@dtcdev.click>$' "$TMP/b/mail")" -eq 2
-require grep -q '^MSMTP_ARGS: -a alerts -f alerts@dtcdev.click --' "$TMP/b/mail"
-pass 'contabo-b immediately pages both real recipients for AISHL HTTP/content 503'
+require test "$(mail_count "$TMP/b")" -eq 4
+require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (http-aishl)$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (content-aishl_home)$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^RELAY_TO: dev@invalid.test$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^RELAY_FROM: alerts$' "$TMP/b/mail")" -eq 4
+pass 'contabo-b immediately pages both recipients through Relay sender alerts for AISHL HTTP/content 503'
 
 run_check "$TMP/b" fail 1000300 0
-require test "$(mail_count "$TMP/b")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 4
 pass 'repeated public failures remain deduped'
 
 run_check "$TMP/b" good 1000599 0
-require test "$(mail_count "$TMP/b")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 4
 require grep -q '^STATUS=OK$' "$TMP/b/http-aishl.state"
 require grep -q '^STATUS=OK$' "$TMP/b/content-aishl_home.state"
 pass '599-second recovery resets state without RECOVERED mail'
 
 run_check "$TMP/boundary" fail 1000000 0
 run_check "$TMP/boundary" good 1000600 0
-require test "$(mail_count "$TMP/boundary")" -eq 4
-require test "$(grep -c '^Subject: .* RECOVERED' "$TMP/boundary/mail")" -eq 2
-require test "$(grep -c '^To: dev@dtcdev.click$' "$TMP/boundary/mail")" -eq 2
-require test "$(grep -c '^To: alexey@datatalks.club, dev@dtcdev.click$' "$TMP/boundary/mail")" -eq 2
+require test "$(mail_count "$TMP/boundary")" -eq 6
+require test "$(grep -c '^RELAY_SUBJECT: .* RECOVERED' "$TMP/boundary/mail")" -eq 2
+require test "$(grep -c '^RELAY_TO: dev@invalid.test$' "$TMP/boundary/mail")" -eq 4
+require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/boundary/mail")" -eq 2
 pass '600-second boundary sends exactly one RECOVERED per check (to dev@ only, never alexey@)'
 run_check "$TMP/boundary" good 1000900 0
-require test "$(mail_count "$TMP/boundary")" -eq 4
+require test "$(mail_count "$TMP/boundary")" -eq 6
 pass 'continued green does not repeat recovery mail'
 
 run_check "$TMP/long" fail 1000000 0
 run_check "$TMP/long" fail 1003600 0
-require test "$(mail_count "$TMP/long")" -eq 4
+require test "$(mail_count "$TMP/long")" -eq 8
 require grep -q '^FAIL_SINCE=1000000$' "$TMP/long/http-aishl.state"
 run_check "$TMP/long" good 1003601 0
-require test "$(mail_count "$TMP/long")" -eq 6
+require test "$(mail_count "$TMP/long")" -eq 10
 require grep -q 'was FAIL for 3601s' "$TMP/long/mail"
 pass 'repeat alerts preserve outage start for recovery timing'
 
 run_check "$TMP/marker" wrong 1000000 0
-require test "$(mail_count "$TMP/marker")" -eq 1
-require grep -q '^Subject: .* FAIL (content-aishl_home)' "$TMP/marker/mail"
+require test "$(mail_count "$TMP/marker")" -eq 2
+require grep -q '^RELAY_SUBJECT: .* FAIL (content-aishl_home)$' "$TMP/marker/mail"
 pass 'AISHL content mismatch with HTTP 200 still pages immediately'
 
 # Stale check pruning (t1342u): checks no longer in config (e.g. content-relay_dtcdev)

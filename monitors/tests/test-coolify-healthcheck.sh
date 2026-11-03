@@ -68,6 +68,10 @@ if [[ "$_cmd" == "pg_isready" ]]; then
   exit 0
 fi
 if [[ "$_cmd" == "psql" ]]; then
+  if [[ "${HC_FAIL_SHARED:-0}" == "1" && "$_container" == "fake-shared-uuid" ]]; then
+    echo 'psql: connection to http://127.0.0.1:5432 failed' >&2
+    exit 2
+  fi
   if [[ "$_user" != "pgadmin" ]]; then
     echo "psql: error: connection to server on socket \"/var/run/postgresql/.s.PGSQL.5432\" failed: FATAL:  role \"${_user}\" does not exist" >&2
     exit 2
@@ -91,7 +95,18 @@ fi
 cat >/dev/null; exit 0
 EOF
 cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
-chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/curl" "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
+cat > "$TMP/stubbin/datamailer" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
+printf '%s\n' "ARGS: $*" >> "${HC_RELAY_ARGS:-/dev/null}"
+cat >> "${HC_RELAY_BODY:-/dev/null}"
+EOF
+chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/curl" "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail" "$TMP/stubbin/datamailer"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
 
 run_check() { # $1=envfile -> prints output, returns script rc
   local envf="$1" statedir
@@ -107,6 +122,8 @@ run_check() { # $1=envfile -> prints output, returns script rc
   SKIP_CREATED_CHECK=1 \
   CHECK_CMP_CALLBACKS=0 \
   HC_MAIL_LOG="$TMP/mail" HC_MAIL_ARGS="$TMP/mail-args" \
+  HC_RELAY_ARGS="$TMP/relay-args" HC_RELAY_BODY="$TMP/relay-body" \
+  HC_FAIL_SHARED="${HC_FAIL_SHARED:-0}" \
   BASH_ENV="${HC_BASH_ENV:-/dev/null}" \
   PATH="$TMP/stubbin:/usr/bin:/bin" \
   bash "$SCRIPT" 2>&1
@@ -114,7 +131,7 @@ run_check() { # $1=envfile -> prints output, returns script rc
 
 # ---- T3: incident repro — stale PGUSER_RELAY=postgres must FAIL like the alert ----
 printf '%s\n' 'SKIP_PG_SHARED=1' 'PG_RELAY_CONTAINER=fake-relay-uuid' \
-  'PGUSER_RELAY=postgres' 'PG_RELAY_DB=postgres' 'ALERT_TO=test@example.com' > "$TMP/env-stale"
+  'PGUSER_RELAY=postgres' 'PG_RELAY_DB=postgres' 'ALERT_TO=test@example.invalid.test' > "$TMP/env-stale"
 out=""; set +e; out="$(run_check "$TMP/env-stale")"; rc=$?; set -e
 if [[ $rc -ne 0 && "$out" == *'role "postgres" does not exist'* && "$out" == *'HINT'* ]]; then
   pass "T3 stale postgres user FAILs with alert error + hint (rc=$rc)"
@@ -124,8 +141,8 @@ fi
 
 # Verify the actual message and envelope, including the fallback transport.
 if grep -qxF 'From: DTC Alerts <alerts@dtcdev.click>' "$TMP/mail" \
-  && grep -qxF 'To: test@example.com' "$TMP/mail" \
-  && grep -qxF 'msmtp -a alerts -f alerts@dtcdev.click -- test@example.com' "$TMP/mail-args"; then
+  && grep -qxF 'To: test@example.invalid.test' "$TMP/mail" \
+  && grep -qxF 'msmtp -a alerts -f alerts@dtcdev.click -- test@example.invalid.test' "$TMP/mail-args"; then
   pass "T3b default alert has DTC Alerts From header and alerts envelope/account"
 else
   fail "T3b default alert sender/header/envelope"
@@ -145,6 +162,21 @@ if [[ $rc -ne 0 && "$out" == *'via=sendmail'* ]] \
   pass "T3c sendmail fallback preserves DTC Alerts From header and alerts envelope"
 else
   fail "T3c fallback sender/header/envelope (rc=$rc) -- $out"
+fi
+
+# Non-Relay check failures must use Relay and sanitize IP-literal URLs in body.
+: > "$TMP/relay-args"; : > "$TMP/relay-body"; : > "$TMP/mail-args"
+printf '%s\n' 'PG_SHARED_CONTAINER=fake-shared-uuid' 'PG_RELAY_CONTAINER=fake-relay-uuid' \
+  'ALERT_TO=test@example.invalid.test' > "$TMP/env-shared-fail"
+out=""; set +e; out="$(HC_FAIL_SHARED=1 run_check "$TMP/env-shared-fail")"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'via=relay'* ]] \
+  && grep -q '^ARGS: send --from alerts --to test@example.invalid.test --subject ' "$TMP/relay-args" \
+  && grep -q '127.0.0.1:5432 failed' "$TMP/relay-body" \
+  && ! grep -q 'http://127.0.0.1' "$TMP/relay-body" \
+  && ! grep -q 'msmtp' "$TMP/mail-args"; then
+  pass "T3d non-Relay checks use Relay sender and defang IP-literal URLs"
+else
+  fail "T3d non-Relay route (rc=$rc) -- $out"
 fi
 
 # ---- T4: fixed defaults + label auto-discovery — empty env must go green ----
@@ -209,7 +241,7 @@ chmod +x "$TMP/cbin/docker" "$TMP/cbin/msmtp" "$TMP/cbin/sendmail"
 run_content() { # $1=CONTENT_CHECKS value -> prints output, returns script rc
   local statedir
   statedir="$(mktemp -d -p "$TMP")"
-  printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'ALERT_TO=test@example.com' > "$TMP/env-content-base"
+  printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'ALERT_TO=test@example.invalid.test' > "$TMP/env-content-base"
   COOLIFY_HEALTHCHECK_ENV_FILE="$TMP/env-content-base" \
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/clock-$RANDOM" \
@@ -314,7 +346,7 @@ run_ops() { # uses $STUB2_* env; $1=CHECK_AISL_Q value
   local statedir envf="$TMP/env-ops"
   statedir="$(mktemp -d -p "$TMP")"
   printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'SKIP_DISK_CHECK=1' \
-    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.com' "CHECK_AISL_Q=$1" > "$envf"
+    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.invalid.test' "CHECK_AISL_Q=$1" > "$envf"
   COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/olock-$RANDOM" \
@@ -410,7 +442,7 @@ run_latency() { # $1=LATENCY_PROBES $2=extra env assignments
   local statedir envf="$TMP/env-lat" rc out
   statedir="$(mktemp -d -p "$TMP")"
   printf '%s\n' 'SKIP_PG_SHARED=1' 'SKIP_PG_RELAY=1' 'SKIP_DISK_CHECK=1' \
-    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.com' > "$envf"
+    'SKIP_BACKUP_CHECKS=1' 'ALERT_TO=test@example.invalid.test' > "$envf"
   # shellcheck disable=SC2086
   out="$(env COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
   STATE_DIR="$statedir" \
@@ -453,7 +485,7 @@ out="$(env -u SKIP_BACKUP_CHECKS COOLIFY_HEALTHCHECK_ENV_FILE="/nonexistent" \
   DUMP_DIR="$TMP/absent-dumps" WAL_SHIPPER_STATE_DIR="$TMP/absent-wal" \
   SKIP_PG_SHARED=1 SKIP_PG_RELAY=1 SKIP_DISK_CHECK=1 SKIP_CREATED_CHECK=1 \
   CHECK_CMP_CALLBACKS=0 CHECK_AISL_Q=0 APP_URLS="" CONTENT_CHECKS="" LATENCY_PROBES="" LATENCY_PUSH_ENABLED=0 \
-  ALERT_TO="alexey@datatalks.club,dev@dtcdev.click" \
+  ALERT_TO="alexey@example.invalid.test,dev@invalid.test" \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$SCRIPT" 2>&1)"
 rc=$?; set -e
 if [[ $rc -eq 0 && "$out" == *"SKIP backup dump/WAL freshness (host="* && "$out" == *"ALL_OK"* ]]; then

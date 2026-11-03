@@ -2,9 +2,8 @@
 # Storagebox S3-mirror staleness dead-man (t1553u).
 #
 # Alerts when ~/storagebox/backups/s3/.last-sync is older than STALE_SECONDS
-# (default 36h = 129600) or missing/unparseable. Same msmtp alerts path as
-# coolify-healthcheck / hetzner-disk-check: dedicated `alerts` msmtp account
-# via SES SMTP, From DTC Alerts <alerts@dtcdev.click>.
+# (default 36h = 129600) or missing/unparseable. Sends through Relay's
+# `alerts` sender (DTC Alerts <alerts@dtcdev.click>).
 #
 # Real findings page ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click).
 # Drills route to ALERT_OPS_TO (default dev@dtcdev.click) only.
@@ -13,7 +12,7 @@
 #   STORAGEBOX_ROOT=~/storagebox/backups
 #   LAST_SYNC_FILE=$STORAGEBOX_ROOT/s3/.last-sync
 #   STALE_SECONDS=129600  (36h)
-#   ALERT_TO, ALERT_OPS_TO, ALERT_FROM, ALERT_FROM_NAME, ALERT_MSMTP_ACCOUNT
+#   ALERT_TO, ALERT_OPS_TO, RELAY_MONITOR_CONFIG
 #   STATE_DIR=~/.local/state/storagebox-sync
 #   ALERT_REPEAT_MIN=240 (dedupe while still FAIL)
 #   STORAGEBOX_NOW=<epoch> (tests only; production never sets it)
@@ -24,17 +23,17 @@
 # Cron: daily + after the 04:30 mirror (see storagebox-staleness-check.cron).
 # Install: ./monitors/install-storagebox-staleness-check.sh (user cron, no root).
 #
-# No secrets in git: SMTP lives in ~/.msmtprc (0600), built privately.
+# No secrets in git: Relay credentials live in the private datamailer config.
 set -euo pipefail
+
+# shellcheck disable=SC1090
+source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-alert-lib.sh}"
 
 STORAGEBOX_ROOT="${STORAGEBOX_ROOT:-$HOME/storagebox/backups}"
 LAST_SYNC_FILE="${LAST_SYNC_FILE:-$STORAGEBOX_ROOT/s3/.last-sync}"
 STALE_SECONDS="${STALE_SECONDS:-129600}"
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
-ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
-ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/storagebox-sync}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -91,50 +90,20 @@ send_to() {
   if [[ "$is_recovery" -eq 1 || "$STORAGEBOX_STALE_DRILL" == "1" ]]; then
     to_csv="$(strip_personal_recipients "$to_csv")"
     [[ "$is_recovery" -eq 1 ]] && enqueue_digest "storagebox-staleness" "staleness" "RECOVERED" "$full_subject"
-  elif [[ "$STATE_DIR" != "$HOME/.local/state/storagebox-sync" && "$(command -v msmtp 2>/dev/null || true)" == "/usr/bin/msmtp" ]]; then
+  elif [[ "$STATE_DIR" != "$HOME/.local/state/storagebox-sync" && ( "$(command -v msmtp 2>/dev/null || true)" == "/usr/bin/msmtp" || "$(command -v datamailer 2>/dev/null || true)" == "/usr/local/bin/datamailer" ) ]]; then
     to_csv="$(strip_personal_recipients "$to_csv")"
   fi
   to_csv="${to_csv// /,}"
-  local to_header="${to_csv//,/, }"
-  local -a to_args=()
-  IFS=',' read -r -a to_args <<< "$to_csv"
-  local envelope_from="$ALERT_FROM"
-  local from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
-  local msmtp_args=()
-  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
   local sent="no"
   if [[ "$DRY_RUN" == "1" ]]; then
     log "DRY_RUN would-alert subject='${full_subject}' to=${to_csv} via=none"
     printf 'DRY_RUN subject=%s\nDRY_RUN to=%s\n' "$full_subject" "$to_csv"
     return 0
   fi
-  if command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
-      sent="msmtp"
-    else
-      log "WARN: msmtp failed (account ${ALERT_MSMTP_ACCOUNT})"
-    fi
-  elif command -v sendmail >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | sendmail -t 2>/dev/null; then
-      sent="sendmail"
-    else
-      log "WARN: sendmail failed"
-    fi
+  if relay_send_alert "$to_csv" "$full_subject" "$body"; then
+    sent="relay"
   else
-    log "WARN: no MTA (sendmail/msmtp) — alert logged only"
+    log "WARN: Relay delivery failed"
   fi
   log "ALERT subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$is_recovery" -eq 1 ]]; then
@@ -154,7 +123,7 @@ if [[ "$STORAGEBOX_STALE_DRILL" == "1" ]]; then
   log "DRILL: forcing stale FAIL to ${ALERT_OPS_TO}"
   send_to "$ALERT_OPS_TO" "FAIL storagebox mirror stale (DRILL)" \
 "DRILL ${NOW} from $(hostname): forced storagebox-staleness drill (STORAGEBOX_STALE_DRILL=1).
-Proves the Hetzner msmtp alerts path to ${ALERT_OPS_TO}.
+Proves the Hetzner Relay alerts path to ${ALERT_OPS_TO}.
 Re-run without STORAGEBOX_STALE_DRILL=1 to clear with RECOVERED."
   exit 1
 fi

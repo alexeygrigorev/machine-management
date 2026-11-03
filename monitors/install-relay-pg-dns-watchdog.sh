@@ -11,6 +11,26 @@ ENV_EX="$HERE/relay-pg-dns-watchdog.env.example"
 
 ssh -o BatchMode=yes "$HOST" 'sudo mkdir -p /var/lib/relay-pg-dns-watchdog /var/log'
 scp -o BatchMode=yes "$SCRIPT" "${HOST}:/tmp/relay-pg-dns-watchdog.sh"
+scp -o BatchMode=yes "$HERE/ops-daily-digest.sh" "${HOST}:/tmp/ops-daily-digest.sh"
+scp -o BatchMode=yes "$HERE/relay-alert-lib.sh" "${HOST}:/tmp/relay-alert-lib.sh"
 scp -o BatchMode=yes "$CRON" "${HOST}:/tmp/relay-pg-dns-watchdog.cron"
 scp -o BatchMode=yes "$ENV_EX" "${HOST}:/tmp/relay-pg-dns-watchdog.env.example"
-ssh -o BatchMode=yes "$HOST" "sudo install -m 0755 /tmp/relay-pg-dns-watchdog.sh /usr/local/sbin/relay-pg-dns-watchdog.sh &&   sudo install -m 0644 /tmp/relay-pg-dns-watchdog.cron /etc/cron.d/relay-pg-dns-watchdog &&   if [ ! -f /etc/relay-pg-dns-watchdog.env ]; then sudo install -m 0600 /tmp/relay-pg-dns-watchdog.env.example /etc/relay-pg-dns-watchdog.env; echo Created env from example; else echo Kept existing env; fi &&   rm -f /tmp/relay-pg-dns-watchdog.sh /tmp/relay-pg-dns-watchdog.cron /tmp/relay-pg-dns-watchdog.env.example &&   sudo DRY_RUN=1 /usr/local/sbin/relay-pg-dns-watchdog.sh | tail -30 &&   echo Installed. Cron: /etc/cron.d/relay-pg-dns-watchdog"
+ssh -o BatchMode=yes "$HOST" 'sudo bash -s' <<'EOF'
+set -euo pipefail
+for path in /usr/local/sbin/relay-pg-dns-watchdog.sh /usr/local/sbin/ops-daily-digest.sh; do
+  [[ ! -e "$path" || -e "${path}.pre-alerts-from" ]] || cp -a "$path" "${path}.pre-alerts-from"
+done
+install -m 0755 /tmp/relay-pg-dns-watchdog.sh /usr/local/sbin/relay-pg-dns-watchdog.sh
+install -m 0755 /tmp/ops-daily-digest.sh /usr/local/sbin/ops-daily-digest.sh
+install -m 0644 /tmp/relay-alert-lib.sh /usr/local/sbin/relay-alert-lib.sh
+install -m 0644 /tmp/relay-pg-dns-watchdog.cron /etc/cron.d/relay-pg-dns-watchdog
+if [[ ! -f /etc/relay-pg-dns-watchdog.env ]]; then
+  install -m 0600 /tmp/relay-pg-dns-watchdog.env.example /etc/relay-pg-dns-watchdog.env
+  echo Created env from example
+else
+  echo Kept existing env
+fi
+rm -f /tmp/relay-pg-dns-watchdog.sh /tmp/ops-daily-digest.sh /tmp/relay-alert-lib.sh /tmp/relay-pg-dns-watchdog.cron /tmp/relay-pg-dns-watchdog.env.example
+DRY_RUN=1 /usr/local/sbin/relay-pg-dns-watchdog.sh | tail -30
+echo Installed. Cron: /etc/cron.d/relay-pg-dns-watchdog
+EOF
