@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           mapfile -d '' test_files < <(find backups contingency deployments edge monitors tests wg-bridge \
-            -type f -name 'test*.sh' -not -path './edge/tests/test-edge.sh' \
+            -type f -name 'test*.sh' -not -path 'edge/tests/test-edge.sh' \
             -print0 | sort -z)
           for test_file in "${test_files[@]}"; do
             echo "::group::${test_file}"
