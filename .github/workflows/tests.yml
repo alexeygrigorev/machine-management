@@ -36,6 +36,7 @@ jobs:
             -type f -name 'test*.sh' \
             -not -path 'edge/tests/test-edge.sh' \
             -not -path 'edge/origin-tls-enforce/tests/test-origin.sh' \
+            -not -path 'tests/test-origin.sh' \
             -print0 | sort -z)
           for test_file in "${test_files[@]}"; do
             echo "::group::${test_file}"
