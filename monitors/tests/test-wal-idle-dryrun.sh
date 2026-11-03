@@ -3,7 +3,7 @@
 # entrypoint: a stale shipper last-success must NOT page when the archiver is
 # caught up and the spool is empty (idle DB), but must still page — naming the
 # last success timestamp and segment — when unarchived WAL backs up.
-# Hermetic: fake env file, docker/psql/curl/msmtp/sendmail stubs, no network,
+# Hermetic: fake env file, docker/psql/curl/Relay stubs, no network,
 # non-routable recipient; mail is captured to a stub file, never sent.
 # (Without the MTA stub the script's default env path on a dev host can be
 # sourced and would page real recipients — do not remove these stubs.)
@@ -28,19 +28,20 @@ if [[ "\$1" == "exec" ]]; then shift 4; exec "$TMP/fake-psql" "\$@"; fi
 if [[ "\$1" == "inspect" ]]; then echo "$PGDATA"; exit 0; fi
 exit 64
 STUB
-cat > "$TMP/bin/msmtp" <<'EOF'
+cat > "$TMP/bin/datamailer" <<'EOF'
 #!/usr/bin/env bash
-echo "MSMTP_ARGS: $*" >> "$STUB_MAIL"
+echo "RELAY_ARGS: $*" >> "$STUB_MAIL"
 cat >> "$STUB_MAIL"
 printf '\n---\n' >> "$STUB_MAIL"
 EOF
-cp "$TMP/bin/msmtp" "$TMP/bin/sendmail"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "CURL: $*" >> "$STUB_MAIL"
 exit 0
 EOF
-chmod +x "$TMP/fake-psql" "$TMP/bin/docker" "$TMP/bin/msmtp" "$TMP/bin/sendmail" "$TMP/bin/curl"
+chmod +x "$TMP/fake-psql" "$TMP/bin/docker" "$TMP/bin/datamailer" "$TMP/bin/curl"
+export DATAMAILER_BIN="$TMP/bin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
 
 run_healthcheck() {
   PATH="$TMP/bin:$PATH" \
@@ -71,7 +72,7 @@ run_healthcheck && rc=0 || rc=$?
 grep -q 'wal-pg-shared.*archiver idle' "$TMP/run.log"
 grep -q 'ALL_OK' "$TMP/run.log"
 grep -q '0000000100000006000000FC' "$TMP/run.log"
-! grep -q 'MSMTP_ARGS' "$STUB_MAIL"
+! grep -q 'RELAY_ARGS' "$STUB_MAIL"
 echo 'PASS dry-run: stale age + idle archiver + empty spool = ALL_OK, no mail'
 
 # --- Scenario B (a real stop): archiver two segments behind -> page naming
@@ -86,7 +87,7 @@ grep -q 'CHECKS_FAILED' "$TMP/run.log"
 grep -q "last=$(cat "$TMP/state-shipper/last-success-pg-shared")" "$TMP/run.log"
 grep -q '0000000100000006000000FC' "$TMP/run.log"
 grep -q '0000000100000006000000FE' "$TMP/run.log"
-grep -q 'MSMTP_ARGS' "$STUB_MAIL"
+grep -q '^RELAY_ARGS: send --from alerts --to healthcheck-dryrun@invalid --subject ' "$STUB_MAIL"
 grep -q "last success $(cat "$TMP/state-shipper/last-success-pg-shared")" "$STUB_MAIL"
 grep -q '0000000100000006000000FC' "$STUB_MAIL"
 echo 'PASS dry-run: unarchived backlog pages with timestamp and segment of last success'

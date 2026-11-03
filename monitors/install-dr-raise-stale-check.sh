@@ -9,7 +9,14 @@ set -euo pipefail
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RUN_USER="${RUN_USER:-alexey}"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+for path in /usr/local/sbin/dr-raise-stale-check.sh /usr/local/sbin/ops-daily-digest.sh; do
+  if [[ -e "$path" && ! -e "${path}.pre-alerts-from" ]]; then
+    cp -a "$path" "${path}.pre-alerts-from"
+  fi
+done
 install -m 0755 "$REPO/monitors/dr-raise-stale-check.sh" /usr/local/sbin/dr-raise-stale-check.sh
+install -m 0755 "$REPO/monitors/ops-daily-digest.sh" /usr/local/sbin/ops-daily-digest.sh
+install -m 0644 "$REPO/monitors/relay-alert-lib.sh" /usr/local/sbin/relay-alert-lib.sh
 install -m 0644 "$REPO/monitors/dr-raise-stale-check.cron" /etc/cron.d/dr-raise-stale-check
 # Production state dir: the script only treats /var/lib/dr-raise-stale-check
 # as live (any other STATE_DIR strips personal recipients).

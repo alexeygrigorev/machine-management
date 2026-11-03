@@ -3,7 +3,7 @@
 #   - detached -> exit 1, FAIL state, dev@-only alert line
 #   - repeat within ALERT_REPEAT_MIN -> still FAIL but NO second alert line
 #   - reattached -> exit 0, RECOVERED mail path, state OK
-# Stub docker/sendmail on PATH; no prod, no secrets.
+# Stub docker/Relay on PATH; no prod, no secrets.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,12 +46,30 @@ exit "${STUB_MAIL_RC:-0}"
 EOF
 chmod +x "$TMP/stubbin/docker" "$TMP/stubbin/sendmail"
 cp "$TMP/stubbin/sendmail" "$TMP/stubbin/msmtp"
+cat > "$TMP/stubbin/datamailer" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
+{
+  echo "ARGS: $*"
+  cat
+  echo "---END---"
+} >> "$MAIL_BODY"
+exit "${STUB_MAIL_RC:-0}"
+EOF
+chmod +x "$TMP/stubbin/datamailer"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
+export MAIL_BODY="$TMP/mail.body"
+: > "$MAIL_BODY"
 
 run() { # $1=proxy_nets -> prints output, returns rc
   set +e
   STUB_PROXY_NETS="$1" STUB_WANT_NET="svcnet123" \
     COOLIFY_PROXY_NETWORKS_ENV_FILE=/nonexistent STATE_DIR="${PAGER_STATE:-$TMP/state}" LOCK_FILE="$TMP/lock" \
-    RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test ALERT_REPEAT_MIN=60 \
+    RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_REPEAT_MIN=60 \
     PATH="$TMP/stubbin:/usr/bin:/bin" bash "$MONITOR" 2>&1
 }
 out=""; rc=0
@@ -111,7 +129,7 @@ else
   fail "P7 isolated recovery -- $out"
 fi
 
-# Working mail path must prefer msmtp and specify its allowed identity/account.
+# Working mail path must use Relay's configured `alerts` sender.
 cat > "$TMP/stubbin/msmtp" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$MAIL_ARGS"
@@ -120,6 +138,7 @@ exit "${STUB_MAIL_RC:-0}"
 EOF
 chmod +x "$TMP/stubbin/msmtp"
 export MAIL_ARGS="$TMP/mail.args" MAIL_BODY="$TMP/mail.body"
+: > "$MAIL_BODY"
 export PAGER_STATE="$TMP/mail-state" STUB_MAIL_RC=1
 set +e; out="$(run "coolify")"; set -e
 if [[ ! -f "$PAGER_STATE/proxy-networks.state" && "$out" == *"via=no"* ]]; then
@@ -128,13 +147,13 @@ else
   fail "P8 rejected send state -- $out"
 fi
 export STUB_MAIL_RC=0
+: > "$MAIL_BODY"
 set +e; out="$(run "coolify")"; set -e
-if [[ "$out" == *"via=msmtp"* ]] && grep -qx 'alerts' "$MAIL_ARGS" &&
-   grep -qx 'noreply@test' "$MAIL_ARGS" && grep -qx 'dev@dtcdev.click' "$MAIL_ARGS" &&
-   grep -q '^To: dev@dtcdev.click$' "$MAIL_BODY"; then
-  pass "P9 retry uses msmtp with explicit account/envelope and dev-only recipient"
+if [[ "$out" == *"via=relay"* ]] && grep -q '^ARGS: send --from alerts --to dev@dtcdev.click --subject ' "$MAIL_BODY" &&
+   ! grep -q 'noreply@test' "$MAIL_BODY"; then
+  pass "P9 retry uses Relay sender alerts and dev-only recipient"
 else
-  fail "P9 msmtp arguments -- $out"
+  fail "P9 Relay arguments -- $out"
 fi
 export STUB_MAIL_RC=1
 set +e; out="$(run "coolify svcnet123")"; set -e

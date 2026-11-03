@@ -9,13 +9,15 @@ cat > "$TMP/bin/hostname" <<'STUB'
 #!/usr/bin/env bash
 echo "$TEST_HOST"
 STUB
-cat > "$TMP/bin/msmtp" <<'STUB'
+cat > "$TMP/bin/datamailer" <<'STUB'
 #!/usr/bin/env bash
+echo "RELAY_ARGS: $*" >> "$TEST_MAIL"
 cat >> "$TEST_MAIL"
 [[ "${TEST_MAIL_FAIL:-0}" == 0 ]]
 STUB
-cp "$TMP/bin/msmtp" "$TMP/bin/sendmail"
-chmod +x "$TMP/bin/"*
+chmod +x "$TMP/bin/hostname" "$TMP/bin/datamailer"
+export DATAMAILER_BIN="$TMP/bin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
 run() {
   local host="$1" state="$2" skip="$3"
   mkdir -p "$TMP/$state"
@@ -42,15 +44,15 @@ done
 echo 'PASS data host still alerts when both directories disappear'
 rm -f "$TMP/mail"
 if run RMTHZ drill 0; then echo 'FAIL missing-path drill passed'; exit 1; fi
-grep -q 'Subject: .* FAIL (dump-missing)' "$TMP/mail"
-grep -q 'Subject: .* FAIL (wal-pg-shared)' "$TMP/mail"
+grep -q 'RELAY_ARGS: send --from alerts --to test@invalid --subject .* FAIL (dump-missing)' "$TMP/mail"
+grep -q 'RELAY_ARGS: send --from alerts --to test@invalid --subject .* FAIL (wal-pg-shared)' "$TMP/mail"
 echo 'PASS explicit missing-path drill alerts through captured MTA'
 # Reuse actual FAIL state created by the dry run; failed recovery must retry.
 : > "$TMP/mail"
 if TEST_MAIL_FAIL=1 run RMTHZ drill unset; then echo 'FAIL mail failure passed'; exit 1; fi
 grep -q '^STATUS=FAIL$' "$TMP/drill/dump-missing.state"
 run RMTHZ drill unset
-grep -q 'Subject: .* RECOVERED (dump-missing)' "$TMP/mail"
+grep -q 'RELAY_ARGS: send --from alerts --to test@invalid --subject .* RECOVERED (dump-missing)' "$TMP/mail"
 grep -q 'Local backup check retired on RMTHZ' "$TMP/mail"
 grep -q '^STATUS=OK$' "$TMP/drill/dump-missing.state"
 grep -q '^STATUS=OK$' "$TMP/drill/wal-pg-shared.state"

@@ -11,7 +11,7 @@
 # container with traefik.enable=true and a non-coolify traefik.docker.network
 # label must share that network with the coolify-proxy container.
 #
-# Alerting: dev@dtcdev.click ONLY (never Alexey directly), same rules as the
+# Alerting: dev@dtcdev.click ONLY through Relay's `alerts` sender (never Alexey directly), same rules as the
 # main healthcheck — one FAIL mail per missing set, repeat at most every
 # ALERT_REPEAT_MIN while still failing, RECOVERED on green again.
 # No secrets: only network/container names enter mail (names are Coolify
@@ -23,6 +23,9 @@ if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   set -a; source "$ENV_FILE"; set +a
 fi
+
+# shellcheck disable=SC1090
+source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-alert-lib.sh}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
@@ -36,9 +39,6 @@ LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-proxy-networks.lock}"
 LOG_FILE="${LOG_FILE:-/var/log/coolify-healthcheck.log}"
 PROXY_CONTAINER="${PROXY_CONTAINER:-coolify-proxy}"
 ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
-ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
-ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_SUBJECT_PREFIX="${ALERT_SUBJECT_PREFIX:-[coolify-proxy-networks]}"
 [[ "$ALERT_TO" == dev@dtcdev.click ]] || { log "ERROR: proxy-network alerts must go to dev@ only"; exit 1; }
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
@@ -85,59 +85,10 @@ send_alert() {
   local full_subject="${ALERT_SUBJECT_PREFIX} ${subject} (${name})"
   local sent="no"
   local to_csv="${ALERT_TO// /,}"
-  local to_header="${to_csv//,/, }"
-  local -a to_args=()
-  IFS=',' read -r -a to_args <<< "$to_csv"
-  local envelope_from from_header
-  local from_pat='<([^>]+)>'
-  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
-    envelope_from="${BASH_REMATCH[1]}"
-    from_header="$ALERT_FROM"
-  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
-    envelope_from="$ALERT_FROM"
-    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  if relay_send_alert "$to_csv" "$full_subject" "$body"; then
+    sent="relay"
   else
-    envelope_from="$ALERT_FROM"
-    from_header="$ALERT_FROM"
-  fi
-
-  local msmtp_args=()
-  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
-
-  if command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
-      sent="msmtp"
-    else
-      log "WARN: msmtp failed for ${name}"
-    fi
-  elif command -v sendmail >/dev/null 2>&1; then
-    local sendmail_args=("-t")
-    local sendmail_bin
-    sendmail_bin="$(command -v sendmail)"
-    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
-      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-    fi
-    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
-      sent="sendmail"
-    else
-      log "WARN: sendmail failed for ${name}"
-    fi
-  else
-    log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure SMTP (see README)"
+    log "WARN: Relay delivery failed for ${name}"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${ALERT_TO}"
   enqueue_digest "coolify-proxy-networks" "$name" "${subject%% *}" "$full_subject"

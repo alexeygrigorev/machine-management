@@ -3,8 +3,8 @@
 #
 # Runs on HETZNER (RMTHZ, agent host) as a USER cron job
 # (see hetzner-disk-check.cron) — never on Contabo.
-# Reuses the coolify-healthcheck send_alert/msmtp path (dedicated `alerts`
-# msmtp account via SES SMTP, From: DTC Alerts <alerts@dtcdev.click>).
+# Sends alerts through Relay's `alerts` sender (DTC Alerts
+# <alerts@dtcdev.click>); Relay is not this monitor's subject.
 #
 # What it checks, for every real mount in DISK_MOUNTS (default "/ /boot /data";
 # tmpfs/overlay/squashfs excluded; sshfs storagebox mount reported only,
@@ -39,11 +39,11 @@
 #
 # Drill (safe, no production impact): run once with
 #   DISK_DRILL=1 ./monitors/hetzner-disk-check.sh
-# to prove the Hetzner mail path end to end (one FAIL mail to dev@ only
+# to prove the Hetzner Relay path end to end (one FAIL mail to dev@ only
 # with a timestamp), then run again normally to get the RECOVERED mail.
 #
-# Secrets: NEVER in git. SMTP lives in ~/.msmtprc (0600), built privately
-# from ~/.secrets. Exit code: 0 if every check passed, 1 if any failed.
+# Secrets: NEVER in git. Relay client credentials stay in the private
+# datamailer config (0600). Exit code: 0 if every check passed, 1 if any failed.
 set -euo pipefail
 
 ENV_FILE="${HETZNER_DISK_ENV_FILE:-$HOME/.hetzner-disk-check.env}"
@@ -51,6 +51,9 @@ if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   set -a; source "$ENV_FILE"; set +a
 fi
+
+# shellcheck disable=SC1090
+source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-alert-lib.sh}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
@@ -82,9 +85,6 @@ FILL_CONFIRM_MIN_SPAN_SEC="${FILL_CONFIRM_MIN_SPAN_SEC:-1800}"
 
 ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
-ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
-ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
-ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"
 RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
 DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ops-daily-digest.sh}"
@@ -186,60 +186,10 @@ send_to() {
   local full_subject="[hetzner-disk-check] ${subject} (${name})"
   local sent="no"
   to_csv="${to_csv// /,}"
-  local to_header="${to_csv//,/, }"
-  local -a to_args=()
-  IFS=',' read -r -a to_args <<< "$to_csv"
-
-  local envelope_from from_header
-  local from_pat='<([^>]+)>'
-  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
-    envelope_from="${BASH_REMATCH[1]}"
-    from_header="$ALERT_FROM"
-  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
-    envelope_from="$ALERT_FROM"
-    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  if relay_send_alert "$to_csv" "$full_subject" "$body"; then
+    sent="relay"
   else
-    envelope_from="$ALERT_FROM"
-    from_header="$ALERT_FROM"
-  fi
-
-  local msmtp_args=()
-  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
-
-  if command -v msmtp >/dev/null 2>&1; then
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
-      sent="msmtp"
-    else
-      log "WARN: msmtp failed for ${name}"
-    fi
-  elif command -v sendmail >/dev/null 2>&1; then
-    local sendmail_args=("-t")
-    local sendmail_bin
-    sendmail_bin="$(command -v sendmail)"
-    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
-      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-    fi
-    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
-    if {
-      echo "From: ${from_header}"
-      echo "To: ${to_header}"
-      echo "Subject: ${full_subject}"
-      echo ""
-      printf '%s\n' "$body"
-    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
-      sent="sendmail"
-    else
-      log "WARN: sendmail failed for ${name}"
-    fi
-  else
-    log "WARN: no MTA (sendmail/msmtp) on this host — alert for ${name} logged only; install msmtp and configure ~/.msmtprc (see README)"
+    log "WARN: Relay delivery failed for ${name}"
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$is_recovery" -eq 1 ]]; then
@@ -572,7 +522,7 @@ check_drill() {
       log "DRILL check=${name}: already alerted, deduped"
       FAILED=1; return
     fi
-    send_ops "$name" "FAIL" "DRILL ${ts} from $(hostname): forced disk-alert drill (DISK_DRILL=1). Proves the Hetzner mail path to ${ALERT_OPS_TO}. Re-run without DISK_DRILL=1 to clear with RECOVERED."
+    send_ops "$name" "FAIL" "DRILL ${ts} from $(hostname): forced disk-alert drill (DISK_DRILL=1). Proves the Hetzner Relay path to ${ALERT_OPS_TO}. Re-run without DISK_DRILL=1 to clear with RECOVERED."
     FAILED=1
   else
     if [[ -f "$state_file" ]]; then
@@ -583,30 +533,14 @@ check_drill() {
         ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         log "DRILL check=${name}: clearing drill state at ${ts}"
         local to_csv="${ALERT_OPS_TO// /,}"
-        local to_header="${to_csv//,/, }"
-        local -a to_args=()
-        IFS=',' read -r -a to_args <<< "$to_csv"
+        local full_subject="[hetzner-disk-check] RECOVERED (${name})"
         local sent="no"
-        if command -v msmtp >/dev/null 2>&1; then
-          {
-            echo "From: ${ALERT_FROM_NAME} <${ALERT_FROM}>"
-            echo "To: ${to_header}"
-            echo "Subject: [hetzner-disk-check] RECOVERED (${name})"
-            echo ""
-            echo "DRILL ${ts} from $(hostname): drill cleared, mail path proved."
-          } | msmtp -a "$ALERT_MSMTP_ACCOUNT" -f "$ALERT_FROM" -- "${to_args[@]}" 2>/dev/null && sent="msmtp" || log "WARN: msmtp failed for ${name}"
-        elif command -v sendmail >/dev/null 2>&1; then
-          {
-            echo "From: ${ALERT_FROM_NAME} <${ALERT_FROM}>"
-            echo "To: ${to_header}"
-            echo "Subject: [hetzner-disk-check] RECOVERED (${name})"
-            echo ""
-            echo "DRILL ${ts} from $(hostname): drill cleared, mail path proved."
-          } | sendmail -t 2>/dev/null && sent="sendmail" || log "WARN: sendmail failed for ${name}"
+        if relay_send_alert "$to_csv" "$full_subject" "DRILL ${ts} from $(hostname): drill cleared, Relay path proved."; then
+          sent="relay"
         else
-          log "WARN: no MTA on this host — drill RECOVERED for ${name} logged only"
+          log "WARN: Relay delivery failed for drill RECOVERED ${name}"
         fi
-        log "ALERT check=${name} subject='[hetzner-disk-check] RECOVERED (${name})' via=${sent} to=${to_csv}"
+        log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
         if [[ "$sent" != "no" ]]; then
           printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
         else

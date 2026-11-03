@@ -2,7 +2,7 @@
 # Regression tests for storagebox mirror fix (t1553u):
 # - monitors/storagebox-staleness-check.sh (36h dead-man, DRY_RUN + drill)
 # - backups/storagebox-sync.sh (no main-temp, writable log path)
-# Runs the real scripts with stub msmtp on PATH (no root, no network, no mail).
+# Runs the real scripts with stub Relay CLI (no root, no network, no mail).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,19 +49,30 @@ else
   fi
 fi
 
-# ---- stub msmtp ----
+# ---- stub Relay CLI ----
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/stubbin" "$TMP/state" "$TMP/sb/s3"
-cat > "$TMP/stubbin/msmtp" <<'EOF'
+cat > "$TMP/stubbin/datamailer" <<'EOF'
 #!/usr/bin/env bash
-echo "MSMTP_ARGS: $*" >> "$MAILBOX"
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
+echo "RELAY_ARGS: $*" >> "$MAILBOX"
 cat >> "$MAILBOX"
 echo "---MAIL-END---" >> "$MAILBOX"
 exit 0
 EOF
-chmod +x "$TMP/stubbin/msmtp"
+chmod +x "$TMP/stubbin/datamailer"
+printf '#!/usr/bin/env bash\necho unexpected direct SMTP path >&2\nexit 99\n' > "$TMP/stubbin/msmtp"
+cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
+chmod +x "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
 export PATH="$TMP/stubbin:$PATH"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
+export ALERT_TO="alexey@invalid.test,dev@invalid.test"
+export ALERT_OPS_TO="ops@invalid.test"
 export MAILBOX="$TMP/mailbox"
 : > "$MAILBOX"
 
@@ -88,7 +99,7 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   fail "T3 fresh marker exits 0"; cat /tmp/t3.out
 fi
-if grep -q "MSMTP_ARGS" "$MAILBOX"; then fail "T3 no mail on fresh"; else pass "T3 no mail on fresh"; fi
+if grep -q "RELAY_ARGS" "$MAILBOX"; then fail "T3 no mail on fresh"; else pass "T3 no mail on fresh"; fi
 
 # ---- T4: stale marker FAILs and pages prod recipients ----
 STALE="$(date -u -d "@$(( NOW_EPOCH - 200000 ))" '+%Y-%m-%dT%H:%M:%SZ')"
@@ -99,8 +110,9 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T4 stale exits nonzero"
 fi
-if grep -q "MSMTP_ARGS" "$MAILBOX" && grep -q "alexey@datatalks.club" "$MAILBOX" && grep -q "dev@dtcdev.click" "$MAILBOX"; then
-  pass "T4 stale pages both prod recipients"
+if grep -q '^RELAY_ARGS: send --from alerts --to alexey@invalid.test --subject ' "$MAILBOX" \
+  && grep -q '^RELAY_ARGS: send --from alerts --to dev@invalid.test --subject ' "$MAILBOX"; then
+  pass "T4 stale pages both prod recipients through Relay"
 else
   fail "T4 stale pages both prod recipients"; cat "$MAILBOX" 2>/dev/null
 fi
@@ -113,7 +125,7 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T5 DRY_RUN stale exits nonzero"
 fi
-if grep -q "DRY_RUN would-alert" /tmp/t5.out && ! grep -q "MSMTP_ARGS" "$MAILBOX"; then
+if grep -q "DRY_RUN would-alert" /tmp/t5.out && ! grep -q "RELAY_ARGS" "$MAILBOX"; then
   pass "T5 DRY_RUN would-alert, sends nothing"
 else
   fail "T5 DRY_RUN would-alert, sends nothing"; cat /tmp/t5.out
@@ -127,8 +139,9 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T6 drill exits nonzero"
 fi
-if grep -q "MSMTP_ARGS" "$MAILBOX" && grep -q "dev@dtcdev.click" "$MAILBOX" && ! grep -q "alexey@datatalks.club" "$MAILBOX"; then
-  pass "T6 drill pages dev-only"
+if grep -q '^RELAY_ARGS: send --from alerts --to ops@invalid.test --subject ' "$MAILBOX" \
+  && ! grep -q 'alexey@invalid.test' "$MAILBOX"; then
+  pass "T6 drill pages dev-only through Relay"
 else
   fail "T6 drill pages dev-only"; cat "$MAILBOX" 2>/dev/null
 fi
@@ -148,8 +161,9 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T8 missing exits nonzero"
 fi
-if grep -q "MSMTP_ARGS" "$MAILBOX" && grep -q "missing" "$MAILBOX"; then
-  pass "T8 missing pages prod"
+if grep -q '^RELAY_ARGS: send --from alerts --to alexey@invalid.test --subject ' "$MAILBOX" \
+  && grep -q "missing" "$MAILBOX"; then
+  pass "T8 missing pages prod through Relay"
 else
   fail "T8 missing pages prod"; cat "$MAILBOX" 2>/dev/null
 fi
@@ -171,7 +185,7 @@ else
   pass "T9b future exits nonzero"
 fi
 
-# ---- T10 (t1885u): RECOVERED strips alexey@datatalks.club and sends only to dev@dtcdev.click ----
+# ---- T10: RECOVERED strips alexey@ and sends only to the dev test recipient ----
 run_check "$STALE"
 STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$TMP/state" \
   STORAGEBOX_NOW="$NOW_EPOCH" bash "$SCRIPT" >/dev/null 2>&1 || true
@@ -180,9 +194,9 @@ printf '%s' "$FRESH" > "$TMP/sb/s3/.last-sync"
 if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$TMP/state" \
   STORAGEBOX_NOW="$NOW_EPOCH" bash "$SCRIPT" >/tmp/t10.out 2>&1 \
   && grep -q "RECOVERED storagebox mirror fresh" "$MAILBOX" \
-  && grep -q "dev@dtcdev.click" "$MAILBOX" \
-  && ! grep -q "alexey@datatalks.club" "$MAILBOX"; then
-  pass "T10 RECOVERED routes to dev@dtcdev.click only (never alexey@)"
+  && grep -q "dev@invalid.test" "$MAILBOX" \
+  && ! grep -q "alexey@invalid.test" "$MAILBOX"; then
+  pass "T10 RECOVERED routes to dev test recipient only (never alexey@)"
 else
   fail "T10 RECOVERED routing"; cat "$MAILBOX" 2>/dev/null
 fi
