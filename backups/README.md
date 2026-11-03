@@ -118,7 +118,7 @@ after the 02:30 pg dumps and 03:30 CP bundles) and:
    day's backups from S3 (~0.5–1.8 GB/day of paid egress);
 2. `edge/acme-backup.sh` — fetches Traefik `acme.json` from both Contabo
    hosts, stores GPG-symmetric-encrypted (`~/.secrets/acme-backup-gpg.pass`,
-   600, escrowed in Secrets Manager `dr/acme-backup-gpg-passphrase`) decrypt-verified copies under
+   600, escrowed in MAIN-account Secrets Manager `dr/acme-backup-gpg-passphrase`) decrypt-verified copies under
    `~/storagebox/backups/edge-tls/YYYY/MM/DD/`;
 3. `prune-storagebox.sh --apply` (30d) over the mirror + `edge-tls/` +
    legacy per-area copies;
