@@ -79,14 +79,13 @@ DEADMAN_HTTP_RETRY_SLEEP_SEC="${DEADMAN_HTTP_RETRY_SLEEP_SEC:-0}"
 DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 
 # --- latency probes (f5d8e22b AC2: off-Contabo TTFB/total into VM) ---
-# Same URLs as healthcheck (service label for p95 per service; CMP is the
-# cheap /api/health/ probe, never a page render — 6e626719), plus the 3
-# AWS-hosted services (hub/ops/dapier behind CloudFront/ALB — they never pass
+# CMP home + one course page, AISHL home + one content page, Relay /health,
+# website home + /events/past, plus the 3 AWS-hosted services (hub/ops/dapier
+# behind CloudFront/ALB — they never pass
 # through the Contabo Traefik proxies, so probes are their only AC1 coverage).
-# Fleet dedup (t1634u/6e626719) applies via host env overrides; Contabo
-# healthchecks keep their trimmed lists. Hetzner has no WireGuard to
-# 10.100.0.1, so push goes via SSH to contabo-a by default.
-LATENCY_PROBES="${LATENCY_PROBES:-cmp_health=https://courses.datatalks.club/api/health/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website hub_home=https://hub.dtcdev.click/::hub ops_home=https://ops.dtcdev.click/::ops dapier_home=https://dapier.dtcdev.click/::dapier}"
+# Hetzner has no WireGuard to 10.100.0.1, so push goes via SSH to contabo-a
+# by default. Health endpoint checks remain separate from these page probes.
+LATENCY_PROBES="${LATENCY_PROBES:-cmp_home=https://courses.datatalks.club/::cmp cmp_course=https://courses.datatalks.club/ml-zoomcamp-2026/::cmp aisl_home=https://aishippinglabs.com/::aisl aisl_content=https://aishippinglabs.com/blog/what-does-an-ai-engineer-do::aisl relay_health=https://relay.datatalks.club/health/::relay website_home=https://datatalks.club/::website website_events_past=https://datatalks.club/events/past::website hub_home=https://hub.dtcdev.click/::hub ops_home=https://ops.dtcdev.click/::ops dapier_home=https://dapier.dtcdev.click/::dapier}"
 LATENCY_PUSH_ENABLED="${LATENCY_PUSH_ENABLED:-1}"
 LATENCY_PUSH_URL="${LATENCY_PUSH_URL:-http://10.100.0.1:8429/api/v1/import/prometheus}"
 LATENCY_PUSH_SSH_HOST="${LATENCY_PUSH_SSH_HOST:-contabo-a}"
