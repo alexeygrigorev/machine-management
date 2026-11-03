@@ -309,7 +309,7 @@ worktree_lock_state() {
 report_tmp=$(mktemp "$REPORT_DIR/rmthz-disk-gc.XXXXXX")
 trap 'rm -f -- "$report_tmp"' EXIT
 {
-  printf 'RMTHZ disk GC dry-run %s\nTrigger: %s\n' "$(date -u +%FT%TZ)" "$TRIGGER"
+  printf 'RMTHZ disk GC mode=%s %s\nTrigger: %s\n' "$MODE" "$(date -u +%FT%TZ)" "$TRIGGER"
   df -h / | tail -n 1
   printf '\n%-10s %10s  %-38s %s\n' ACTION SIZE REASON PATH
 } > "$report_tmp"
