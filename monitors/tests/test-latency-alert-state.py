@@ -144,7 +144,9 @@ probe; [[ $(grep -c '^Subject:' "$MAIL_LOG") == 3 ]]
         self.both(r'''
 probe; NOW=100600; probe
 probe_latency p2 https://127.0.0.1/ cmp
-p2="${state_file/p1/p2}"
+p2="${STATE_DIR}/latency-p2"
+[[ "$SCRIPT_NAME" == coolify-healthcheck.sh ]] && p2+="-latency"
+p2+=".state"
 grep -q '^LAST_ALERT=0$' "$p2"
 grep -q '^FIRST_EXCEED=100600$' "$p2"
 ''')
