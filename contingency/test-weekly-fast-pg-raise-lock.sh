@@ -129,10 +129,14 @@ fi
 
 run_cron_cmd() { # $1 = output file; rest of RUN via bash -c
   local out="$1"
+  # The installed cron uses Alexey's absolute home path. Redirect that path
+  # into this test's temporary home so the fixture works on hosted runners.
+  local runtime_cmd
+  runtime_cmd="$(printf '%s' "$RUN_UNDER_TEST" | sed "s|/home/alexey/.local/state/dr-fast-pg-raise|$FAKEHOME/.local/state/dr-fast-pg-raise|g")"
   env -i PATH="$SHIM:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     HOME="$FAKEHOME" LOCK="$T/weekly.lock" STUB_DIR="$T" \
     RAISE_SH="$RAISE_STUB" PUSH_SH="$PUSH_STUB" \
-    bash -c "$RUN_UNDER_TEST" >"$out" 2>&1
+    bash -c "$runtime_cmd" >"$out" 2>&1
 }
 
 # --- test 1: cron command actually executes the raise ---
