@@ -22,6 +22,8 @@ with tempfile.TemporaryDirectory(prefix='proxy-installers-') as temporary:
         ('monitors/coolify-proxy-networks.sh', 'monitor.sh'),
         ('monitors/coolify-proxy-networks.cron', 'monitor.cron'),
         ('monitors/coolify-proxy-networks.env.example', 'monitor.env'),
+        ('monitors/relay-alert-lib.sh', 'relay-alert-lib.sh'),
+        ('monitors/ops-daily-digest.sh', 'ops-daily-digest.sh'),
     ]:
         (root / 'staging' / target).write_bytes((repo / source).read_bytes())
     env_path = root / 'etc/coolify-proxy-networks.env'
@@ -54,8 +56,10 @@ with tempfile.TemporaryDirectory(prefix='proxy-installers-') as temporary:
     print('PASS: keeper installation executes apply and produces log evidence')
     migrated = env_path.read_text()
     assert 'ALERT_TO=dev@dtcdev.click' in migrated
-    assert 'ALERT_FROM=alerts@dtcdev.click' in migrated
-    assert 'ALERT_MSMTP_ACCOUNT=alerts' in migrated
+    assert f'RELAY_MONITOR_CONFIG={root}/etc/relay-monitors.toml' in migrated
+    assert 'ALERT_FROM=' not in migrated
+    assert 'ALERT_FROM_NAME=' not in migrated
+    assert 'ALERT_MSMTP_ACCOUNT=' not in migrated
     assert str(root / 'var/lib/coolify-proxy-networks') in migrated
     assert (env_path.stat().st_mode & 0o777) == 0o600
     print('PASS: legacy env migrates sender/state while preserving recipient and permissions')
