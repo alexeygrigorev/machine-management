@@ -98,9 +98,20 @@ cat >"$SHIM/guardbin/docker" <<'EOF'
 exit 0
 EOF
 chmod +x "$SHIM/guardbin/docker"
+# The restore helper validates these inputs before running its host guards.
+# Give the guard test a harmless passphrase-file placeholder and stub external
+# tools so the refusal is tested consistently on minimal CI runners.
+: >"$SHIM/restore-passphrase"
+for bin in aws gpg gunzip; do
+  cat >"$SHIM/guardbin/$bin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SHIM/guardbin/$bin"
+done
 # NB: the helper correctly exits 1 on guard refusal; capture output first so
 # pipefail does not turn the expected refusal into a failed condition.
-GUARD_OUT="$(PATH="$SHIM/guardbin:$PATH" bash "$CONT/coolify-cp-restore.sh" --host-id x 2>&1 || true)"
+GUARD_OUT="$(CP_RESTORE_PASSPHRASE="$SHIM/restore-passphrase" PATH="$SHIM/guardbin:$PATH" bash "$CONT/coolify-cp-restore.sh" --host-id x 2>&1 || true)"
 if echo "$GUARD_OUT" | grep -q 'live coolify-db'; then
   pass "T5b restore refuses live coolify-db"
 else
