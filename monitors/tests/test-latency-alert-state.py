@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production latency functions with a controlled clock and offline MTAs."""
+"""Exercise production latency functions with a controlled clock and offline senders."""
 import os
 from pathlib import Path
 import re
@@ -21,12 +21,40 @@ class LatencyStateTest(unittest.TestCase):
             match = re.search(r"^" + name + r"\(\) \{.*?^\}", source, re.M | re.S)
             self.assertIsNotNone(match, name)
             functions.append(match.group())
+        helper = (MONITORS / "relay-alert-lib.sh").read_text()
+        for name in ("relay_sanitize_body", "relay_send_alert"):
+            match = re.search(r"^" + name + r"\(\) \{.*?^\}", helper, re.M | re.S)
+            self.assertIsNotNone(match, name)
+            functions.append(match.group())
         with tempfile.TemporaryDirectory(prefix="latency-state-") as tmp:
             root = Path(tmp)
             (root / "msmtp").write_text(
                 '#!/bin/bash\ncat >> "$MAIL_LOG"\n'
                 'printf "%s\\n" "$*" >> "$MAIL_ARGS"\nexit "${MAIL_RC:-0}"\n')
             (root / "msmtp").chmod(0o700)
+            (root / "datamailer").write_text('''#!/bin/bash
+set -euo pipefail
+args="$*"; from=""; to=""; subject=""
+while (($#)); do
+  case "$1" in
+    --from) from="$2"; shift 2 ;;
+    --to) to="$2"; shift 2 ;;
+    --subject) subject="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ "$from" == alerts ]]
+{
+  echo 'From: DTC Alerts <alerts@dtcdev.click>'
+  echo "To: $to"
+  echo "Subject: $subject"
+  echo
+  cat
+} >> "$MAIL_LOG"
+printf '%s\\n' "$args" >> "$MAIL_ARGS"
+exit "${MAIL_RC:-0}"
+''')
+            (root / "datamailer").chmod(0o700)
             harness = r'''
 set -euo pipefail
 log() { echo "$*"; }
@@ -50,7 +78,9 @@ state_file+=".state"
 probe() { FAILED=0; probe_latency p1 https://127.0.0.1/ cmp; }
 '''
             env = {**os.environ, "PATH": tmp + ":/usr/bin:/bin", "CASE_DIR": tmp,
-                   "MAIL_LOG": tmp + "/mail", "MAIL_ARGS": tmp + "/args",
+           "MAIL_LOG": tmp + "/mail", "MAIL_ARGS": tmp + "/args",
+                   "DATAMAILER_BIN": tmp + "/datamailer",
+                   "RELAY_MONITOR_CONFIG": tmp + "/relay.toml",
                    "SCRIPT_NAME": script}
             result = subprocess.run(["bash"], input="\n".join(functions) + harness + body,
                                     text=True, env=env, capture_output=True, timeout=15)
@@ -68,7 +98,12 @@ NOW=100599; probe; [[ ! -s "$MAIL_LOG" ]]
 NOW=100600; probe; [[ "$FAILED" == 1 ]]
 [[ $(grep -c '^Subject:.* FAIL ' "$MAIL_LOG") == 1 ]]
 [[ $(grep -c '^To: latency@invalid.test$' "$MAIL_LOG") == 1 ]]
-grep -q -- '-f alerts@dtcdev.click -- latency@invalid.test' "$MAIL_ARGS"
+grep -q '^From: DTC Alerts <alerts@dtcdev.click>$' "$MAIL_LOG"
+if [[ "$SCRIPT_NAME" == coolify-healthcheck.sh ]]; then
+  grep -q -- 'send --from alerts --to latency@invalid.test' "$MAIL_ARGS"
+else
+  grep -q -- '-f alerts@dtcdev.click -- latency@invalid.test' "$MAIL_ARGS"
+fi
 ! grep -q production@invalid.test "$MAIL_LOG"
 NOW=104199; probe
 [[ $(grep -c '^Subject:.* FAIL ' "$MAIL_LOG") == 1 ]]

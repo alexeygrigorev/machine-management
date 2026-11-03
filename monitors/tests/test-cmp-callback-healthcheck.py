@@ -22,14 +22,43 @@ class CallbackHealthcheckTests(unittest.TestCase):
             msmtp = tmp / 'msmtp'
             msmtp.write_text('#!/bin/sh\ncat >> "$MAIL_FILE"\n')
             msmtp.chmod(0o755)
+            datamailer = tmp / 'datamailer'
+            datamailer.write_text('''#!/bin/bash
+set -euo pipefail
+args="$*"; from=""; to=""; subject=""
+while (($#)); do
+  case "$1" in
+    --from) from="$2"; shift 2 ;;
+    --to) to="$2"; shift 2 ;;
+    --subject) subject="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ "$from" == alerts ]]
+{
+  echo 'From: DTC Alerts <alerts@dtcdev.click>'
+  echo "To: $to"
+  echo "Subject: $subject"
+  echo
+  cat
+} >> "$MAIL_FILE"
+printf '%s\\n' "$args" >> "$MAIL_ARGS"
+''')
+            datamailer.chmod(0o755)
             env = dict(os.environ, PATH=f'{tmp}:/usr/bin:/bin',
+                       DATAMAILER_BIN=str(datamailer),
+                       RELAY_MONITOR_CONFIG=str(tmp / 'relay.toml'),
                        COOLIFY_HEALTHCHECK_ENV_FILE=str(tmp / 'absent'),
                        STATE_DIR=str(tmp / 'state'), LOCK_FILE=str(tmp / 'lock'),
                        PG_SHARED_CONTAINER='shared', PG_RELAY_CONTAINER='relay',
                        SKIP_PG_SHARED='1', SKIP_PG_RELAY='1', SKIP_DISK_CHECK='1',
-                       SKIP_BACKUP_CHECKS='1', SKIP_CREATED_CHECK='1', APP_URLS='', CONTENT_CHECKS='',
+                       SKIP_BACKUP_CHECKS='1', SKIP_CREATED_CHECK='1',
+                       SKIP_PUBLIC_HTTP_CHECKS='1', LATENCY_PROBES='', LATENCY_PUSH_ENABLED='0',
+                       APP_URLS='', CONTENT_CHECKS='',
                        CHECK_CMP_CALLBACKS='1' if enabled else '0',
-                       COUNTS=counts, DB_RC=str(db_rc), MAIL_FILE=str(tmp / 'mail'))
+                       ALERT_TO='dev@dtcdev.click', ALERT_OPS_TO='dev@dtcdev.click',
+                       COUNTS=counts, DB_RC=str(db_rc), MAIL_FILE=str(tmp / 'mail'),
+                       MAIL_ARGS=str(tmp / 'mail-args'))
             result = subprocess.run(['bash', str(ROOT / 'monitors/coolify-healthcheck.sh')],
                                     env=env, capture_output=True, text=True)
             mails = (tmp / 'mail').read_text() if (tmp / 'mail').exists() else ''
