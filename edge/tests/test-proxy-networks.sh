@@ -196,23 +196,35 @@ grep -q "metrics.prometheus" "$METRICS" || T5_OK=0
 grep -q "127.0.0.1:8082" "$METRICS" || T5_OK=0
 if [[ "$T5_OK" == "1" ]]; then pass "T5 metrics installer preserves proxy nets + keeps metrics"; else fail "T5 metrics installer"; fi
 
-# ---- T6: monitor detached FAILs dev@-only, attached OK ----
+# ---- T6: monitor detached FAILs dev@-only through Relay, attached OK ----
 mkdir -p "$TMP/mstate"
-cat > "$TMP/stubbin/sendmail" <<'EOF'
+cat > "$TMP/stubbin/datamailer" <<'EOF'
 #!/usr/bin/env bash
-cat > /dev/null
-exit 0
+set -euo pipefail
+[[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
+[[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
+{
+  printf 'ARGS: %s\n' "$*"
+  cat
+  printf '\n---END---\n'
+} >> "$RELAY_CALLS"
+exit "${STUB_MAIL_RC:-0}"
 EOF
-chmod +x "$TMP/stubbin/sendmail"
-cp "$TMP/stubbin/sendmail" "$TMP/stubbin/msmtp"
+chmod +x "$TMP/stubbin/datamailer"
+export DATAMAILER_BIN="$TMP/stubbin/datamailer"
+export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
+export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
+export RELAY_CALLS="$TMP/relay-calls"
+: > "$RELAY_CALLS"
 set +e
 STUB_PROXY_NETS="coolify" STUB_WANT_NET="qjnpmney8j8ehfuqcmzpjtzt" \
   COOLIFY_PROXY_NETWORKS_ENV_FILE=/nonexistent STATE_DIR="$TMP/mstate" LOCK_FILE="$TMP/mlock" \
-  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
+  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$MONITOR" > "$TMP/m1.out" 2>&1; rc=$?
 set -e
 M1="$(cat "$TMP/m1.out"; echo; cat "$TMP/mstate"/proxy-networks.state 2>/dev/null || true)"
-if [[ $rc -ne 0 && "$M1" == *"FAIL check=proxy-networks"* && "$M1" == *"STATUS=FAIL"* && "$M1" == *"to=dev@dtcdev.click"* ]]; then
+if [[ $rc -ne 0 && "$M1" == *"FAIL check=proxy-networks"* && "$M1" == *"STATUS=FAIL"* && "$M1" == *"via=relay"* && "$M1" == *"to=dev@dtcdev.click"* ]] \
+  && grep -q '^ARGS: send --from alerts --to dev@dtcdev.click --subject .*FAIL' "$RELAY_CALLS"; then
   pass "T6a monitor detached FAILs, dev@-only state"
 else
   fail "T6a monitor detached (rc=$rc) -- $M1"
@@ -220,10 +232,11 @@ fi
 set +e
 STUB_PROXY_NETS="coolify qjnpmney8j8ehfuqcmzpjtzt" STUB_WANT_NET="qjnpmney8j8ehfuqcmzpjtzt" \
   COOLIFY_PROXY_NETWORKS_ENV_FILE=/nonexistent STATE_DIR="$TMP/mstate" LOCK_FILE="$TMP/mlock" \
-  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click ALERT_FROM=noreply@test \
+  RECOVER_NOTIFY_MIN_SEC="${TEST_RECOVER_MIN_SEC:-0}" ALERT_TO=dev@dtcdev.click \
   PATH="$TMP/stubbin:/usr/bin:/bin" bash "$MONITOR" > "$TMP/m2.out" 2>&1; rc=$?
 set -e
-if [[ $rc -eq 0 && "$(cat "$TMP/m2.out")" == *"ALL_OK"* ]]; then
+if [[ $rc -eq 0 && "$(cat "$TMP/m2.out")" == *"ALL_OK"* && "$(cat "$TMP/m2.out")" == *"via=relay"* ]] \
+  && grep -q '^ARGS: send --from alerts --to dev@dtcdev.click --subject .*RECOVERED' "$RELAY_CALLS"; then
   pass "T6b monitor attached ALL_OK (+RECOVERED path)"
 else
   fail "T6b monitor attached (rc=$rc) -- $(cat "$TMP/m2.out")"
