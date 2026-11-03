@@ -9,7 +9,7 @@
 1. Takes **fresh** `pg_dump -Fc` from live Contabo Coolify Postgres (`pg-shared`: cmp/aisl/website, `pg-relay`: relay) via `sudo docker exec`.
 2. SCPs dumps to Hetzner, stages as `~/tmp/pg-fast-raise-weekly/dumps/<db>.dump`.
 3. Runs timed `contingency/fast-pg-raise.sh` on **loopback only** (`127.0.0.1:55439`, container `pg-fast-raise-weekly`, `Restart=no`).
-4. Pushes metrics via `contingency/push-dr-raise-metrics.sh`: **direct** POST to Hetzner-local VM (`$VM_URL`, default `http://127.0.0.1:8428`, 400d retention) **plus** SSH relay to contabo-a localhost import (until the contabo-a check migrates; its hot VM keeps ~2d so a weekly sample expires before the 8d window — root cause of the 2026-10-29 false stale alert; format was fine, HTTP 204). `VM_SSH=""` skips the remote leg (tests/local-only, no Contabo contact).
+4. Pushes metrics via `contingency/push-dr-raise-metrics.sh`: **direct** POST to Hetzner-local VM (`$VM_URL`, default `http://127.0.0.1:8428`, 400d retention) **plus** SSH relay to contabo-a for its obs VMUI. The 2026-10-29 false stale alert came from the checker querying Contabo's ~2d VM before the mirror was in place; the weekly push was correctly formatted (HTTP 204). The authoritative stale-check now runs on Hetzner against the 400d source VM. `VM_SSH=""` skips the remote leg (tests/local-only, no Contabo contact).
 5. Tears down the throwaway container/volume (`TEARDOWN=1` default).
 
 **Hard guards:** no CF/DNS flip, no Coolify prod restart, no RDS touch. Distinct port from one-shot drills (`:55437` t1037u, `:55438` t1118u).
@@ -67,10 +67,11 @@ Note: VM default `search.latencyOffset` ≈ 30s — wait briefly after push befo
 
 ## Alert
 
-`monitors/dr-raise-stale-check.sh` on **contabo-a** (also runnable on Hetzner
-against the local VM for verification: `DRY_RUN=1 bash
-monitors/dr-raise-stale-check.sh` — queries only, sends no mail, changes no
-state):
+`monitors/dr-raise-stale-check.sh` on **Hetzner**, querying the local 400d
+source VM (the old Contabo schedule was disabled on 2026-11-03 because it ran
+an obsolete script against the 2d VM). For read-only verification, run
+`DRY_RUN=1 bash monitors/dr-raise-stale-check.sh` — queries only, sends no
+mail, changes no state:
 
 - Fires if metric **missing** or age **> 691200 s (~8 days)**.
 - Searches samples over `STALE_SECONDS` (`[691200s]`, equivalent to `[8d]` by
@@ -100,8 +101,8 @@ sudo ./contingency/install-weekly-fast-pg-raise.sh   # stable copy + weekly + mi
 sudo ./monitors/install-dr-raise-stale-check.sh       # stale-check cron + env (no secrets)
 cat /usr/local/lib/dr-fast-pg-raise/REVISION          # deployed SHA
 
-# contabo-a: legacy stale-check copy left installed (68147e6c follow-up);
-# no Contabo-side install from here.
+# Contabo's obsolete stale-check cron was disabled on 2026-11-03; the
+# authoritative scheduled check is on Hetzner against its local 400d VM.
 ```
 
 Manual one-shot (does not conflict with t1118u ports):
