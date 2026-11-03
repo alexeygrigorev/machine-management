@@ -63,16 +63,27 @@ origin `origin.relay.datatalks.club`) and `E35QPYDA1452SA`
 Contabo-b `/data/coolify/proxy/dynamic/origin-enforce.yml` allow routers
 `origin-relay-allow-*`, `origin-relaypub-allow-*` (prod) and
 `origin-relaydev-allow-*`, `origin-relaydevpub-allow-*` (dev), plus
-`origin-verify-canary.yml` (canary proof only); no app/env/Coolify env or
-monitor sends the header (monitors check public health only); prod-website
+`origin-verify-canary.yml` (`origin-verify-canary-allow` uses the Relay
+production header); no app/env/Coolify env or monitor sends the header
+(monitors check public health only); prod-website
 `E1VNMGFFIXBOXX` and dev-website `E33FS79KPFSAOM` use distinct values.
 
 Procedure (operator box Hetzner RMTHZ; use only an explicitly authorized MAIN
 AWS session through AWS Gate. Never use `main-temp` for this rotation.):
 
-1. Backup: `ssh contabo-b 'sudo cp -a /data/coolify/proxy/dynamic/origin-enforce.yml /data/coolify/proxy/dynamic/origin-enforce.yml.bak-YYYYMMDD-rotate && sudo chmod 0600 ...bak...'` (0600 on host).
+1. Back up both `origin-enforce.yml` and `origin-verify-canary.yml` on
+   contabo-b before editing. Keep timestamped backups at mode `0600` on the
+   host.
 2. Generate one new 48-char alnum value per side (prod, dev) into 0600 files, env vars only (never print/log/commit; e.g. `python3 -c "import secrets,string;..."`).
-3. Dual-accept first: edit each allow router to accept old OR new (`Header(old) || Header(new)`), keep deny routers, `install -m 0600`, wait 5s, check `docker logs coolify-proxy` for origin errors. Verify direct origin: no-header 403, old 200, new 200, wrong 403 on http+https for all four hostnames; public health 200.
+3. Dual-accept first: in `origin-enforce.yml`, edit each live Relay allow
+   router to accept old OR new (`Header(old) || Header(new)`) for its side,
+   keeping the deny routers. Also change
+   `origin-verify-canary.yml`'s `origin-verify-canary-allow` to accept old OR
+   new production headers. Install both files at mode `0600`, wait 5s, and
+   check `docker logs coolify-proxy` for origin errors. Verify direct live
+   origin requests without a header return 403, old and new return 200, and a
+   wrong value returns 403 for HTTP and HTTPS on all four Relay hostnames.
+   Verify the HTTP canary route the same way. Public health must return 200.
 4. Switch CloudFront to the new value one distribution at a time, dev first:
    read-modify-write only the target distribution's origin CustomHeader using
    `get-distribution-config` + `update-distribution` and its ETag. Keep config
@@ -81,7 +92,16 @@ AWS session through AWS Gate. Never use `main-temp` for this rotation.):
    each distribution to reach `Deployed`, then verify public health 200 and
    direct origin with the new value returns 200. The current Terraform roots
    are tombstoned, so do not use Terraform for this rotation.
-5. Single-accept only new: remove old `Header()` alternative, reinstall 0600, verify no-header 403, old 403, new 200, public 200. Keep host backups 0600.
+5. Single-accept only new after both distributions are deployed and verified:
+   remove the old `Header()` alternative from every live Relay allow router in
+   `origin-enforce.yml`, and remove it from the canary allow router in
+   `origin-verify-canary.yml` (the canary keeps only the new production-side
+   value). Reinstall both files at mode `0600`. Verify direct live origin
+   requests without a header, with the old value, or with a wrong value return
+   403; the corresponding new value returns 200. Verify the canary route
+   rejects no-header, old, and wrong-value requests and accepts only the new
+   production value. Verify both public health URLs still return 200. Keep
+   host backups at mode `0600`.
 6. If a future Terraform root manages either live distribution, or an
    out-of-band update could conflict with a pending apply, STOP after step 3
    and record the exact scoped CloudFront change needed for Alexey. Do not run
