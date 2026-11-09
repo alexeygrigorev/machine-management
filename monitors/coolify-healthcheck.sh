@@ -180,6 +180,9 @@ ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"
 ALERT_MSMTP_ACCOUNT="${ALERT_MSMTP_ACCOUNT:-alerts}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-60}"
 DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ops-daily-digest.sh}"
+# One incident per service (t2813u/t2814u): grouping, hysteresis, dev = no mail.
+# shellcheck source=incident-gate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/incident-gate.sh"
 
 strip_personal_recipients() {
   local raw="${1// /,}" tok
@@ -207,11 +210,6 @@ enqueue_digest() {
       "$DIGEST_SCRIPT" --enqueue "coolify-healthcheck" "$chk" "$lvl" "$msg" 2>/dev/null || true
   fi
 }
-# Suppress RECOVERED mail when the FAIL lasted shorter than this many seconds
-# (t1273u/t1274u: cut rapid FAIL→RECOVERED pair spam for one-tick flakes).
-# FAIL itself still pages immediately — do NOT raise FAIL_STREAK for prod HTTP
-# (AISHL Coolify replace 503 must remain visible until zero-downtime is fixed).
-RECOVER_NOTIFY_MIN_SEC="${RECOVER_NOTIFY_MIN_SEC:-600}"
 # When 1, skip APP_URLS + CONTENT_CHECKS that hit public hostnames (dedupe:
 # only one Contabo node should page for the same public URL). Keep local
 # checks (127.0.0.1 / 10.100.0.x). Set on contabo-a; leave 0 on contabo-b.
@@ -270,6 +268,27 @@ send_alert() {
       SEND_ALERT_DELIVERED=1
       return 0  # still failing, recently alerted — dedupe
     fi
+  fi
+  if [[ "$is_recovery" -eq 0 && "$subject" != WARN* && "${DRILL_MODE:-0}" != "1" && "${TEST_MODE:-0}" != "1" \
+        && "$name" != *DRILL* && "$name" != *TEST* && "$name" != latency-* ]]; then
+    if [[ "$(incident_class "$name")" == dev ]]; then
+      incident_dev_note "$name" "$subject" "$body"
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\n' "$NOW" "${FAIL_SINCE:-$NOW}" > "$state_file"
+      SEND_ALERT_DELIVERED=1
+      return 0
+    fi
+    local svc verdict
+    svc="$(incident_service "$name")"
+    verdict="$(incident_fail "$svc" "$name")"
+    if [[ "$verdict" != send ]]; then
+      log "HOLD check=${name}: part of service incident '${svc}' (one FAIL mail per incident; flap/duplicate held)"
+      local fs="${FAIL_SINCE:-0}"; [[ "$last_status" == "FAIL" && "$fs" -gt 0 ]] || fs="$NOW"
+      printf 'STATUS=FAIL\nLAST_ALERT=0\nFAIL_SINCE=%s\n' "$fs" > "$state_file"
+      SEND_ALERT_DELIVERED=1
+      return 0
+    fi
+    body="Incident: service '${svc}' (first failing check: ${name}). Sibling checks of this service fail into the same incident without extra mail; one RECOVERED follows after 5 min green.
+${body}"
   fi
   local full_subject="[coolify-healthcheck] ${subject} (${name})"
   local sent="no"
@@ -368,9 +387,9 @@ send_alert() {
 }
 
 mark_ok() {
-  # $1=check-name — sends RECOVERED if previous state was FAIL AND the outage
-  # lasted at least RECOVER_NOTIFY_MIN_SEC (t1273u: mute rapid recover spam).
-  # Short flaps still leave STATUS=OK silently; FAIL already paged if it fired.
+  # $1=check-name. Per-check state goes OK at once; the single RECOVERED mail
+  # for the service incident goes out only after INCIDENT_GREEN_SEC (5 min) of
+  # continuous green across every check of that service (incident-gate.sh).
   local name="$1"
   local state_file="${STATE_DIR}/${name}.state"
   local last_status="" fail_since=0
@@ -380,19 +399,22 @@ mark_ok() {
     last_status="${STATUS:-}"
     fail_since="${FAIL_SINCE:-0}"
   fi
-  if [[ "$last_status" == "FAIL" ]]; then
-    local dur=0
-    if [[ "$fail_since" =~ ^[0-9]+$ && "$fail_since" -gt 0 ]]; then
-      dur=$(( NOW - fail_since ))
-    fi
-    if [[ "$dur" -ge "$RECOVER_NOTIFY_MIN_SEC" ]]; then
-      send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ') (was FAIL for ${dur}s)."
-    else
-      log "OK check=${name}: recovered after ${dur}s (< RECOVER_NOTIFY_MIN_SEC=${RECOVER_NOTIFY_MIN_SEC}) — suppressing RECOVERED mail"
-      printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
-    fi
+  local svc verdict="none"
+  svc="$(incident_service "$name")"
+  if [[ "$(incident_class "$name")" == dev ]]; then
+    [[ "$last_status" == "FAIL" ]] && incident_dev_note "$name" RECOVERED "Check '${name}' is green again."
   else
-    printf 'STATUS=OK\nLAST_ALERT=%s\nFAIL_SINCE=0\n' "${LAST_ALERT:-0}" > "$state_file"
+    # Called every run, not only on FAIL->OK: the green clock must keep ticking.
+    verdict="$(incident_green "$svc" "$name")"
+  fi
+  printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
+  if [[ "$verdict" == recover ]]; then
+    local since dur=0
+    since="$(incident_open_since "$svc")"
+    [[ "$since" =~ ^[0-9]+$ && "$since" -gt 0 ]] && dur=$(( NOW - since ))
+    send_alert "svc-${svc}" "RECOVERED" "Service '${svc}' incident closed at $(date -u '+%Y-%m-%dT%H:%M:%SZ'): all checks green for $(( INCIDENT_GREEN_SEC / 60 )) min (incident lasted ${dur}s)."
+  elif [[ "$verdict" == hold ]]; then
+    log "OK check=${name}: green, service '${svc}' incident held open until ${INCIDENT_GREEN_SEC}s of continuous green"
   fi
 }
 
