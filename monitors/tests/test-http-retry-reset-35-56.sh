@@ -6,7 +6,7 @@ SCRIPT="$(cd "$HERE/../.." && pwd)/monitors/coolify-healthcheck.sh"
 PASS=0; FAILN=0
 pass(){ PASS=$((PASS+1)); echo "PASS: $1"; }
 fail(){ FAILN=$((FAILN+1)); echo "FAIL: $1"; }
-grep -qF "RECOVER_NOTIFY_MIN_SEC" "$SCRIPT" && grep -qE "RECOVER_NOTIFY_MIN_SEC:-600" "$SCRIPT" && pass "recover 600 kept" || fail "recover 600"
+grep -qE "INCIDENT_GREEN_SEC:-300" "$(dirname "$SCRIPT")/incident-gate.sh" && pass "5-min green recovery kept" || fail "recover 300"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"; export TEST_MAIL="$TMP/mail"
 printf "#!/usr/bin/env bash\ncat >> \"\$TEST_MAIL\"\n" > "$TMP/bin/msmtp"
