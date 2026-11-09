@@ -387,11 +387,11 @@ fi
 
 # ---- D22: real check RECOVERED routes to ops-only (never alexey@ / T_ALARM) (t1885u) ----
 SD22="$(mktemp -d -p "$TMP")"
-out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
+out=""; set +e; out="$(STUB_DM_SSH_FAIL=node-b run_dm 'node-a node-b' 'svc=https://example.test/bad::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
 row22_fail="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
-out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/good::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
+out=""; set +e; out="$(INCIDENT_GREEN_SEC=0 run_dm 'node-a node-b' 'svc=https://example.test/good::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
 row22_rec="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
-if [[ "$row22_fail" == *"$T_ALARM"* && "$row22_rec" == *"RECOVERED (ext-svc)"* && "$row22_rec" == *"$T_OPS"* && "$row22_rec" != *"$T_ALARM"* ]]; then
+if [[ "$row22_fail" == *"$T_ALARM"* && "$row22_rec" == *"RECOVERED (svc-svc)"* && "$row22_rec" == *"$T_OPS"* && "$row22_rec" != *"$T_ALARM"* ]]; then
   pass "D22 real check FAIL pages ALERT_TO; RECOVERED routes to ALERT_OPS_TO only"
 else
   fail "D22 RECOVERED routing (fail=[$row22_fail] rec=[$row22_rec])"
@@ -405,6 +405,26 @@ if grep -rq 'datatalks\.club' "$TMP" 2>/dev/null; then
   fail "D21 real datatalks.club recipient leaked into captured mail/stubs"
 else
   pass "D21 no real datatalks.club recipient anywhere in captured mail"
+fi
+
+
+# ---- D23: one incident = one mail (t2813u/t2814u) ----
+SD23="$(mktemp -d -p "$TMP")"
+out="$(run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD23" 0 || true)"
+if [[ ! -s "$SD23/mail/sent.tsv" ]] && grep -q 'HOLD check=ext-svc' <<<"$out"; then
+  pass "D23 external URL FAIL with healthy nodes sends no deadman mail (healthcheck owns the page)"
+else
+  fail "D23 ext FAIL with healthy nodes mailed or not held -- $out"
+fi
+SD24="$(mktemp -d -p "$TMP")"
+out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 || true)"
+n24a="$(wc -l < "$SD24/mail/sent.tsv")"
+out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 || true)"
+n24b="$(wc -l < "$SD24/mail/sent.tsv")"
+if [[ "$n24a" -eq 2 && "$n24b" -eq 2 ]]; then
+  pass "D24 provider outage: node FAIL + URL FAIL page once each, repeat runs add no mail"
+else
+  fail "D24 counts first=$n24a second=$n24b"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

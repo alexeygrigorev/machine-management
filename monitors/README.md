@@ -12,7 +12,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | Cron | `*/5 * * * *` with `TZ=Europe/Berlin` (see `coolify-healthcheck.cron`) |
 | Where | **contabo-b** runs both primary PG checks, public content, AISHL jobs, and dump/WAL freshness; **contabo-a** runs local CP/obs, disk and Created-container checks. Set `SKIP_BACKUP_CHECKS=1`, `SKIP_PG_*=1` and `SKIP_PUBLIC_HTTP_CHECKS=1` on a: primary PG/backups live on b, and b owns public-content paging to avoid duplicate mail. |
 | Alternative | Coolify Scheduled Task on the node, same `*/5 * * * *` |
-| Alert to | `alexey@datatalks.club,dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; recovery notice when an outage lasted at least `RECOVER_NOTIFY_MIN_SEC`, default 600 seconds) |
+| Alert to | `alexey@datatalks.club,dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; one RECOVERED per service incident after `INCIDENT_GREEN_SEC`, default 300 s of continuous green; see *One incident = one alert*) |
 
 ## What gets checked
 
@@ -201,8 +201,8 @@ Test: `bash monitors/tests/test-coolify-proxy-networks.sh`
 
 | Host | Role | Required env skips |
 |------|------|--------------------|
-| **contabo-b** `.141` | data node: Postgres, nightly `.dump.gz`, WAL shipper; sole on-node public HTTP/content pager | public checks **ON** (`SKIP_PUBLIC_HTTP_CHECKS=0`); `RECOVER_NOTIFY_MIN_SEC=600`; backup checks **ON** (`SKIP_BACKUP_CHECKS` unset/0); `WAL_STACKS="pg-shared pg-relay"` |
-| **contabo-a** `.163` | Coolify CP + obs (VictoriaMetrics/Logs) | **`SKIP_PUBLIC_HTTP_CHECKS=1`** prevents duplicate public pages; `RECOVER_NOTIFY_MIN_SEC=600`. **`SKIP_BACKUP_CHECKS=1`** mandatory — dumps/WAL markers are not local (t1146u checks + t1209u false-FAIL storm). Prefer `SKIP_PG_SHARED=1` / `SKIP_PG_RELAY=1` when PG is docker-only on `.141`. |
+| **contabo-b** `.141` | data node: Postgres, nightly `.dump.gz`, WAL shipper; sole on-node public HTTP/content pager | public checks **ON** (`SKIP_PUBLIC_HTTP_CHECKS=0`); backup checks **ON** (`SKIP_BACKUP_CHECKS` unset/0); `WAL_STACKS="pg-shared pg-relay"` |
+| **contabo-a** `.163` | Coolify CP + obs (VictoriaMetrics/Logs) | **`SKIP_PUBLIC_HTTP_CHECKS=1`** prevents duplicate public pages. **`SKIP_BACKUP_CHECKS=1`** mandatory — dumps/WAL markers are not local (t1146u checks + t1209u false-FAIL storm). Prefer `SKIP_PG_SHARED=1` / `SKIP_PG_RELAY=1` when PG is docker-only on `.141`. |
 
 `install-coolify-healthcheck.sh` never overwrites an existing `/etc/coolify-healthcheck.env`. After install on **contabo-a**, confirm `SKIP_BACKUP_CHECKS=1` is set before enabling mail alerts.
 
@@ -502,3 +502,14 @@ Every alert rule across `monitors/` and `observability/` is classified as:
   `coolify-healthcheck.sh` auto-skip when `SKIP_BACKUP_CHECKS` is unset and
   neither `$DUMP_DIR` nor `$WAL_STATE_DIR` exists on the host (fixing Contabo-a
   app-node false pages, intake `f4361152`).
+
+
+## One incident = one alert (t2813u/t2814u)
+
+`incident-gate.sh` is sourced by `coolify-healthcheck.sh` and `contabo-deadman.sh`.
+
+- **Grouping.** Checks fold into a service (`http-relay`, `content-relay_health`, `ext-relay_health` -> `relay`; both Contabo nodes -> `contabo`). The first FAIL of any check opens the incident and pages at once (fail-loud). Sibling FAILs are logged as `HOLD`, not mailed. Repeat reminder: `ALERT_REPEAT_MIN`.
+- **Hysteresis.** RECOVERED is mailed once, only after every check of the service has been green for `INCIDENT_GREEN_SEC` (300). A re-FAIL inside that window is the same incident. A new FAIL within `INCIDENT_FLAP_WINDOW_SEC` (900) after RECOVERED is held until it lasts `INCIDENT_FLAP_CONFIRM_SEC` (300), then pages once.
+- **Dev/staging** (`*_dev`, `*-dev`, `*_staging`) never mail: a `DEV-ALERT` log line plus one DataOps task per incident (`dataops tasks create --tags dev-alert`; `INCIDENT_TASK_CMD` overrides).
+- **Who pages what.** coolify-healthcheck (contabo-b) pages service outages. The Hetzner dead-man mails node/stale/SSH failures; its external URL probes mail only when a node check also failed in that run (provider outage). OBS `A1_https_down` stays visible but has no mail receiver (coolify-observability `obs-log` route).
+- `RECOVER_NOTIFY_MIN_SEC` is gone (replaced by the 5-min green rule).

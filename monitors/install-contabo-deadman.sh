@@ -35,6 +35,7 @@ done
 sudo install -m 0755 "$SCRIPT_SRC" "$SCRIPT"
 sudo install -m 0755 "$HERE/ops-daily-digest.sh" /usr/local/sbin/ops-daily-digest.sh
 sudo install -m 0644 "$HERE/relay-alert-lib.sh" /usr/local/sbin/relay-alert-lib.sh
+sudo install -m 0644 "$HERE/incident-gate.sh" /usr/local/sbin/incident-gate.sh
 bash -n "$SCRIPT" && echo SYNTAX_OK
 
 echo "== ssh reachability (BatchMode) =="

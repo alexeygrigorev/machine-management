@@ -142,6 +142,13 @@ flock -n 9 || { log "WARN: another dead-man run is in progress (lock: $LOCK_FILE
 
 FAILED=0
 NOW="$(date +%s)"
+# Nodes that failed their reachability/freshness check in THIS run. External URL
+# probes page only when this is > 0 (provider/node outage, where on-node checks
+# and OBS cannot speak). With both nodes healthy, coolify-healthcheck owns the
+# service page, so an app outage is one incident, not one per monitor.
+DEADMAN_NODE_BAD=0
+# shellcheck source=incident-gate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/incident-gate.sh"
 
 send_alert() {
   # $1=check-name $2=subject-suffix $3=body [$4=optional to-csv override]
@@ -164,6 +171,31 @@ send_alert() {
       SEND_ALERT_DELIVERED=1
       return 0
     fi
+  fi
+  if [[ "$is_recovery" -eq 0 && -z "$to_override" && "$name" != latency-* ]]; then
+    if [[ "$(incident_class "$name")" == dev ]]; then
+      incident_dev_note "$name" "$subject" "$body"
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\n' "$NOW" > "$state_file"
+      SEND_ALERT_DELIVERED=1
+      return 0
+    fi
+    if [[ "$name" == ext-* && "$DEADMAN_NODE_BAD" -eq 0 ]]; then
+      log "HOLD check=${name}: both Contabo nodes healthy; coolify-healthcheck owns this service's page (no deadman mail)"
+      printf 'STATUS=FAIL\nLAST_ALERT=%s\n' "$NOW" > "$state_file"
+      SEND_ALERT_DELIVERED=1
+      return 0
+    fi
+    local svc verdict
+    svc="$(incident_service "$name")"
+    verdict="$(incident_fail "$svc" "$name")"
+    if [[ "$verdict" != send ]]; then
+      log "HOLD check=${name}: part of service incident '${svc}' (one FAIL mail per incident)"
+      printf 'STATUS=FAIL\nLAST_ALERT=0\n' > "$state_file"
+      SEND_ALERT_DELIVERED=1
+      return 0
+    fi
+    body="Incident: '${svc}' (first failing check: ${name}). Sibling checks fail into this incident without extra mail; one RECOVERED follows after 5 min green.
+${body}"
   fi
   local full_subject="[contabo-deadman] ${subject} (${name})"
   local sent="no"
@@ -254,19 +286,15 @@ send_alert() {
 }
 
 mark_ok() {
-  # $1=check-name — sends RECOVERED if previous state was FAIL
-  local name="$1"
+  # $1=check-name. RECOVERED is one mail per service incident, sent only after
+  # INCIDENT_GREEN_SEC of continuous green (incident-gate.sh).
+  local name="$1" svc verdict
   local state_file="${STATE_DIR}/${name}.state"
-  local last_status=""
-  if [[ -f "$state_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$state_file" || true
-    last_status="${STATUS:-}"
-  fi
-  if [[ "$last_status" == "FAIL" ]]; then
-    send_alert "$name" "RECOVERED" "Check '${name}' is green again at $(date -u '+%Y-%m-%dT%H:%M:%SZ')." "$ALERT_OPS_TO"
-  else
-    printf 'STATUS=OK\nLAST_ALERT=%s\n' "${LAST_ALERT:-0}" > "$state_file"
+  svc="$(incident_service "$name")"
+  verdict="$(incident_green "$svc" "$name")"
+  printf 'STATUS=OK\nLAST_ALERT=0\n' > "$state_file"
+  if [[ "$verdict" == recover ]]; then
+    send_alert "svc-${svc}" "RECOVERED" "Service '${svc}' incident closed at $(date -u '+%Y-%m-%dT%H:%M:%SZ'): all checks green for $(( INCIDENT_GREEN_SEC / 60 )) min." "$ALERT_OPS_TO"
   fi
 }
 
@@ -297,7 +325,7 @@ check_node() {
   if [[ "$rc" -ne 0 ]]; then
     log "FAIL check=${name}: ssh unreachable (rc=${rc}): $(echo "$out" | head -c 200)"
     send_alert "$name" "FAIL" "Off-Contabo dead-man cannot SSH to ${host} (rc=${rc}): ${out} — node may be down or the network path broken. On-node checks cannot page while unreachable."
-    FAILED=1; return
+    DEADMAN_NODE_BAD=$(( DEADMAN_NODE_BAD + 1 )); FAILED=1; return
   fi
   last_line="${out##*$'\n'}"
   completed_at="${last_line%% *}"
@@ -305,13 +333,13 @@ check_node() {
   if [[ ! "$completed_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || ! "$epoch" =~ ^[0-9]+$ || ! "$last_line" =~ \ (ALL_OK|CHECKS_FAILED)$ ]]; then
     log "FAIL check=${name}: completed run missing/unreadable"
     send_alert "$name" "FAIL" "Dead-man reached ${host} but no completed healthcheck run is readable in ${DEADMAN_REMOTE_LOG}."
-    FAILED=1; return
+    DEADMAN_NODE_BAD=$(( DEADMAN_NODE_BAD + 1 )); FAILED=1; return
   fi
   age=$(( $(date +%s) - epoch ))
   if [[ "$age" -gt "$DEADMAN_MAX_LOG_AGE_SEC" ]]; then
     log "FAIL check=${name}: on-node checks stale — completed run age ${age}s (> ${DEADMAN_MAX_LOG_AGE_SEC}s), last='${last_line:0:120}'"
     send_alert "$name" "FAIL" "On-node healthcheck on ${host} stopped completing: ${DEADMAN_REMOTE_LOG} last completed run age ${age}s (threshold ${DEADMAN_MAX_LOG_AGE_SEC}s). Cron may be dead or a check hung — the node is up but unwatched."
-    FAILED=1; return
+    DEADMAN_NODE_BAD=$(( DEADMAN_NODE_BAD + 1 )); FAILED=1; return
   fi
   log "OK check=${name}: reachable, checks fresh (completed run age ${age}s, last='${last_line:0:100}')"
   mark_ok "$name"

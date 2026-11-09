@@ -29,6 +29,7 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
 echo "== copy healthcheck script to ${HOST} =="
 scp "${HERE}/coolify-healthcheck.sh" "${HOST}:/tmp/coolify-healthcheck.sh"
 scp "${HERE}/relay-alert-lib.sh" "${HOST}:/tmp/relay-alert-lib.sh"
+scp "${HERE}/incident-gate.sh" "${HOST}:/tmp/incident-gate.sh"
 scp "${HERE}/ops-daily-digest.sh" "${HOST}:/tmp/ops-daily-digest.sh"
 "${SSH[@]}" "$HOST" 'sudo bash -s' <<'EOF'
 set -euo pipefail
@@ -38,7 +39,8 @@ done
 install -m 0755 /tmp/coolify-healthcheck.sh /usr/local/sbin/coolify-healthcheck.sh
 install -m 0755 /tmp/ops-daily-digest.sh /usr/local/sbin/ops-daily-digest.sh
 install -m 0644 /tmp/relay-alert-lib.sh /usr/local/sbin/relay-alert-lib.sh
-rm -f /tmp/coolify-healthcheck.sh /tmp/ops-daily-digest.sh /tmp/relay-alert-lib.sh
+install -m 0644 /tmp/incident-gate.sh /usr/local/sbin/incident-gate.sh
+rm -f /tmp/coolify-healthcheck.sh /tmp/ops-daily-digest.sh /tmp/relay-alert-lib.sh /tmp/incident-gate.sh
 EOF
 
 echo "== env file (placeholders only; never overwritten) =="
