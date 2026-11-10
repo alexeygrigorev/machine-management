@@ -470,3 +470,11 @@ manifest alone does not migrate existing labels or file-provider origin routes.
 
 The drain-hook installer forces control-plane recreation so persistent PHP
 workers load a changed hook. Public applications and databases remain running.
+
+The separate CMP private-release poller uses the same private API tunnel.
+`bash deployments/install-cmp-release-poller.sh` extracts the app-owned script
+from that repository's fetched `origin/main` into an installed commit directory,
+backs up/removes only its old cron, and installs `cmp-release-poller.timer`.
+It preserves the existing release-selection and migration authority. Verify one
+service run, then start the timer. Its failure notification uses the installed
+sanitized direct-SES follower notification. Existing credentials remain private.
