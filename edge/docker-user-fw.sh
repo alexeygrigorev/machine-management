@@ -33,7 +33,7 @@ echo "== [${HOST}] installing DOCKER-USER allowlist (admin ports only) =="
 scp "${HERE}/docker-user-restore.sh" "${HOST}:/tmp/edge-docker-user-restore.sh"
 scp "${HERE}/edge-docker-user-restore.service" "${HOST}:/tmp/edge-docker-user-restore.service"
 
-"${SSH[@]}" "$HOST" OPERATOR_V4="$OPERATOR_V4" OPERATOR_V6="$OPERATOR_V6" PEER_V4="$PEER_V4" sudo -E bash -s <<'EOF'
+"${SSH[@]}" "$HOST" HOST="$HOST" OPERATOR_V4="$OPERATOR_V4" OPERATOR_V6="$OPERATOR_V6" PEER_V4="$PEER_V4" sudo -E bash -s <<'EOF'
 set -euo pipefail
 trap 'rm -f -- /tmp/edge-docker-user-restore.sh /tmp/edge-docker-user-restore.service' EXIT
 STAMP="$(date +%Y%m%dT%H%M%S%N)"
@@ -53,17 +53,17 @@ if command -v ufw >/dev/null 2>&1; then
   for path in /etc/ufw/user.rules /etc/ufw/user6.rules; do
     [[ ! -e "$path" ]] || cp -a "$path" "${path}.bak-${STAMP}"
   done
-  remove_ufw_anywhere_allow() {
-    local port="$1" number
+  remove_ufw_allow_rule() {
+    local port="$1" source_pattern="$2" number
     while true; do
-      number="$(ufw status numbered | sed -nE "/^\\[[[:space:]]*[0-9]+\\][[:space:]]+${port}\\/tcp.*ALLOW.*Anywhere/ s/^\\[[[:space:]]*([0-9]+)\\].*/\\1/p" | head -n 1)"
+      number="$(ufw status numbered | sed -nE "/^\\[[[:space:]]*[0-9]+\\][[:space:]]+${port}\\/tcp.*ALLOW.*${source_pattern}/ s/^\\[[[:space:]]*([0-9]+)\\].*/\\1/p" | head -n 1)"
       [[ -n "$number" ]] || break
       ufw --force delete "$number"
     done
   }
-  for port in 8000 6001 6002; do remove_ufw_anywhere_allow "$port"; done
+  for port in 8000 6001 6002; do remove_ufw_allow_rule "$port" 'Anywhere'; done
   if [[ "$HOST" == "contabo-a" ]]; then
-    for port in 3100 9090 9093; do remove_ufw_anywhere_allow "$port"; done
+    for port in 3100 9090 9093; do remove_ufw_allow_rule "$port" '10\.100\.0\.0/24'; done
   fi
 fi
 
