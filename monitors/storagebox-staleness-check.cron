@@ -14,7 +14,7 @@
 # (/usr/local/sbin/storagebox-staleness-check.sh) — never at a worktree path.
 #
 # Threshold: 36h (STALE_SECONDS=129600) — pages
-# alexey@datatalks.club,dev@dtcdev.click via msmtp `alerts` account.
+# dev@dtcdev.click via msmtp `alerts` account.
 
 CRON_TZ=Europe/Berlin
 0 6,18 * * * /usr/local/sbin/storagebox-staleness-check.sh >> /home/alexey/.local/state/storagebox-sync/staleness.log 2>&1

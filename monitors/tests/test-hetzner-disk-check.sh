@@ -25,7 +25,7 @@ fi
 check_grep() {
   if grep -qF "$2" "$1"; then pass "$3"; else fail "$3 (missing: $2)"; fi
 }
-check_grep "$SCRIPT" 'ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"' "T2a prod recipients default"
+check_grep "$SCRIPT" 'ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"' "T2a prod recipients default"
 check_grep "$SCRIPT" 'ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"' "T2b ops-only drill recipient default"
 check_grep "$SCRIPT" 'ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"' "T2c 4h dedupe default"
 check_grep "$SCRIPT" 'DISK_WARN_FREE_PCT="${DISK_WARN_FREE_PCT:-15}"' "T2d warn<15 default"

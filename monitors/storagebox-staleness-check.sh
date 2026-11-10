@@ -5,7 +5,7 @@
 # (default 36h = 129600) or missing/unparseable. Sends through Relay's
 # `alerts` sender (DTC Alerts <alerts@dtcdev.click>).
 #
-# Real findings page ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click).
+# Real findings page ALERT_TO (default dev@dtcdev.click).
 # Drills route to ALERT_OPS_TO (default dev@dtcdev.click) only.
 #
 # Env overrides (all optional):
@@ -32,7 +32,7 @@ source "${RELAY_ALERT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/relay-a
 STORAGEBOX_ROOT="${STORAGEBOX_ROOT:-$HOME/storagebox/backups}"
 LAST_SYNC_FILE="${LAST_SYNC_FILE:-$STORAGEBOX_ROOT/s3/.last-sync}"
 STALE_SECONDS="${STALE_SECONDS:-129600}"
-ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_REPEAT_MIN="${ALERT_REPEAT_MIN:-240}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/storagebox-sync}"

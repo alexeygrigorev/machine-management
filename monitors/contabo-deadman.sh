@@ -95,7 +95,7 @@ LATENCY_TTFB_RECOVER_SEC="${LATENCY_TTFB_RECOVER_SEC:-2.5}"
 LATENCY_SUSTAIN_SEC="${LATENCY_SUSTAIN_SEC:-600}"
 LATENCY_ALERT_TO="${LATENCY_ALERT_TO:-dev@dtcdev.click}"
 
-ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 # Drills (DEADMAN_FORCE_FAIL) page ops only — never Alexey (t1273u/t1274u).
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"

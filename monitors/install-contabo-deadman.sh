@@ -95,4 +95,4 @@ if [[ "$FAIL" -ne 0 ]]; then
 fi
 echo Installed. Drill later with: DEADMAN_FORCE_FAIL=1 $SCRIPT
 echo "Drill FAIL and RECOVERED use ALERT_OPS_TO (default dev@dtcdev.click) only."
-echo "Keep ALERT_TO=alexey@datatalks.club,dev@dtcdev.click for real failures."
+echo "Keep ALERT_TO=dev@dtcdev.click for real failures."
