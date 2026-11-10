@@ -190,6 +190,14 @@ class RollingTests(unittest.TestCase):
             rolling.reconcile(config, self.call, lambda c: ('dtc-website:latest', {}), True)
         self.assertEqual(self.writes, [])
 
+    def test_github_run_source_tag_requires_attempt_and_full_commit(self):
+        config = {**self.config, 'source_tag_format': 'github-run'}
+        pattern = rolling.source_image_tag_pattern(config)
+        self.assertRegex('deploy-42835507864-2-' + 'a' * 40, '^' + pattern + '$')
+        for tag in ('latest', 'deploy-42835507864-2-abcdef0', 'deploy-main-1-' + 'a' * 40):
+            with self.subTest(tag=tag):
+                self.assertNotRegex(tag, '^' + pattern + '$')
+
     def test_timestamped_source_selects_latest_healthy_web(self):
         def container(created, health, image):
             return {'Created': created, 'State': {'Health': {'Status': health}},

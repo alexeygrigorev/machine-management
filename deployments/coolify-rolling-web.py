@@ -173,10 +173,26 @@ def source_state(config):
     return container['Config']['Image'], env
 
 
+def source_image_tag_pattern(config):
+    """Return the configured immutable source tag format."""
+    if config.get('rollout_mode') == 'git-commit':
+        return r'[a-f0-9]{40}'
+    formats = {
+        'dated': r'\d{8}-\d{6}-[a-f0-9]{7,40}',
+        # AISHL deploy-dev.yml tags every image with the immutable workflow
+        # run, attempt and full Git commit SHA.
+        'github-run': r'deploy-\d+-\d+-[a-f0-9]{40}',
+    }
+    tag_format = config.get('source_tag_format', 'dated')
+    if tag_format not in formats:
+        raise ValueError('Unknown immutable source tag format')
+    return formats[tag_format]
+
+
 def reconcile(config, call, state=source_state, apply=False):
     image, env = state(config)
     git_mode = config.get('rollout_mode') == 'git-commit'
-    tag_pattern = r'[a-f0-9]{40}' if git_mode else r'\d{8}-\d{6}-[a-f0-9]{7,40}'
+    tag_pattern = source_image_tag_pattern(config)
     if not re.fullmatch(re.escape(config['image']) + ':' + tag_pattern, image):
         raise ValueError('Source image is outside the promoted immutable repository')
     app_path = '/api/v1/applications/' + config['app_uuid']
