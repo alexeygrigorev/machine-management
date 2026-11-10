@@ -7,6 +7,7 @@
       "source_uuid": "mekt9kz74fvbixla6olinuma",
       "ssh_host": "contabo-b",
       "image": "ghcr.io/ai-shipping-labs/website",
+      "source_tag_format": "github-run",
       "environment": {
         "BOOT_MODE": "web",
         "RUN_MIGRATIONS": "false",

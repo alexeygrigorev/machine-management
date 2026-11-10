@@ -70,9 +70,11 @@ Each minute the follower:
 
 1. Inspects the source container over SSH. If it is absent/unhealthy, public
    web stays on its current release.
-2. Requires an immutable dated tag in the first three apps' expected image
-   repository. For the website, require the healthy source's `dtc-website`
-   image tag to be a full Git commit and pin the native Dockerfile build to it.
+2. Requires an immutable tag in the expected image repository. AISHL's
+   `deploy-dev.yml` tags include the GitHub run ID, attempt, and full commit
+   SHA; Relay and CMP use dated tags. For the website, require the healthy
+   source's `dtc-website` image tag to be a full Git commit and pin the native
+   Dockerfile build to it.
 3. Verifies the control-plane drain-hook checksum and refuses native settings
    that prevent health-gated rolling replacement.
 4. Skips queued/running deployments and makes no writes when already in sync.
