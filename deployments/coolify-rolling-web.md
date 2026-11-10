@@ -87,8 +87,8 @@ Its private release container still migrates before becoming healthy, so a
 new native image is not promoted before that release has booted successfully.
 The public replica never accidentally starts qcluster through the legacy
 `RUN_MIGRATIONS=false` dispatch. Existing worker ownership remains unchanged.
-CMP's image also migrates on boot; this happens beside the old public replica
-before health passes. All releases must use backward-compatible migrations.
+CMP public replicas force `CMP_RUN_MIGRATIONS=0`; only the private release web
+runs migrations. All releases must use backward-compatible migrations.
 
 The follower preserves native-only variables; source variable removal does
 not delete credentials. Explicit credential retirement is a separate task.
@@ -433,3 +433,15 @@ the private dated `coolify-rolling-0dt-t1287u` report under
 References: [Coolify rolling updates](https://coolify.io/docs/applications/deployments/rolling-updates),
 [Traefik load-balancer services](https://doc.traefik.io/traefik/reference/routing-configuration/http/load-balancing/service/),
 [Traefik retry middleware](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/retry/).
+
+## Installed follower service
+
+Run `bash deployments/install-rolling-follower.sh` from a merged revision. It backs
+up the installed manifest and crontab, removes the legacy follower cron, and
+installs versioned code under `~/.local/lib/coolify-rolling-web/<commit>`.
+The API uses `http://127.0.0.1:18000` through the supervised SSH tunnel to
+contabo-a loopback port 8000. No API credentials cross public HTTP.
+After accepting each public app separately, start
+`systemctl --user start coolify-rolling-web.timer`. Inspect failures with
+`journalctl --user -u coolify-rolling-web.service`; failed runs also invoke the
+independent on-host health monitor.
