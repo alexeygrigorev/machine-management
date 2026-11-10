@@ -100,7 +100,7 @@ FAILED=0
 
 # ---- 1) coolify-db dump ----
 if [[ "$CP_ROLE" == remote-node ]]; then
-  if docker inspect "$CP_DB_CONTAINER" >/dev/null 2>&1; then
+  if docker container inspect "$CP_DB_CONTAINER" >/dev/null 2>&1; then
     fail 'remote-node mode refuses to skip an existing control-plane database'
   fi
   log "dump not applicable: retired secondary control plane host=${CP_HOST_ID}; preserving host reconstruction bundle"
