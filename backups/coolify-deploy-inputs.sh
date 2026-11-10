@@ -25,6 +25,8 @@
 set -euo pipefail
 
 CP_HOST_ID="${CP_HOST_ID:-unknown-host}"
+CP_ROLE="${CP_ROLE:-control-plane}"
+[[ "$CP_ROLE" == control-plane || "$CP_ROLE" == remote-node ]] || exit 2
 CP_DB_CONTAINER="${CP_DB_CONTAINER:-coolify-db}"
 CP_DB_USER="${CP_DB_USER:-coolify}"
 CP_DB_NAME="${CP_DB_NAME:-coolify}"
@@ -40,7 +42,14 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # q <outfile> <sql> — run one allow-listed SELECT, never fail the manifest.
-q() { $CP_PSQL_CMD -c "$2" >"$WORK/$1" 2>"$WORK/$1.err" || { echo "SQL_ERROR $1" >"$WORK/$1"; }; }
+q() {
+  if [[ "$CP_ROLE" == remote-node ]]; then
+    : >"$WORK/$1"
+    [[ "$1" != counts ]] || echo 'not-applicable: remote node; authoritative metadata on primary' >"$WORK/$1"
+    return
+  fi
+  $CP_PSQL_CMD -c "$2" >"$WORK/$1" 2>"$WORK/$1.err" || { echo "SQL_ERROR $1" >"$WORK/$1"; }
+}
 
 # ---- resource metadata (allow-listed columns only) ----
 q counts "SELECT 'applications='||(SELECT count(*) FROM applications)||' services='||(SELECT count(*) FROM services)||' postgresqls='||(SELECT count(*) FROM standalone_postgresqls)||' dockers='||(SELECT count(*) FROM standalone_dockers)||' servers='||(SELECT count(*) FROM servers)||' projects='||(SELECT count(*) FROM projects)||' envs='||(SELECT count(*) FROM environments)||' private_keys='||(SELECT count(*) FROM private_keys)||' s3_storages='||(SELECT count(*) FROM s3_storages)||' env_vars='||(SELECT count(*) FROM environment_variables);"
@@ -49,11 +58,13 @@ q applications "SELECT uuid||'|'||name||'|'||coalesce(fqdn,'')||'|'||git_reposit
 q services "SELECT uuid||'|'||name||'|'||coalesce(service_type,'')||'|'||coalesce(destination_type,'')||'|'||coalesce(config_hash,'')||'|'||coalesce(length(docker_compose_raw),0) FROM services ORDER BY name;"
 # Compose-body fingerprints hashed in a pipe (content never touches disk).
 : >"$WORK/service_hashes"
+if [[ "$CP_ROLE" == control-plane ]]; then
 for svc in $($CP_PSQL_CMD -c "SELECT uuid FROM services ORDER BY name;" 2>/dev/null); do
   [[ -n "$svc" ]] || continue
   h="$($CP_PSQL_CMD -c "SELECT docker_compose_raw FROM services WHERE uuid='$svc';" 2>/dev/null | sha256sum | cut -d' ' -f1)"
   printf '%s|%s\n' "$svc" "$h" >>"$WORK/service_hashes"
 done
+fi
 q postgresqls "SELECT uuid||'|'||name||'|'||coalesce(image,'')||'|'||status||'|'||coalesce(is_public::text,'')||'|'||coalesce(public_port::text,'')||'|'||coalesce(postgres_user,'')||'|'||coalesce(postgres_db,'')||'|'||coalesce(ports_mappings,'') FROM standalone_postgresqls ORDER BY name;"
 q dockers "SELECT uuid||'|'||name FROM standalone_dockers ORDER BY name;"
 q servers "SELECT uuid||'|'||name||'|'||coalesce(ip,'')||'|'||coalesce(port::text,'')||'|'||coalesce(\"user\",'') FROM servers ORDER BY name;"
@@ -61,7 +72,8 @@ q deploys "SELECT application_name||'|'||left(commit,40)||'|'||status||'|'||upda
 
 # ---- running image digests (content-addressed repro inputs) ----
 {
-$CP_DOCKER_CMD inspect coolify --format '{{.Image}}' 2>/dev/null || echo unknown
+if [[ "$CP_ROLE" == remote-node ]]; then echo 'not-applicable: remote node'
+else $CP_DOCKER_CMD inspect coolify --format '{{.Image}}' 2>/dev/null || echo unknown; fi
 } >"$WORK/coolify_image" 2>/dev/null || echo unknown >"$WORK/coolify_image"
 {
 for c in $($CP_DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -vE '^(coolify|coolify-db|coolify-redis|coolify-proxy|coolify-sentinel|victoria|vector|lgtm|pg-shared-wg-bridge)' || true); do
@@ -101,9 +113,9 @@ fp() { # fp <label> <path>: "<label>:present:sha256:bytes" or "<label>:absent"
   echo -n "docker_user_rules="; (sudo -n iptables -S DOCKER-USER 2>/dev/null || iptables -S DOCKER-USER 2>/dev/null) | grep -cE '^-A' || echo 0
 } >"$WORK/hostcheck" 2>/dev/null || echo "hostcheck_failed" >"$WORK/hostcheck"
 
-python3 - "$WORK" "$OUT" "$CP_HOST_ID" "$STAMP" <<'PYEOF'
+python3 - "$WORK" "$OUT" "$CP_HOST_ID" "$STAMP" "$CP_ROLE" <<'PYEOF'
 import json, sys
-w, out, host, stamp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+w, out, host, stamp, role = sys.argv[1:]
 def read(n):
     try:
         with open(f"{w}/{n}") as f: return f.read()
@@ -127,6 +139,7 @@ for s in services:
 manifest = {
   "schema": "coolify-deploy-inputs/v1",
   "host_id": host, "stamp_berlin": stamp,
+  "role": role,
   "counts": read("counts").strip(),
   "auto_update": read("autoupdate").strip(),
   "coolify_image": read("coolify_image").strip(),

@@ -308,3 +308,13 @@ Nightly Contabo path is **`pg_dump` `.dump.gz` → S3** (not parquet/SQLite).
 | `monitors/coolify-healthcheck.sh` | Alerts `dev@dtcdev.click` on missing/stale dump, stale WAL, or `/` disk ≥ `DISK_WARN_PERCENT` |
 
 Metric names: `coolify_backup_dump_size_bytes{db=…}`, `coolify_backup_dump_age_seconds`, `coolify_backup_wal_age_seconds`, `coolify_backup_disk_used_percent`.
+
+After retiring the empty secondary Coolify on contabo-b (MM PR23), set its
+`CP_ROLE=remote-node`. The nightly job continues encrypted host, SSH, WireGuard,
+firewall, proxy and TLS reconstruction bundles and running-image manifests.
+It omits only the retired control-plane database and declares the role in its
+manifest. It refuses remote-node mode if a control-plane DB container exists.
+The primary on contabo-a stays `control-plane` and retains its mandatory DB dump.
+The final encrypted secondary metadata/SQL backup remains under
+`/var/backups/fable-secondary-coolify-20261110T171856Z.tar.gz.gpg`; Docker volumes
+are retained. Do not restore a second authoritative controller on contabo-b.
