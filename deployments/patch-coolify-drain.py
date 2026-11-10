@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 EXPECTED = 'd1b0549a351722f133556460534411fe436953e5eed7ea2fef0cc178004ab2e1'
+PREVIOUS = '5f0ec6723e21408c760c6d307e5d5afc56cd34e131010dc204c25eb3eca030a0'
 ANCHOR = '''    private function graceful_shutdown_container(string $containerName, bool $skipRemove = false)
     {
         try {
@@ -16,7 +17,7 @@ ANCHOR = '''    private function graceful_shutdown_container(string $containerNa
 HOOK = '''            // DTC web drain: the replacement is healthy before old traffic is withdrawn.
             if ($this->newVersionIsHealthy
                 && $containerName !== $this->container_name
-                && str_contains((string) $this->application->health_check_command, '8099/ready')) {
+                && str_contains((string) $this->application->custom_docker_run_options, '/opt/rolling-launch.py')) {
                 $this->application_deployment_queue->addLogEntry('Draining old web backend before termination.');
                 $this->execute_remote_command([
                     'python3 /usr/local/sbin/coolify-web-drain.py '.escapeshellarg($containerName),
@@ -27,7 +28,14 @@ HOOK = '''            // DTC web drain: the replacement is healthy before old tr
 
 
 def patch(original):
-    if hashlib.sha256(original).hexdigest() != EXPECTED:
+    digest = hashlib.sha256(original).hexdigest()
+    if digest == PREVIOUS:
+        old_hook = HOOK.replace("custom_docker_run_options, '/opt/rolling-launch.py'", "health_check_command, '8099/ready'")
+        text = original.decode()
+        if text.count(old_hook) != 1:
+            raise ValueError('Previous drain hook is not unique')
+        return text.replace(old_hook, HOOK).encode()
+    if digest != EXPECTED:
         raise ValueError('Untested Coolify source; re-review the drain hook before upgrading')
     text = original.decode()
     if text.count(ANCHOR) != 1:

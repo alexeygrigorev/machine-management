@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('drain_patch', HERE / 'patch-coolify-drain.py')
 patcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patcher)
-PATCHED = '5f0ec6723e21408c760c6d307e5d5afc56cd34e131010dc204c25eb3eca030a0'
+PATCHED = 'ab3a3e67ba3aa565a1521f6f484715629e37c4d473fc04c377dda3e28b11ce43'
 JOB = '/var/www/html/app/Jobs/ApplicationDeploymentJob.php'
 MOUNT = '/data/coolify/custom/rolling/ApplicationDeploymentJob.php'
 PROD = '/data/coolify/source/docker-compose.prod.yml'
@@ -41,7 +41,7 @@ def main():
     config = json.loads(args.config.read_text())
     original = ssh(args.primary, 'sudo docker exec coolify cat ' + JOB)
     digest = hashlib.sha256(original.encode()).hexdigest()
-    if digest not in (patcher.EXPECTED, PATCHED):
+    if digest not in (patcher.EXPECTED, patcher.PREVIOUS, PATCHED):
         raise ValueError('Untested Coolify job version; refusing control-plane changes')
     patched = original if digest == PATCHED else patcher.patch(original.encode()).decode()
     # Lint in the currently running, version-matched PHP runtime before writes.
