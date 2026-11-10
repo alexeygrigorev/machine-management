@@ -13,7 +13,7 @@ for name in coolify coolify-db coolify-redis; do
   [[ -z "$managed" ]] || { echo "Refusing Coolify-managed container: $name"; exit 1; }
 done
 php=$(cat <<'PHP'
-$rows = Illuminate\Support\Facades\DB::select("select tablename from pg_tables where schemaname='public' and (tablename in ('applications','services') or tablename like 'standalone_%')");
+$rows = Illuminate\Support\Facades\DB::select("select tablename from pg_tables where schemaname='public' and (tablename in ('applications','services') or (tablename like 'standalone_%' and tablename <> 'standalone_dockers'))");
 $counts = []; foreach ($rows as $row) { $counts[$row->tablename] = Illuminate\Support\Facades\DB::table($row->tablename)->count(); }
 echo json_encode($counts);
 PHP
