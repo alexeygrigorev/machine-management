@@ -1,6 +1,10 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import io
+import json
+import tempfile
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location('acceptance', Path(__file__).parents[1] / 'verify-coolify-rolling.py')
 acceptance = importlib.util.module_from_spec(spec)
@@ -8,6 +12,15 @@ spec.loader.exec_module(acceptance)
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_docker29_actor_id_is_retained_without_attributes(self):
+        raw = {'Actor': {'ID': 'container-id', 'Attributes': {'secret': 'private'}},
+               'Action': 'start', 'timeNano': 1}
+        process = SimpleNamespace(stdout=io.StringIO(json.dumps(raw) + '\n'))
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            acceptance.collect_events(process, events, Path(directory) / 'events.jsonl')
+        self.assertEqual(events, [{'id': 'container-id', 'Action': 'start', 'timeNano': 1}])
+
     def events(self, healthy=2, drained=3, killed=20):
         return [
             {'id': 'new', 'Action': 'start', 'timeNano': 1_000_000_000},
