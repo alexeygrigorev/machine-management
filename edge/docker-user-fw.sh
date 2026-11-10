@@ -54,16 +54,18 @@ if command -v ufw >/dev/null 2>&1; then
     [[ ! -e "$path" ]] || cp -a "$path" "${path}.bak-${STAMP}"
   done
   remove_ufw_allow_rule() {
-    local port="$1" source_pattern="$2" number
+    local port="$1" source_text="$2" number
     while true; do
-      number="$(ufw status numbered | sed -nE "/^\\[[[:space:]]*[0-9]+\\][[:space:]]+${port}\\/tcp.*ALLOW.*${source_pattern}/ s/^\\[[[:space:]]*([0-9]+)\\].*/\\1/p" | head -n 1)"
+      number="$(ufw status numbered | awk -v port="$port/tcp" -v source="$source_text" '
+        index($0, port) && index($0, "ALLOW") && index($0, source) { print; exit }
+      ' | sed -nE 's/^\[[[:space:]]*([0-9]+)\].*/\1/p')"
       [[ -n "$number" ]] || break
       ufw --force delete "$number"
     done
   }
   for port in 8000 6001 6002; do remove_ufw_allow_rule "$port" 'Anywhere'; done
   if [[ "$HOST" == "contabo-a" ]]; then
-    for port in 3100 9090 9093; do remove_ufw_allow_rule "$port" '10\.100\.0\.0/24'; done
+    for port in 3100 9090 9093; do remove_ufw_allow_rule "$port" '10.100.0.0/24'; done
   fi
 fi
 
