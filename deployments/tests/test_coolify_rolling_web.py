@@ -2,6 +2,8 @@ import copy
 import base64
 import importlib.util
 import json
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -238,6 +240,57 @@ class RollingTests(unittest.TestCase):
             image, env = rolling.source_state(config)
         self.assertEqual(image, 'dtc-website:' + 'a' * 40)
         self.assertEqual(json.loads(env['ROLLING_ORIGINAL_COMMAND']), ['web'])
+
+    def test_failed_compose_source_retains_public_then_follows_healthy_release(self):
+        config = {**self.config, 'image': 'dtc-website', 'rollout_mode': 'git-commit',
+                  'source_container_prefix': 'web-source-', 'ssh_host': 'node'}
+        self.app.update(build_pack='dockerfile', git_commit_sha='a' * 40)
+        self.env.extend([{'key': 'ROLLING_ORIGINAL_ENTRYPOINT', 'value': ''},
+                         {'key': 'ROLLING_ORIGINAL_COMMAND', 'value': '["web"]'}])
+        container = {'Created': '2', 'State': {'Health': {'Status': 'unhealthy'}},
+                     'Config': {'Image': 'dtc-website:' + 'b' * 40,
+                                'Env': ['SECRET=private'], 'Cmd': ['web']}}
+        with patch.object(rolling.subprocess, 'check_output', return_value='b' * 12), \
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+            try:
+                rolling.reconcile(config, self.call, rolling.source_state, True)
+            except rolling.SourceUnavailable as error:
+                self.assertEqual(rolling.failure_reason(error),
+                                 'SourceUnavailable; operation=source_state')
+            else:
+                self.fail('Unhealthy source was accepted')
+        self.assertEqual(self.writes, [])
+        container['State']['Health']['Status'] = 'healthy'
+        with patch.object(rolling.subprocess, 'check_output', return_value='b' * 12), \
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+            self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'deployed')
+            self.writes.clear()
+            self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'in-sync')
+        self.assertEqual(self.writes, [])
+
+    def test_missing_source_is_identified_without_inspecting_other_containers(self):
+        config = {**self.config, 'source_container_prefix': 'web-source-', 'ssh_host': 'node'}
+        with patch.object(rolling.subprocess, 'check_output', return_value=''), \
+                patch.object(rolling.subprocess, 'run') as inspect:
+            with self.assertRaises(rolling.SourceUnavailable):
+                rolling.reconcile(config, self.call, rolling.source_state, True)
+        inspect.assert_not_called()
+        self.assertEqual(self.writes, [])
+
+    def test_main_reports_failure_operation_without_exception_values(self):
+        config = {'applications': [{'name': 'website'}], 'assets': {},
+                  'base': 'local', 'token_file': 'private'}
+        stderr = io.StringIO()
+        with patch.object(rolling.sys, 'argv', ['follower', '--config', 'config']), \
+                patch.object(rolling.Path, 'read_text', side_effect=[json.dumps(config), 'token']), \
+                patch.object(rolling, 'verify_control_plane'), \
+                patch.object(rolling, 'verify_host_assets'), \
+                patch.object(rolling, 'active_rollout', return_value=None), \
+                patch.object(rolling, 'reconcile', side_effect=ValueError('secret API body')), \
+                redirect_stderr(stderr):
+            self.assertEqual(rolling.main(), 1)
+        self.assertEqual(stderr.getvalue(),
+                         'website: failed (ValueError; operation=main); current public container retained.\n')
 
     def test_failed_release_is_retried_instead_of_false_convergence(self):
         self.deployments = [{'status': 'failed'}]

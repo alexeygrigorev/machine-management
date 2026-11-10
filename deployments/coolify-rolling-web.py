@@ -19,6 +19,22 @@ ASSET_TARGETS = {'rolling-healthcheck.py': '/opt/coolify-healthcheck.py',
                  'rolling-launch.py': '/opt/rolling-launch.py'}
 
 
+class SourceUnavailable(ValueError):
+    """The private release has no healthy web container to promote."""
+
+
+def failure_reason(error):
+    """Identify the failing operation without exposing exception text or values."""
+    frames = []
+    traceback = error.__traceback__
+    while traceback:
+        if traceback.tb_frame.f_code.co_filename == __file__:
+            frames.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    operation = frames[-1] if frames else 'unknown'
+    return type(error).__name__ + '; operation=' + operation
+
+
 def asset_path(uuid, filename, digest):
     if not re.fullmatch('[a-z0-9]+', uuid) or filename not in ASSET_TARGETS or not re.fullmatch('[a-f0-9]{64}', digest):
         raise ValueError('Invalid versioned helper reference')
@@ -154,7 +170,7 @@ def source_state(config):
             raise ValueError('Invalid source container prefix')
         ids = subprocess.check_output(ssh + ['sudo docker ps -q --filter name=' + shlex.quote(prefix)], text=True, timeout=30).split()
         if not ids or not all(re.fullmatch('[a-f0-9]{12,64}', item) for item in ids):
-            raise ValueError('No running source web container')
+            raise SourceUnavailable('No running source web container')
         cmd = 'sudo docker inspect ' + ' '.join(ids)
     else:
         cmd = 'sudo docker inspect ' + shlex.quote('web-' + uuid)
@@ -162,7 +178,7 @@ def source_state(config):
         check=True, capture_output=True, text=True, timeout=30)
     healthy = [c for c in json.loads(result.stdout) if c['State'].get('Health', {}).get('Status') == 'healthy']
     if not healthy:
-        raise ValueError('Source web is not healthy; keeping public application')
+        raise SourceUnavailable('Source web is not healthy; keeping public application')
     container = max(healthy, key=lambda c: c.get('Created', ''))
     env = dict(item.split('=', 1) for item in container['Config']['Env'])
     # Deployment metadata belongs to the new application, not the source stack.
@@ -379,7 +395,7 @@ def main():
                 break
         except Exception as error:
             failed = True
-            print(app['name'] + ': failed (' + type(error).__name__ + '); current public container retained.', file=sys.stderr, flush=True)
+            print(app['name'] + ': failed (' + failure_reason(error) + '); current public container retained.', file=sys.stderr, flush=True)
             break
     return int(failed)
 
