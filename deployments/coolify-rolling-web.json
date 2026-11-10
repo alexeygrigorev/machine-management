@@ -137,7 +137,7 @@
   },
   "control_plane": {
     "ssh_host": "contabo-a",
-    "job_sha256": "5f0ec6723e21408c760c6d307e5d5afc56cd34e131010dc204c25eb3eca030a0",
+    "job_sha256": "ab3a3e67ba3aa565a1521f6f484715629e37c4d473fc04c377dda3e28b11ce43",
     "coolify_version": "4.4.7"
   },
   "readiness": {
