@@ -396,7 +396,11 @@ def main():
         except Exception as error:
             failed = True
             print(app['name'] + ': failed (' + failure_reason(error) + '); current public container retained.', file=sys.stderr, flush=True)
-            break
+            # SourceUnavailable is raised before any promotion writes. A broken
+            # private release must not starve later independent applications.
+            # Other failures may follow a partial write, so stop on those.
+            if not isinstance(error, SourceUnavailable):
+                break
     return int(failed)
 
 

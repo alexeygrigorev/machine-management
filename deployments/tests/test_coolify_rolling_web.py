@@ -3,7 +3,7 @@ import base64
 import importlib.util
 import json
 import io
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -291,6 +291,46 @@ class RollingTests(unittest.TestCase):
             self.assertEqual(rolling.main(), 1)
         self.assertEqual(stderr.getvalue(),
                          'website: failed (ValueError; operation=main); current public container retained.\n')
+
+    def test_cmp_restarting_source_blocks_writes_until_healthy(self):
+        config = {**self.config, 'ssh_host': 'node'}
+        container = {'State': {'Status': 'restarting', 'Health': {'Status': 'unhealthy'}},
+                     'Config': {'Image': 'ghcr.io/org/web:20261110-190327-71b75d6',
+                                'Env': ['SECRET=private']}}
+        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+            with self.assertRaises(rolling.SourceUnavailable):
+                rolling.reconcile(config, self.call, rolling.source_state, True)
+        self.assertEqual(self.writes, [])
+        container['State'] = {'Status': 'running', 'Health': {'Status': 'healthy'}}
+        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+            self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'deployed')
+        self.assertEqual(self.writes[-1][1], '/api/v1/deploy?uuid=native')
+
+    def test_main_isolates_unavailable_cmp_but_keeps_failure_and_rollout_guards(self):
+        config = {'applications': [{'name': name} for name in ('cmp', 'website', 'later')],
+                  'assets': {}, 'base': 'local', 'token_file': 'private'}
+        cases = [(rolling.SourceUnavailable('private source unavailable'), 'in-sync', 3),
+                 (rolling.SourceUnavailable('private source unavailable'), 'deployed', 2),
+                 (rolling.SourceUnavailable('private source unavailable'), 'busy', 2),
+                 (ValueError('secret API body'), 'in-sync', 1)]
+        for error, website_result, count in cases:
+            with self.subTest(error=type(error).__name__, website_result=website_result):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(rolling.sys, 'argv', ['follower', '--config', 'config', '--apply']), \
+                        patch.object(rolling.Path, 'read_text', side_effect=[json.dumps(config), 'token']), \
+                        patch.object(rolling, 'verify_control_plane'), \
+                        patch.object(rolling, 'verify_host_assets'), \
+                        patch.object(rolling, 'active_rollout', return_value=None), \
+                        patch.object(rolling, 'reconcile', side_effect=[error, website_result, 'in-sync']) as reconcile, \
+                        redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(rolling.main(), 1)
+                self.assertEqual(reconcile.call_count, count)
+                self.assertIn('cmp: failed (' + type(error).__name__, stderr.getvalue())
+                self.assertNotIn(str(error), stderr.getvalue())
+                if count > 1:
+                    self.assertIn('website: ' + website_result, stdout.getvalue())
+                else:
+                    self.assertEqual(stdout.getvalue(), '')
 
     def test_failed_release_is_retried_instead_of_false_convergence(self):
         self.deployments = [{'status': 'failed'}]
