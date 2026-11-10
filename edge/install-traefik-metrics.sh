@@ -14,6 +14,10 @@
 #     adds --metrics.prometheus=true + --entrypoints.metrics.address=:8082
 #     + --metrics.prometheus.entrypoint=metrics, publishes 8082 bound ONLY to
 #     127.0.0.1 + 10.100.0.x (WireGuard) — NEVER 0.0.0.0, never public.
+#     enables compact JSON access logs for 5xx responses and requests slower
+#     than 500 ms, retaining only attribution fields and User-Agent.
+#   - removes the unused public 8080 dashboard publish during this planned
+#     proxy recreate (Traefik API remains insecure=false and is not exposed).
 #   - restarts only the coolify-proxy service (no app restarts).
 #   - verifies http://127.0.0.1:8082/metrics on the host.
 #
@@ -44,6 +48,10 @@ python3 - "$F" "$WG_IP" <<'PY'
 import sys
 path, wg = sys.argv[1], sys.argv[2]
 t = open(path).read()
+# The public dashboard port has no route and must not be published.
+t, removed_8080 = __import__("re").subn(r"(?m)^\s*-\s*['\"]8080:8080['\"]\s*\n", "", t)
+if removed_8080 > 1:
+  raise SystemExit(f"expected at most one public 8080 publish, found {removed_8080}")
 # Idempotent: add metrics flags if missing.
 flags = [
   "--metrics.prometheus=true",
@@ -52,6 +60,19 @@ flags = [
   "--metrics.prometheus.addEntryPointsLabels=true",
   "--metrics.prometheus.addServicesLabels=true",
   "--metrics.prometheus.addRoutersLabels=true",
+  "--accesslog=true",
+  "--accesslog.format=json",
+  "--accesslog.filters.statuscodes=500-599",
+  "--accesslog.filters.minduration=500ms",
+  "--accesslog.fields.defaultmode=drop",
+  "--accesslog.fields.names.ClientHost=keep",
+  "--accesslog.fields.names.RequestHost=keep",
+  "--accesslog.fields.names.RequestPath=keep",
+  "--accesslog.fields.names.DownstreamStatus=keep",
+  "--accesslog.fields.names.Duration=keep",
+  "--accesslog.fields.headers.defaultmode=drop",
+  "--accesslog.fields.headers.names.User-Agent=keep",
+  "--accesslog.fields.queryparameters.defaultmode=drop",
 ]
 for f in flags:
   if f not in t:
@@ -65,12 +86,12 @@ for f in flags:
 for bind in (f"127.0.0.1:8082:8082", f"{wg}:8082:8082"):
   needle = f"'{bind}'"
   if needle not in t:
-    # add after the 8080 publish line
-    anchor = "'8080:8080'"
+    # add after the public HTTP publish line; 8080 is intentionally absent.
+    anchor = "'80:80'"
     if anchor in t:
       t = t.replace(anchor, f"{anchor}\n      - {needle}", 1)
     else:
-      raise SystemExit("anchor 8080:8080 not found")
+      raise SystemExit("anchor 80:80 not found")
 open(path, "w").write(t)
 print("patched", path)
 PY

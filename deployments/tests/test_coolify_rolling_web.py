@@ -16,8 +16,8 @@ class RollingTests(unittest.TestCase):
     def setUp(self):
         self.config = {'source_uuid': 'source', 'app_uuid': 'native', 'image': 'ghcr.io/org/web'}
         self.app = {'build_pack': 'dockerimage', 'health_check_enabled': True,
-                    'custom_labels': base64.b64encode(b'traefik.http.services.web.loadbalancer.healthcheck.path=/ready\ntraefik.http.services.web.loadbalancer.healthcheck.port=8099\ndtc.rolling-web.application=native').decode(),
-                    'health_check_command': 'python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready',
+                    'custom_labels': base64.b64encode(b'traefik.http.services.web.loadbalancer.healthcheck.path=/ready\ntraefik.http.services.web.loadbalancer.healthcheck.port=8099\ntraefik.http.services.web.loadbalancer.healthcheck.interval=5s\ntraefik.http.services.web.loadbalancer.healthcheck.timeout=3s\ndtc.rolling-web.application=native').decode(),
+                    'health_check_command': 'python /opt/coolify-healthcheck.py',
                     'custom_docker_run_options': '--entrypoint "python /opt/rolling-launch.py"',
                     'settings': {}, 'docker_registry_image_name': 'ghcr.io/org/web',
                     'docker_registry_image_tag': '20261023-120000-abcdef0'}
@@ -214,6 +214,14 @@ class RollingTests(unittest.TestCase):
         self.assertEqual(rolling.reconcile(self.config, self.call, self.state, True), 'busy')
         self.assertEqual(self.writes, [])
 
+    def test_any_active_configured_rollout_blocks_a_new_follower_deploy(self):
+        config = {'applications': [{'name': 'aishl', 'app_uuid': 'one'},
+                                  {'name': 'relay', 'app_uuid': 'two'}]}
+        def call(method, path, data=None):
+            return {'deployments': [{'status': 'finished'}] if path.endswith('/one')
+                    else [{'status': 'in_progress'}]}
+        self.assertEqual(rolling.active_rollout(config, call), 'relay')
+
     def test_unsafe_settings_refuse_writes(self):
         for key, value in [('ports_mappings', '8000:8000'), ('health_check_enabled', False),
                            ('custom_docker_run_options', '--ip=10.0.0.2')]:
@@ -260,13 +268,67 @@ class RollingTests(unittest.TestCase):
             'traefik.http.routers.http-source.rule=Host(`example.test`)',
             'traefik.http.routers.http-source.middlewares=gzip',
             'traefik.http.services.http-source.loadbalancer.server.port=8000',
-            'coolify.managed=true'], 'source', 'native', '/ping')
+            'coolify.managed=true'], 'source', 'native', '/ready', health_port=8099)
         self.assertIn('http-native.priority=100', labels)
-        self.assertIn('http-native.loadbalancer.healthcheck.path=/ping', labels)
+        self.assertIn('http-native.loadbalancer.healthcheck.path=/ready', labels)
         self.assertIn('http-native.loadbalancer.healthcheck.hostname=localhost', labels)
+        self.assertIn('http-native.loadbalancer.healthcheck.interval=5s', labels)
+        self.assertIn('http-native.loadbalancer.healthcheck.timeout=3s', labels)
         self.assertIn('http-native.loadbalancer.serverstransport=rolling-web@file', labels)
         self.assertIn('http-native.middlewares=gzip,rolling-retry', labels)
         self.assertNotIn('coolify.managed', labels)
+
+    def test_duplicate_router_services_collapse_and_retry_is_deduplicated(self):
+        labels = rolling.labels_for_web([
+            'traefik.http.routers.http-source.rule=Host(`example.test`)',
+            'traefik.http.routers.http-source.middlewares=gzip,rolling-retry,rolling-retry@docker,rolling-retry',
+            'traefik.http.routers.http-source.service=http-source',
+            'traefik.http.routers.https-source.rule=Host(`www.example.test`)',
+            'traefik.http.routers.https-source.service=https-source',
+            'traefik.http.services.http-source.loadbalancer.server.port=8000',
+            'traefik.http.services.https-source.loadbalancer.server.port=8000',
+        ], 'source', 'native', '/ready', health_port=8099, collapse_services=True)
+        self.assertIn('http-native.service=http-native', labels)
+        self.assertIn('https-native.service=http-native', labels)
+        self.assertEqual(labels.count('.loadbalancer.server.port=8000'), 1)
+        router_middlewares = next(line.split('=', 1)[1] for line in labels.splitlines()
+                                  if line.startswith('traefik.http.routers.http-native.middlewares='))
+        self.assertEqual(router_middlewares.split(',').count('rolling-retry'), 1)
+
+    def test_proxy_labels_add_only_requested_protection_and_preserve_priority(self):
+        labels = rolling.labels_for_web([
+            'traefik.http.routers.http-source.rule=Host(`example.test`)',
+            'traefik.http.routers.http-source.priority=110',
+            'traefik.http.routers.http-source.middlewares=gzip',
+            'traefik.http.services.http-source.loadbalancer.server.port=8000',
+        ], 'source', 'native', '/ready', health_port=8099,
+           extra_middlewares=['aishl-rate-limit@file', 'aishl-in-flight@file'])
+        self.assertIn('http-native.priority=110', labels)
+        self.assertIn('http-native.middlewares=gzip,rolling-retry,aishl-rate-limit@file,aishl-in-flight@file', labels)
+
+    def test_reconcile_updates_proxy_gate_labels_and_direct_docker_liveness(self):
+        labels = '\n'.join([
+            'traefik.http.routers.http-native.rule=Host(`example.test`)',
+            'traefik.http.routers.http-native.middlewares=gzip,rolling-retry,rolling-retry,rolling-retry',
+            'traefik.http.services.http-native.loadbalancer.server.port=8000',
+            'dtc.rolling-web.application=native',
+        ])
+        self.app['custom_labels'] = base64.b64encode(labels.encode()).decode()
+        self.app['health_check_command'] = 'python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready'
+        config = {**self.config, 'manage_labels': True,
+                  'health_check_command': 'python /opt/coolify-healthcheck.py',
+                  'proxy_middlewares': ['aishl-rate-limit@file', 'aishl-in-flight@file']}
+        self.assertEqual(rolling.reconcile(config, self.call, self.state, True), 'deployed')
+        patch = next(data for method, path, data in self.writes if method == 'PATCH' and path == '/api/v1/applications/native')
+        decoded = base64.b64decode(patch['custom_labels']).decode()
+        router_middlewares = next(line.split('=', 1)[1] for line in decoded.splitlines()
+                                  if line.startswith('traefik.http.routers.http-native.middlewares='))
+        self.assertEqual(router_middlewares.split(',').count('rolling-retry'), 1)
+        self.assertIn('healthcheck.interval=5s', decoded)
+        self.assertIn('healthcheck.timeout=3s', decoded)
+        self.assertIn('aishl-rate-limit@file', decoded)
+        self.assertEqual(patch['health_check_command'], 'python /opt/coolify-healthcheck.py')
+        self.assertEqual(self.writes[-1][1], '/api/v1/deploy?uuid=native')
 
     def test_draining_readiness_port_is_distinct_from_application_port(self):
         labels = rolling.labels_for_web([

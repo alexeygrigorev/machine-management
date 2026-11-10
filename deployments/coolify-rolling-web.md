@@ -127,7 +127,7 @@ preserved when mirroring changed environment values.
 | Consistent/custom container name | disabled/empty |
 | Fixed `--ip` / `--ip6` | absent |
 | Health check | enabled, command type |
-| Health command | `python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready` |
+| Health command | `python /opt/coolify-healthcheck.py` |
 | Docker Run Options | `--entrypoint "python /opt/rolling-launch.py"` |
 | Interval / timeout / retries | 2 seconds / 3 seconds / 60 |
 | Start period | 45 seconds |
@@ -179,18 +179,21 @@ private release container completes migrations before promotion.
 
 `ROLLING_APP_URL` points to the loopback application URL in the table. The
 launch helper starts a small HTTP readiness process on internal port 8099,
-then executes the original startup. A background probe checks that application
-URL once per second with a two-second timeout. Startup requires a successful
-probe; after startup, three consecutive failures withdraw readiness. This
-avoids routing flaps from a single slow probe and prevents multiple Traefik
-routers from issuing a burst of nested application checks. `/ready` reads
-this cached state immediately; a drain marker overrides it immediately.
-The HTTP readiness listener uses backlog 128. The stdlib default of five was
-too small for AISHL's seven synchronized Traefik service checks plus Docker
-health. Live diagnostics showed Traefik marking the backend DOWN while both
-direct readiness and application probes returned 200; AISHL had 42 TCP listen
-queue overflows, versus zero on the other three apps. The burst regression
-test reproduces the default-backlog timeout and passes with backlog 128.
+then executes the original startup. A background probe checks the application
+URL every two seconds with a two-second timeout. Startup requires one
+successful probe. After that, `/ready` stays green until the drain marker is
+created; a slow or failed probe updates `/saturated` but does not withdraw the
+only backend. Docker's healthcheck probes the application URL directly, so
+restart policy still owns liveness. The proxy probes `/ready` every five
+seconds with a three-second timeout. Equivalent per-domain load-balancer
+services are collapsed to one service per application, and each serving
+router has one `rolling-retry` middleware. Draining waits three full proxy
+intervals (15 seconds) after setting the marker.
+
+The HTTP readiness listener keeps backlog 128 for synchronized Docker and
+Traefik requests. `/saturated` returns `true` while the application probe is
+failing and `false` when it responds; use it for diagnosis and alerting, never
+as a traffic gate.
 Neither the
 application port nor the readiness port is published on the host. There is
 no HTTP drain operation: the actuator runs only through local Docker exec.
@@ -203,7 +206,9 @@ leave capacity for application health requests; overlap at deployment alone
 does not prevent the sole steady-state backend from withdrawing when both
 synchronous workers are occupied. See
 [Gunicorn thread settings](https://gunicorn.org/reference/settings/#threads).
-Do not increase readiness timeouts or suppress monitoring to hide saturation.
+Readiness is a startup and drain signal only. Keep `/saturated`, direct
+application liveness, latency alerts, and host pressure alerts observable;
+never widen the readiness timeout or suppress those signals to hide saturation.
 
 ## Explicit pre-stop drain
 
@@ -217,7 +222,7 @@ The hook runs only after the replacement is healthy, and only for applications
 using the readiness agent. The host actuator requires another healthy
 container with the same `dtc.rolling-web.application` label. It waits three
 seconds for replacement discovery, creates the old replica's local drain
-marker, then waits six seconds (three active-health intervals). The old
+marker, then waits 15 seconds (three active-health intervals). The old
 application keeps serving in-flight requests during this period. Traefik
 removes that backend after `/ready` returns 503. Only afterward does Coolify
 send TERM and apply the 45-second stop grace. If the prerequisite fails, the
@@ -262,8 +267,8 @@ traefik.http.services.<service>.loadbalancer.server.port=<port>
 traefik.http.services.<service>.loadbalancer.healthcheck.path=/ready
 traefik.http.services.<service>.loadbalancer.healthcheck.port=8099
 traefik.http.services.<service>.loadbalancer.healthcheck.hostname=localhost
-traefik.http.services.<service>.loadbalancer.healthcheck.interval=2s
-traefik.http.services.<service>.loadbalancer.healthcheck.timeout=1s
+traefik.http.services.<service>.loadbalancer.healthcheck.interval=5s
+traefik.http.services.<service>.loadbalancer.healthcheck.timeout=3s
 traefik.http.services.<service>.loadbalancer.serverstransport=rolling-web@file
 traefik.http.middlewares.rolling-retry.retry.attempts=3
 traefik.http.middlewares.rolling-retry.retry.initialinterval=100ms
@@ -273,9 +278,16 @@ Use `localhost` for the probe Host header: CMP rejects arbitrary backend IPs
 through Django's host validation. HTTP health checks must succeed from the
 proxy as well as from inside the container.
 
-Native public routers have priority 110 and retain the existing domains,
-entrypoints, TLS and gzip settings. Serving routers add `rolling-retry` to
-their middleware list; HTTPS redirects keep their existing behavior.
+Native public routers retain their existing domains, entrypoints, TLS, gzip,
+and explicitly configured priorities. Equivalent domain routers share one
+load-balancer service. Serving routers have one `rolling-retry` middleware;
+HTTPS redirects keep their existing behavior.
+
+AISHL routers also use `aishl-rate-limit@file` and `aishl-in-flight@file`.
+Install those file-provider middlewares and the guarded `dev.aishippinglabs.com`
+router with [`edge/install-aishl-proxy-guard.sh`](../edge/install-aishl-proxy-guard.sh)
+on contabo-b before allowing the follower to deploy AISHL. The file provider
+reloads the new configuration without a proxy restart.
 
 The secret-bearing `origin-enforce.yml` file remains private. Its allow
 routers keep priority 200 and their exact verification rules; deny routers
@@ -357,7 +369,7 @@ deployment or an unhealthy baseline. It samples public readiness approximately
 every 300 milliseconds, including ten seconds before deployment and sixty
 seconds after completion. It requires a different healthy replacement, Docker
 events proving start then healthy then old drain then old termination, and at
-least six seconds between drain and termination. Any non-200 response, timeout
+least 15 seconds between drain and termination. Any non-200 response, timeout
 or missing lifecycle proof fails acceptance. Sanitized probes, events and a
 summary remain in the output directory even when the post-deploy check fails.
 Lifecycle events stream from before deployment: querying Docker history only

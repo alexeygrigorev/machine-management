@@ -4,7 +4,7 @@
 # Covers without touching prod and without docker daemon for most cases:
 #   T1  bash -n on all new/patched scripts
 #   T2  compose declarative patch: adds external + service nets, idempotent,
-#       preserves metrics flags/ports, never removes coolify
+#       preserves metrics flags/ports, never removes coolify, removes public 8080
 #   T3  ensure --check with stub docker: detached -> FAIL/1, attached -> OK/0
 #   T4  ensure --apply with stub docker: connects missing + patches compose
 #   T5  metrics installer still patches metrics flags AND preserves nets
@@ -47,7 +47,6 @@ services:
       - coolify
     ports:
       - '80:80'
-      - '8080:8080'
       - '10.100.0.2:8082:8082'
       - '127.0.0.1:8082:8082'
     command:
@@ -80,6 +79,7 @@ grep -q "\- qjnpmney8j8ehfuqcmzpjtzt" "$TMP/t2.yml" || T2_OK=0
 grep -q "\- t9uudl5ik40webxrzamrm8qy" "$TMP/t2.yml" || T2_OK=0
 grep -q "metrics.prometheus=true" "$TMP/t2.yml" || T2_OK=0
 grep -q "127.0.0.1:8082:8082" "$TMP/t2.yml" || T2_OK=0
+grep -q "8080:8080" "$TMP/t2.yml" && T2_OK=0
 grep -q "external: true" "$TMP/t2.yml" || T2_OK=0
 # idempotent: second run changes nothing
 sha1="$(sha256sum "$TMP/t2.yml" | cut -d' ' -f1)"
@@ -194,6 +194,20 @@ grep -q "ensure-coolify-proxy-networks.sh --patch-compose-only" "$METRICS" || T5
 grep -q "ensure-coolify-proxy-networks.sh --apply" "$METRICS" || T5_OK=0
 grep -q "metrics.prometheus" "$METRICS" || T5_OK=0
 grep -q "127.0.0.1:8082" "$METRICS" || T5_OK=0
+grep -q "removed_8080" "$METRICS" || T5_OK=0
+for access_flag in \
+  "--accesslog=true" \
+  "--accesslog.format=json" \
+  "--accesslog.filters.statuscodes=500-599" \
+  "--accesslog.filters.minduration=500ms" \
+  "--accesslog.fields.names.ClientHost=keep" \
+  "--accesslog.fields.names.RequestHost=keep" \
+  "--accesslog.fields.names.RequestPath=keep" \
+  "--accesslog.fields.names.DownstreamStatus=keep" \
+  "--accesslog.fields.names.Duration=keep" \
+  "--accesslog.fields.headers.names.User-Agent=keep"; do
+  grep -Fq -- "$access_flag" "$METRICS" || T5_OK=0
+done
 if [[ "$T5_OK" == "1" ]]; then pass "T5 metrics installer preserves proxy nets + keeps metrics"; else fail "T5 metrics installer"; fi
 
 # ---- T6: monitor detached FAILs dev@-only through Relay, attached OK ----

@@ -17,7 +17,10 @@
       "app_uuid": "w3mxfr6wzjnpg3hqaw3y0obq",
       "label_namespace": "w3mxfr6wzjnpg3hqaw3y0obqv3",
       "domains": "https://aishippinglabs.com,https://www.aishippinglabs.com,https://prod.aishippinglabs.com,http://aisl-staging.169.58.124.141.sslip.io",
-      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+      "health_check_command": "python /opt/coolify-healthcheck.py",
+      "manage_labels": true,
+      "collapse_services": true,
+      "proxy_middlewares": ["aishl-rate-limit@file", "aishl-in-flight@file"]
     },
     {
       "name": "relay",
@@ -32,7 +35,8 @@
       "app_uuid": "oascx5kjeimc0ivpttag9z3q",
       "label_namespace": "oascx5kjeimc0ivpttag9z3qv3",
       "domains": "http://origin.relay.datatalks.club,http://relay.datatalks.club",
-      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+      "health_check_command": "python /opt/coolify-healthcheck.py",
+      "manage_labels": true
     },
     {
       "name": "cmp",
@@ -47,7 +51,8 @@
       "app_uuid": "9gqubsq4lxubaxm27v1mtq9u",
       "label_namespace": "9gqubsq4lxubaxm27v1mtq9uv3",
       "domains": "https://courses.datatalks.club,http://cmp-staging.169.58.119.163.sslip.io",
-      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+      "health_check_command": "python /opt/coolify-healthcheck.py",
+      "manage_labels": true
     },
     {
       "name": "website",
@@ -86,7 +91,8 @@
       "app_uuid": "nax9srpks6z7w1jgpebiuwuo",
       "label_namespace": "nax9srpks6z7w1jgpebiuwuov3",
       "domains": "http://origin.website.datatalks.club,http://prod.datatalks.club,http://wodajblzizrjunwme3ossav3.169.58.119.163.sslip.io",
-      "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+      "health_check_command": "python /opt/coolify-healthcheck.py",
+      "manage_labels": true
     }
   ],
   "native_settings": {
@@ -102,7 +108,7 @@
     "ports_mappings": null,
     "custom_docker_run_options": "--entrypoint \"python /opt/rolling-launch.py\"",
     "is_container_label_readonly_enabled": false,
-    "health_check_command": "python /opt/coolify-healthcheck.py http://127.0.0.1:8099/ready"
+    "health_check_command": "python /opt/coolify-healthcheck.py"
   },
   "control_plane": {
     "ssh_host": "contabo-a",
@@ -111,14 +117,16 @@
   },
   "readiness": {
     "listen_backlog": 128,
-    "probe_interval_seconds": 1,
+    "probe_interval_seconds": 2,
     "probe_timeout_seconds": 2,
-    "consecutive_failures": 3,
-    "old_backend_withdrawal_seconds": 6
+    "saturation_failures": 1,
+    "traefik_healthcheck_interval_seconds": 5,
+    "traefik_healthcheck_timeout_seconds": 3,
+    "old_backend_withdrawal_seconds": 15
   },
   "assets": {
-    "rolling-healthcheck.py": "bdf06431ba3a5fe0fd3c6ad467247c1d89045c836e3efb0ee1db5b40c86ea511",
-    "rolling-readiness.py": "c81e2adbaafc8054a547d430a423625e347917b84263575de7f80afdd7c4c302",
+    "rolling-healthcheck.py": "918358279e6fa4c100acbd0b02cc7de9331b5be78243ad16f7f6af243ff835a1",
+    "rolling-readiness.py": "ffa4a20044b304c5d1026a7ac85ba4657ee12731ed93d3fcb5aba9d0f23e2756",
     "rolling-launch.py": "bc41a8bfd5147a03b4492ecd85b1ef639ace1c4be1129877e0a3285b1f156b48"
   }
 }

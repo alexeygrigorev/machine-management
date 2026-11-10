@@ -23,7 +23,11 @@ check "operator .141:8000" 302 "$UB"
 echo "== 3. DOCKER-USER rules present on both hosts =="
 for H in contabo-a contabo-b; do
   N="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$H" 'sudo iptables -S DOCKER-USER | grep -c "ctorigdstport" || echo 0')"
-  check "${H} v4 ctorigdstport rules" 8 "$N"
+  check "${H} v4 original-destination port rules" 10 "$N"
+  LAST="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$H" 'sudo iptables -S DOCKER-USER | tail -n 1')"
+  check "${H} final public-interface default drop" "-A DOCKER-USER -i eth0 -j DROP" "$LAST"
+  NAT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$H" 'sudo grep -c "^\*nat" /etc/edge-docker-user-rules.v4 || true')"
+  check "${H} persisted firewall file has no NAT table" 0 "$NAT"
 done
 
 echo "== 4. canary Header() gate (prod routers untouched) =="

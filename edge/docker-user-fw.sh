@@ -13,8 +13,9 @@
 #
 # Allows: loopback, WireGuard 10.100.0.0/24, docker nets, the Contabo peer,
 # the operator box (Hetzner RMTHZ v4+v6, overridable via OPERATOR_V4/OPERATOR_V6).
-# Everything else to 8000/6001/6002/9101 is LOGged + DROPped. Ports 80/443/22
-# and all other traffic are untouched (fall through to the DOCKER chain).
+# Public web ports 80/443 are allowed; every other new connection arriving on
+# eth0 to a Docker-published port is dropped. Trusted operator/peer/WireGuard
+# sources retain the existing allowlist access.
 set -euo pipefail
 
 HOST="${1:-}"
@@ -34,11 +35,38 @@ scp "${HERE}/edge-docker-user-restore.service" "${HOST}:/tmp/edge-docker-user-re
 
 "${SSH[@]}" "$HOST" OPERATOR_V4="$OPERATOR_V4" OPERATOR_V6="$OPERATOR_V6" PEER_V4="$PEER_V4" sudo -E bash -s <<'EOF'
 set -euo pipefail
+trap 'rm -f -- /tmp/edge-docker-user-restore.sh /tmp/edge-docker-user-restore.service' EXIT
+STAMP="$(date +%Y%m%dT%H%M%S%N)"
+for path in /usr/local/sbin/edge-docker-user-restore.sh /etc/systemd/system/edge-docker-user-restore.service /etc/edge-docker-user-rules.v4 /etc/edge-docker-user-rules.v6; do
+  [[ ! -e "$path" ]] || cp -a "$path" "${path}.bak-${STAMP}"
+done
 install -m 0755 /tmp/edge-docker-user-restore.sh /usr/local/sbin/edge-docker-user-restore.sh
 install -m 0644 /tmp/edge-docker-user-restore.service /etc/systemd/system/edge-docker-user-restore.service
 systemctl daemon-reload
 systemctl enable edge-docker-user-restore.service
 OPERATOR_V4="${OPERATOR_V4:?}" OPERATOR_V6="${OPERATOR_V6:?}" PEER_V4="${PEER_V4:?}" /usr/local/sbin/edge-docker-user-restore.sh apply
+
+# Remove the exact stale public UFW allow rules. The DOCKER-USER rules are the
+# actual Docker ingress filter; these UFW rules are misleading and ineffective
+# for DNAT traffic. Snapshot UFW state first, then remove only Anywhere rules.
+if command -v ufw >/dev/null 2>&1; then
+  for path in /etc/ufw/user.rules /etc/ufw/user6.rules; do
+    [[ ! -e "$path" ]] || cp -a "$path" "${path}.bak-${STAMP}"
+  done
+  remove_ufw_anywhere_allow() {
+    local port="$1" number
+    while true; do
+      number="$(ufw status numbered | sed -nE "/^\\[[[:space:]]*[0-9]+\\][[:space:]]+${port}\\/tcp.*ALLOW.*Anywhere/ s/^\\[[[:space:]]*([0-9]+)\\].*/\\1/p" | head -n 1)"
+      [[ -n "$number" ]] || break
+      ufw --force delete "$number"
+    done
+  }
+  for port in 8000 6001 6002; do remove_ufw_anywhere_allow "$port"; done
+  if [[ "$HOST" == "contabo-a" ]]; then
+    for port in 3100 9090 9093; do remove_ufw_anywhere_allow "$port"; done
+  fi
+fi
+
 echo "--- DOCKER-USER v4 ---"
 iptables -L DOCKER-USER -n -v --line-numbers
 echo "--- DOCKER-USER v6 ---"
@@ -50,4 +78,4 @@ echo "VERIFY from operator box (do not skip):"
 echo "  curl -sk -o /dev/null -w '8000:%{http_code}\n' -m 8 http://${HOST#contabo-}x/ 2>/dev/null || true"
 echo "  curl -sk -o /dev/null -w '8000:%{http_code}\n' -m 8 http://169.58.119.163:8000/ http://169.58.124.141:8000/"
 echo "  ssh ${HOST} 'sudo iptables -L DOCKER-USER -n -v | tail -3'   # DROP counters climb from background scans"
-echo "ROLLBACK: ssh ${HOST} 'sudo iptables -F DOCKER-USER && sudo ip6tables -F DOCKER-USER && sudo systemctl disable edge-docker-user-restore.service'"
+echo "ROLLBACK: restore timestamped /etc/ufw/user.rules* and DOCKER-USER rules/service/script backups; run ufw reload and systemctl daemon-reload"

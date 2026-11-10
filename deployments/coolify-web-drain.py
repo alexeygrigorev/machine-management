@@ -29,9 +29,9 @@ def main(name):
     # Keep the serving process alive while the proxy discovers the replacement.
     time.sleep(3)
     docker('exec', name, 'python', '/opt/rolling-readiness.py', 'drain')
-    # Active Traefik checks run every two seconds; allow three full intervals
+    # Active Traefik checks run every five seconds; allow three full intervals
     # before Docker sends TERM. In-flight application requests can finish.
-    time.sleep(6)
+    time.sleep(15)
     print('Old web backend drained; healthy replacement retained.', flush=True)
 
 

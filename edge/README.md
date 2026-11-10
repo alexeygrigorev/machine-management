@@ -12,7 +12,7 @@ over the current rolling backends.
 | Item | .163 (contabo-a) | .141 (contabo-b) |
 |------|------------------|------------------|
 | cAdvisor `:9101` public leak | no listener (nothing to bind) | rebound to `10.100.0.2` + `127.0.0.1` (`cadvisor-bind.sh`) |
-| Coolify `:8000`, Soketi `:6001/:6002`, cAdvisor `:9101` via DOCKER-USER | allowlist + LOG/DROP (`docker-user-fw.sh`) | same |
+| Coolify `:8000`, Soketi `:6001/:6002`, cAdvisor `:9101`, and other Docker-published ports via DOCKER-USER | trusted-source allowlist; public `:80/:443` only; generic inbound DROP (`docker-user-fw.sh`) | same |
 | `X-Origin-Verify` enforcement | live Website origin/viewer routes; dev guard retained | live Relay production/development origin/viewer routes |
 | `acme.json` off-host backup | `acme-backup.sh` → GPG-encrypted + decrypt-verified storagebox `edge-tls/` (daily via `storagebox-sync`) | same |
 | Origin TLS | Website origin + viewer certificates verified | Relay production/development origin + viewer certificates verified |
@@ -31,6 +31,14 @@ X_ORIGIN_VERIFY="$(aws --profile main-temp cloudfront get-distribution \
 X_ORIGIN_VERIFY="..." ./edge/install-origin-verify.sh contabo-b
 ./edge/tests/test-edge.sh                            # 5. verify
 ```
+
+`edge-docker-user-restore.sh` persists only the `DOCKER-USER` chain and
+restores it with `iptables-restore --noflush`; it never replays a full host
+snapshot. The firewall installer backs up the previous chain files, service,
+and script before changing one host. It also removes the audited stale public
+UFW allows for ports 8000/6001/6002 (and 3100/9090/9093 on contabo-a) after
+preserving the UFW files. The unused public `:8080` dashboard publish is
+removed during the next planned proxy recreate by `install-traefik-metrics.sh`.
 
 Rollback (each step is independent, one ssh command):
 
@@ -134,6 +142,31 @@ read-modify-write `update-distribution`, values via files/stdin only) now
 requires an authorized MAIN AWS session (AWS gate) — stopped at dual-accept
 pending Alexey for both website and relay rotations.
 
+## AISHL proxy rate limit
+
+`traefik/aishl-ratelimit.yml` defines a per-client rate limit of 10 requests
+per second with a burst of 40, plus a 128-request in-flight cap. The rolling
+follower attaches both middlewares to the AISHL production routers and reduces
+its equivalent domain-specific backend services to one. The dev router is
+file-provider managed; `traefik/patch-aisl-dev-route.py` adds the middlewares
+to its existing HTTPS router while preserving the current Coolify-owned
+backend service and HTTP-to-HTTPS redirect.
+
+After merge, install on contabo-b (the script backs up the existing middleware
+and route files and does not recreate the proxy):
+
+```bash
+./edge/install-aishl-proxy-guard.sh contabo-b
+```
+
+Let the rolling follower deploy the AISHL application once. Verify that a
+short 50 requests/second probe from one client gets HTTP 429 while a second
+client still gets HTTP 200 from `/ping`; keep the test brief. The limiter uses
+Traefik's direct client address. If AISHL is later put behind CloudFront,
+restrict the origin and configure trusted forwarded-client addresses through
+the AWS gate before relying on per-client limiting behind that edge. Never
+trust arbitrary forwarded headers from the public internet.
+
 ## Proxy network durability (2026-10-25 relay-dev/cmp-dev incident)
 
 `coolify-proxy` (Traefik) lost its ephemeral attachments to Coolify service
@@ -160,7 +193,10 @@ Durable fix (this repo, versioned):
 - `edge/install-traefik-metrics.sh` now preserves attachments itself: before
   `docker compose up -d traefik` it declares current proxy networks in the
   compose file (via the keeper when installed, else inline), and re-runs
-  `--apply` afterwards.
+  `--apply` afterwards. The same planned recreate enables JSON access logs for
+  5xx responses and requests slower than 500 ms, with only client IP, host,
+  path, status, duration, and User-Agent retained. Query parameters and other
+  headers are dropped; OBS Vector ships the normalized event to VictoriaLogs.
 - Pager: `monitors/coolify-proxy-networks.sh` (+ cron/env/installer) verifies
   independently every 5 min and mails **dev@dtcdev.click ONLY** (same
   dedupe/recover rules) when the proxy is still detached.
