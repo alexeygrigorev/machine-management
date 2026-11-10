@@ -1,5 +1,5 @@
 {
-  "base": "http://169.58.119.163:8000",
+  "base": "http://127.0.0.1:18000",
   "token_file": "/home/alexey/.secrets/coolify-api-169.58.119.163.token",
   "applications": [
     {
@@ -21,7 +21,10 @@
       "health_check_command": "python /opt/coolify-healthcheck.py",
       "manage_labels": true,
       "collapse_services": true,
-      "proxy_middlewares": ["aishl-rate-limit@file", "aishl-in-flight@file"]
+      "proxy_middlewares": [
+        "aishl-rate-limit@file",
+        "aishl-in-flight@file"
+      ]
     },
     {
       "name": "relay",
@@ -45,7 +48,8 @@
       "ssh_host": "contabo-a",
       "image": "ghcr.io/datatalksclub/course-management-platform",
       "environment": {
-        "ROLLING_APP_URL": "http://127.0.0.1:80/api/health/"
+        "ROLLING_APP_URL": "http://127.0.0.1:80/api/health/",
+        "CMP_RUN_MIGRATIONS": "0"
       },
       "path": "/api/health/",
       "port": "80",

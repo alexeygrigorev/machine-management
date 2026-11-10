@@ -1,0 +1,6 @@
+[Unit]
+Description=Report failed release follower independently via host monitor
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/lib/coolify-rolling-web/current/rolling-follower-failure.sh

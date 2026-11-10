@@ -1,0 +1,9 @@
+[Unit]
+Description=Check validated production web releases each minute
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+
+[Install]
+WantedBy=timers.target
