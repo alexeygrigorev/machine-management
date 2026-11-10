@@ -27,7 +27,7 @@ chmod +x "$TMP/bin/"*
 PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/a.log" STUB_REMOTE="$TMP/a.remote" \
   bash "$SCRIPT" contabo-a >/dev/null
 grep -q '<HOST=contabo-a>' "$TMP/a.log"
-grep -Fq "'10\.100\.0\.0/24'" "$TMP/a.remote"
+grep -Fq "10.100.0.0/24" "$TMP/a.remote"
 grep -q 'for port in 3100 9090 9093' "$TMP/a.remote"
 
 PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/b.log" STUB_REMOTE="$TMP/b.remote" \
