@@ -1,0 +1,9 @@
+[Unit]
+Description=Check CMP private release images every five minutes
+
+[Timer]
+OnBootSec=45
+OnUnitInactiveSec=300
+
+[Install]
+WantedBy=timers.target

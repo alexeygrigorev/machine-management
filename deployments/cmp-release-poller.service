@@ -1,0 +1,11 @@
+[Unit]
+Description=Follow validated CMP release images through private Coolify API
+Requires=coolify-api-tunnel.service
+After=coolify-api-tunnel.service
+OnFailure=coolify-rolling-web-failure.service
+
+[Service]
+Type=oneshot
+Environment=COOLIFY_URL=http://127.0.0.1:18000
+ExecStart=/usr/bin/flock -n %h/.local/state/cmp-coolify-rollout.lock %h/.local/lib/cmp-release-poller/current/hetzner-rollout.sh
+TimeoutStartSec=180
