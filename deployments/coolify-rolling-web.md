@@ -445,3 +445,16 @@ After accepting each public app separately, start
 `systemctl --user start coolify-rolling-web.timer`. Inspect failures with
 `journalctl --user -u coolify-rolling-web.service`; failed runs also invoke the
 independent on-host health monitor.
+
+## Resource budgets and host runtime guards
+
+The follower persists each public app's 4 CPU / 1 GiB memory budget and CPU
+weight4096 in Coolify, and rolls only when the budget changes. Worker fleets
+have separate Compose budgets. `scripts/install-contabo-runtime-guards.sh`
+backs up Docker configuration and container metadata, enables live restore
+with a reload, holds Docker packages for deliberate maintenance, and gives
+currently running proxy/Postgres/public containers weight4096. Reapply the
+host CPU weights after replacing a database or proxy until its resource
+owner persists them. This script does not upgrade packages or reboot hosts.
+Reboots need a separate maintenance window after the DOCKER-USER-only restore
+has been verified; perform one host at a time and observe public health.

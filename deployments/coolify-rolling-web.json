@@ -24,7 +24,12 @@
       "proxy_middlewares": [
         "aishl-rate-limit@file",
         "aishl-in-flight@file"
-      ]
+      ],
+      "resource_limits": {
+        "limits_cpus": "4",
+        "limits_memory": "1g",
+        "limits_cpu_shares": 4096
+      }
     },
     {
       "name": "relay",
@@ -40,7 +45,12 @@
       "label_namespace": "oascx5kjeimc0ivpttag9z3qv3",
       "domains": "http://origin.relay.datatalks.club,http://relay.datatalks.club",
       "health_check_command": "python /opt/coolify-healthcheck.py",
-      "manage_labels": true
+      "manage_labels": true,
+      "resource_limits": {
+        "limits_cpus": "4",
+        "limits_memory": "1g",
+        "limits_cpu_shares": 4096
+      }
     },
     {
       "name": "cmp",
@@ -57,7 +67,12 @@
       "label_namespace": "9gqubsq4lxubaxm27v1mtq9uv3",
       "domains": "https://courses.datatalks.club,http://cmp-staging.169.58.119.163.sslip.io",
       "health_check_command": "python /opt/coolify-healthcheck.py",
-      "manage_labels": true
+      "manage_labels": true,
+      "resource_limits": {
+        "limits_cpus": "4",
+        "limits_memory": "1g",
+        "limits_cpu_shares": 4096
+      }
     },
     {
       "name": "website",
@@ -97,7 +112,12 @@
       "label_namespace": "nax9srpks6z7w1jgpebiuwuov3",
       "domains": "http://origin.website.datatalks.club,http://prod.datatalks.club,http://wodajblzizrjunwme3ossav3.169.58.119.163.sslip.io",
       "health_check_command": "python /opt/coolify-healthcheck.py",
-      "manage_labels": true
+      "manage_labels": true,
+      "resource_limits": {
+        "limits_cpus": "4",
+        "limits_memory": "1g",
+        "limits_cpu_shares": 4096
+      }
     }
   ],
   "native_settings": {

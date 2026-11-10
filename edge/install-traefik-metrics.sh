@@ -138,7 +138,7 @@ if [[ -x /usr/local/sbin/ensure-coolify-proxy-networks.sh ]]; then
   /usr/local/sbin/ensure-coolify-proxy-networks.sh --apply || true
 fi
 sleep 5
-curl -sS --max-time 10 http://127.0.0.1:8082/metrics | head -n 5
+curl -sS --max-time 10 http://127.0.0.1:8082/metrics | sed -n '1,5p'
 echo "OK $HOSTNAME metrics live (internal only)"
 REMOTE
 done

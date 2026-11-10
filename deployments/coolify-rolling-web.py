@@ -241,6 +241,8 @@ def reconcile(config, call, state=source_state, apply=False):
     changed_env = {k: v for k, v in env.items() if current_env.get(k) != v}
     changed_labels = desired_labels != (app.get('custom_labels') or '')
     changed_health_check = desired_health_check != app.get('health_check_command')
+    changed_limits = {key: value for key, value in config.get('resource_limits', {}).items()
+                      if app.get(key) != value}
     tag = image.rsplit(':', 1)[1]
     changed_image = app.get('git_commit_sha') != tag if git_mode else (
         app.get('docker_registry_image_tag') != tag or app.get('docker_registry_image_name') != config['image'])
@@ -248,7 +250,7 @@ def reconcile(config, call, state=source_state, apply=False):
     # already has the target tag. Never let a failed rollout look converged.
     last = deployments[0] if deployments else {}
     needs_retry = last.get('status') in ('failed', 'cancelled', 'cancelled-by-user')
-    if not changed_env and not changed_image and not changed_labels and not changed_health_check and not needs_retry:
+    if not changed_env and not changed_image and not changed_labels and not changed_health_check and not changed_limits and not needs_retry:
         return 'in-sync'
     if not apply:
         return 'planned'
@@ -256,7 +258,7 @@ def reconcile(config, call, state=source_state, apply=False):
         call('PATCH', app_path + '/envs/bulk', {'data': [
             {'key': k, 'value': v, 'is_literal': True, 'is_runtime': True, 'is_buildtime': build_flags.get(k, False)}
             for k, v in sorted(changed_env.items())]})
-    app_patch = {}
+    app_patch = dict(changed_limits)
     if changed_image:
         app_patch.update({'git_commit_sha': tag} if git_mode else {
             'docker_registry_image_name': config['image'], 'docker_registry_image_tag': tag})
