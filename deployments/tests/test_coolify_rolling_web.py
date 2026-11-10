@@ -42,6 +42,15 @@ class RollingTests(unittest.TestCase):
         self.assertEqual(rolling.reconcile(self.config, self.call, self.state, True), 'in-sync')
         self.assertEqual(self.writes, [])
 
+    def test_resource_budget_change_rolls_same_image_once(self):
+        config = {**self.config, 'resource_limits': {'limits_cpus': '4', 'limits_memory': '1g', 'limits_cpu_shares': 4096}}
+        self.assertEqual(rolling.reconcile(config, self.call, self.state, True), 'deployed')
+        patch = next(data for method, path, data in self.writes if method == 'PATCH' and path.endswith('/native'))
+        self.assertEqual(patch, config['resource_limits'])
+        self.writes.clear()
+        self.assertEqual(rolling.reconcile(config, self.call, self.state, True), 'in-sync')
+        self.assertEqual(self.writes, [])
+
     def test_empty_environment_roundtrip_does_not_redeploy(self):
         self.env.append({'key': 'ROLLING_ORIGINAL_ENTRYPOINT', 'value': None})
         def state(config):
