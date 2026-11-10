@@ -20,7 +20,7 @@
 #      paging, so an idle DB is not a FAIL while a real archiving/shipper
 #      stop still pages (a3348a3e/t1862u).
 #
-# Alerting: on failure, sends email to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click).
+# Alerting: on failure, sends email to ALERT_TO (default dev@dtcdev.click).
 # Relay checks use direct SES SMTP; all other checks use Relay's `alerts` sender.
 # Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
@@ -173,7 +173,7 @@ HTTP_RESET_RETRY_SLEEP_SEC="${HTTP_RESET_RETRY_SLEEP_SEC:-5}"
 #   CONTENT_CHECKS="courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\""
 CONTENT_CHECKS="${CONTENT_CHECKS:-}"
 
-ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 ALERT_FROM="${ALERT_FROM:-alerts@dtcdev.click}"
 ALERT_FROM_NAME="${ALERT_FROM_NAME:-DTC Alerts}"

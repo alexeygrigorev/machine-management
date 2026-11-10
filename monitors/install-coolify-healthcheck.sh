@@ -90,11 +90,11 @@ echo "== verify =="
 "${SSH[@]}" "$HOST" 'sudo bash -n /usr/local/sbin/coolify-healthcheck.sh && echo SYNTAX_OK; cat /etc/cron.d/coolify-healthcheck'
 echo
 echo "NEXT: edit real values in /etc/coolify-healthcheck.env on ${HOST}, configure the Relay client"
-echo "for delivery to alexey@datatalks.club and dev@dtcdev.click, then run:"
+echo "for delivery to dev@dtcdev.click only, then run:"
 echo "  ssh ${HOST} 'sudo /usr/local/sbin/coolify-healthcheck.sh'"
 echo "expect ALL_OK (or CHECKS_FAILED with entries) in /var/log/coolify-healthcheck.log."
 echo "If HOST is contabo-a (CP): ensure SKIP_BACKUP_CHECKS=1 (and usually SKIP_PG_SHARED=1"
 echo "SKIP_PG_RELAY=1) in /etc/coolify-healthcheck.env — dumps/WAL exist only on contabo-b (t1209u)."
 echo "Set RECOVER_NOTIFY_MIN_SEC=600 on both hosts. Set SKIP_PUBLIC_HTTP_CHECKS=1 on"
 echo "contabo-a and 0 on contabo-b, the sole on-node public HTTP/content pager (t1273u)."
-echo "Keep ALERT_TO=alexey@datatalks.club,dev@dtcdev.click for real FAILs, including AISHL."
+echo "Keep ALERT_TO=dev@dtcdev.click for real FAILs, including AISHL."

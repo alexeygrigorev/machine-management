@@ -1,7 +1,12 @@
+> Routing policy (t2890u, 2026-11-10): all operational alerts go only to
+> `dev@dtcdev.click` (auto-forwards to oncall). This supersedes older personal
+> paging descriptions below. Preserve explicitly requested exceptions such as
+> the 0.1% complaint-rate alert. Update live env as well as defaults.
+
 # Permanent continuous healthcheck (Postgres + services)
 
 Frequent cron job that keeps watch over Coolify Contabo Postgres and apps
-and alerts **alexey@datatalks.club** and **dev@dtcdev.click** on failure — with dedupe so one outage
+and alerts **dev@dtcdev.click** only on failure — with dedupe so one outage
 does not spam. This is the **continuous** monitor (every 5 min), unlike
 [`backups/`](../backups/) which dumps daily.
 
@@ -12,7 +17,7 @@ does not spam. This is the **continuous** monitor (every 5 min), unlike
 | Cron | `*/5 * * * *` with `TZ=Europe/Berlin` (see `coolify-healthcheck.cron`) |
 | Where | **contabo-b** runs both primary PG checks, public content, AISHL jobs, and dump/WAL freshness; **contabo-a** runs local CP/obs, disk and Created-container checks. Set `SKIP_BACKUP_CHECKS=1`, `SKIP_PG_*=1` and `SKIP_PUBLIC_HTTP_CHECKS=1` on a: primary PG/backups live on b, and b owns public-content paging to avoid duplicate mail. |
 | Alternative | Coolify Scheduled Task on the node, same `*/5 * * * *` |
-| Alert to | `alexey@datatalks.club,dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; one RECOVERED per service incident after `INCIDENT_GREEN_SEC`, default 300 s of continuous green; see *One incident = one alert*) |
+| Alert to | `dev@dtcdev.click` (comma-separated) (repeat at most every `ALERT_REPEAT_MIN`, default 60 min, while still failing; one RECOVERED per service incident after `INCIDENT_GREEN_SEC`, default 300 s of continuous green; see *One incident = one alert*) |
 
 ## What gets checked
 
@@ -208,7 +213,7 @@ Test: `bash monitors/tests/test-coolify-proxy-networks.sh`
 
 ## Alert noise controls (t1273u/t1274u)
 
-Real FAILs still email `ALERT_TO=alexey@datatalks.club,dev@dtcdev.click`
+Real FAILs still email `ALERT_TO=dev@dtcdev.click`
 immediately. `RECOVER_NOTIFY_MIN_SEC=600` suppresses only RECOVERED mail
 for outages shorter than ten minutes; the check returns to OK normally.
 An outage lasting at least 600 seconds sends RECOVERED on the next green
@@ -249,7 +254,7 @@ metric files are cleaned up even when pushing is disabled.
 Catches Coolify PG IP/DNS churn and stuck long-lived worker pools that leave
 Relay workers with a stale resolve or broken DB session while PG itself is
 healthy (t1205u → SQS age/DLQ). Runs **every 1 minute** on contabo-b;
-auto-restarts dependents (cooldown-gated); alerts `alexey@datatalks.club,dev@dtcdev.click`.
+auto-restarts dependents (cooldown-gated); alerts `dev@dtcdev.click`.
 
 ### Three-layer verification (stronger than fresh TCP-only, t1218u)
 
@@ -473,7 +478,7 @@ Hetzner (RMTHZ) pages for its own disks from user cron (`*/5`, stable
 / CRIT <8% (recover >=10%), inode free WARN <10% (recover >=12%) / CRIT <5%
 (recover >=7%), plus CRIT when the 6h linear trend fills the disk within 24h.
 WARN and RECOVERED route to `dev@dtcdev.click` + daily digest only (never
-`alexey@`); CRIT pages `alexey@datatalks.club,dev@dtcdev.click` after 2
+`alexey@`); CRIT pages `dev@dtcdev.click` after 2
 consecutive breached runs (`DISK_BREACH_RUNS=2`). Repeat at most every 4h, one
 RECOVERED (flap-guarded). Prove the mail path with
 `DISK_DRILL=1 /usr/local/sbin/hetzner-disk-check.sh` (dev@ only), then run
@@ -486,7 +491,7 @@ no non-loopback `:9100` listener (`ss -tln | grep :9100`).
 
 Every alert rule across `monitors/` and `observability/` is classified as:
 
-- **PAGE** (`alexey@datatalks.club,dev@dtcdev.click`): real user-facing outage or
+- **PAGE** (`dev@dtcdev.click`): real user-facing outage or
   data-loss risk requiring immediate human action. Requires sustained breach
   (e.g. `DISK_BREACH_RUNS=2` on Hetzner, `DISK_FAIL_CONSECUTIVE=2` on Contabo,
   `DEADMAN_HTTP_RETRIES=2` on Contabo dead-man, `for: 10m`/`30m` in Prometheus)

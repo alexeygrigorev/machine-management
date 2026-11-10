@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dead-man for weekly Contabo→alt-host fast PG raise.
 #
-# Alerts to ALERT_TO (default alexey@datatalks.club,dev@dtcdev.click) when:
+# Alerts to ALERT_TO (default dev@dtcdev.click) when:
 #   - VictoriaMetrics has no dr_fast_pg_raise_last_success_unixtime, OR
 #   - (time() - last_success) > STALE_SECONDS (default 8 days = 691200)
 #
@@ -27,7 +27,7 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"
 DIGEST_SCRIPT="${DIGEST_SCRIPT:-/usr/local/sbin/ops-daily-digest.sh}"
 

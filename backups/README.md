@@ -132,7 +132,7 @@ root-owned; see t1553u). Proof is the log tail
 (`ALL_DONE s3-mirror + edge-tls + prune`) + `s3/.last-sync`, not just the
 installed cron — see the t1143u backup-copies report for a verified run.
 Staleness dead-man: `monitors/storagebox-staleness-check.sh` (36h, pages
-`alexey@datatalks.club,dev@dtcdev.click` via the `alerts` msmtp account);
+`dev@dtcdev.click` via the `alerts` msmtp account);
 install with `./monitors/install-storagebox-staleness-check.sh`.
 
 ## Restore pointers

@@ -30,7 +30,7 @@ else
 fi
 
 # ---- T2: safe defaults in repo ----
-check_grep "$SCRIPT" 'ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"' "T2a prod recipients default"
+check_grep "$SCRIPT" 'ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"' "T2a prod recipients default"
 check_grep "$SCRIPT" 'ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"' "T2b drill recipient dev-only"
 check_grep "$SCRIPT" 'STALE_SECONDS="${STALE_SECONDS:-129600}"' "T2c 36h threshold default"
 check_grep "$SCRIPT" 'DRY_RUN' "T2d DRY_RUN mode present"

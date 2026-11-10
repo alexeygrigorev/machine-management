@@ -102,7 +102,7 @@ TASK_QUEUE_MAX_READY_AGE_SEC="${TASK_QUEUE_MAX_READY_AGE_SEC:-180}"
 # for progress before treating it as no-progress and restarting (AC-B1).
 HANDLED_DB_ERROR_GRACE_SEC="${HANDLED_DB_ERROR_GRACE_SEC:-300}"
 
-ALERT_TO="${ALERT_TO:-alexey@datatalks.club,dev@dtcdev.click}"
+ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 # Ops-only recipients for DIGEST-class notices (WARN, AUTOHEALED, RECOVERED):
 # only actionable FAIL alerts that could not auto-heal page alexey@ (t1885u).
 ALERT_OPS_TO="${ALERT_OPS_TO:-dev@dtcdev.click}"

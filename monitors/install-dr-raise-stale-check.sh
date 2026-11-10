@@ -25,7 +25,7 @@ install -d -o "$RUN_USER" -g "$RUN_USER" "$RUN_HOME/.local/state/dr-raise-stale-
 # Preserve operator-owned recipients on reinstall.
 if [[ ! -f /etc/dr-raise-stale-check.env ]]; then
   cat > /etc/dr-raise-stale-check.env <<ENV
-ALERT_TO=alexey@datatalks.club,dev@dtcdev.click
+ALERT_TO=dev@dtcdev.click
 VM_URL=http://127.0.0.1:8428
 RELAY_MONITOR_CONFIG=${RUN_HOME}/.config/datamailer/config.toml
 DATAMAILER_BIN=${RUN_HOME}/.local/bin/datamailer
