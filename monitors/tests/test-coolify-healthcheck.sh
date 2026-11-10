@@ -90,9 +90,12 @@ cat > "$TMP/stubbin/msmtp" <<'EOF'
 if [[ -n "${HC_MAIL_LOG:-}" ]]; then
   printf '%s %s\n' "${0##*/}" "$*" >> "$HC_MAIL_ARGS"
   cat >> "$HC_MAIL_LOG"
+  [[ "${HC_MAIL_FAIL:-0}" == "1" ]] && exit 1
   exit 0
 fi
-cat >/dev/null; exit 0
+cat >/dev/null
+[[ "${HC_MAIL_FAIL:-0}" == "1" ]] && exit 1
+exit 0
 EOF
 cp "$TMP/stubbin/msmtp" "$TMP/stubbin/sendmail"
 cat > "$TMP/stubbin/datamailer" <<'EOF'
@@ -100,6 +103,7 @@ cat > "$TMP/stubbin/datamailer" <<'EOF'
 set -euo pipefail
 [[ "${DATAMAILER_CONFIG:-}" == "$RELAY_CONFIG_EXPECTED" ]]
 [[ -z "${DATAMAILER_API_KEY:-}" && -z "${DATAMAILER_URL:-}" ]]
+if [[ "${HC_RELAY_FAIL:-0}" == "1" ]]; then cat >/dev/null; exit 1; fi
 printf '%s\n' "ARGS: $*" >> "${HC_RELAY_ARGS:-/dev/null}"
 cat >> "${HC_RELAY_BODY:-/dev/null}"
 EOF
@@ -108,9 +112,10 @@ export DATAMAILER_BIN="$TMP/stubbin/datamailer"
 export RELAY_MONITOR_CONFIG="$TMP/relay.toml"
 export RELAY_CONFIG_EXPECTED="$TMP/relay.toml"
 
-run_check() { # $1=envfile -> prints output, returns script rc
-  local envf="$1" statedir
-  statedir="$(mktemp -d -p "$TMP")"
+run_check() { # $1=envfile [$2=state dir] -> prints output, returns script rc
+  local envf="$1" statedir="${2:-}"
+  if [[ -z "$statedir" ]]; then statedir="$(mktemp -d -p "$TMP")"; fi
+  mkdir -p "$statedir"
   COOLIFY_HEALTHCHECK_ENV_FILE="$envf" \
   STATE_DIR="$statedir" \
   LOCK_FILE="$TMP/lock-$RANDOM" \
@@ -156,7 +161,7 @@ command() {
 }
 EOF
 out=""; set +e; out="$(HC_BASH_ENV="$TMP/no-msmtp" run_check "$TMP/env-stale")"; rc=$?; set -e
-if [[ $rc -ne 0 && "$out" == *'via=sendmail'* ]] \
+if [[ $rc -ne 0 && "$out" == *'via=ses-sendmail'* ]] \
   && grep -qxF 'From: DTC Alerts <alerts@dtcdev.click>' "$TMP/mail" \
   && grep -qxF 'sendmail -t -f alerts@dtcdev.click' "$TMP/mail-args"; then
   pass "T3c sendmail fallback preserves DTC Alerts From header and alerts envelope"
@@ -177,6 +182,36 @@ if [[ $rc -ne 0 && "$out" == *'via=relay'* ]] \
   pass "T3d non-Relay checks use Relay sender and defang IP-literal URLs"
 else
   fail "T3d non-Relay route (rc=$rc) -- $out"
+fi
+
+# Relay failure falls back to direct SES in the same run.
+: > "$TMP/mail"; : > "$TMP/mail-args"; : > "$TMP/relay-args"; : > "$TMP/relay-body"
+out=""; set +e; out="$(HC_FAIL_SHARED=1 HC_RELAY_FAIL=1 run_check "$TMP/env-shared-fail")"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'via=ses-msmtp'* ]] \
+  && grep -q '^Subject: \[coolify-healthcheck\] FAIL (pg-shared)' "$TMP/mail" \
+  && grep -qxF 'msmtp -a alerts -f alerts@dtcdev.click -- test@example.invalid.test' "$TMP/mail-args"; then
+  pass "T3e non-Relay FAIL falls back to direct SES when Relay fails"
+else
+  fail "T3e direct SES fallback (rc=$rc) -- $out"
+fi
+
+# If both transports fail, retain the FAIL and deliver it on recovery with a LATE marker.
+: > "$TMP/mail"; : > "$TMP/mail-args"; : > "$TMP/relay-args"; : > "$TMP/relay-body"
+pending_state="$TMP/pending-state"
+out=""; set +e; out="$(HC_FAIL_SHARED=1 HC_RELAY_FAIL=1 HC_MAIL_FAIL=1 run_check "$TMP/env-shared-fail" "$pending_state")"; rc=$?; set -e
+if [[ $rc -ne 0 && -f "$pending_state/pg-shared.pending" ]]; then
+  pass "T3f undelivered FAIL retained for retry"
+else
+  fail "T3f pending FAIL was not retained (rc=$rc) -- $out"
+fi
+: > "$TMP/mail"; : > "$TMP/mail-args"; : > "$TMP/relay-args"; : > "$TMP/relay-body"
+out=""; set +e; out="$(HC_FAIL_SHARED=0 run_check "$TMP/env-shared-fail" "$pending_state")"; rc=$?; set -e
+if [[ $rc -eq 0 && ! -f "$pending_state/pg-shared.pending" ]] \
+  && grep -q '^Subject: \[coolify-healthcheck\] FAIL (pg-shared) \[LATE\]' "$TMP/mail" \
+  && grep -q '^LATE delivery:' "$TMP/mail"; then
+  pass "T3g recovered check delivers retained FAIL through SES marked LATE"
+else
+  fail "T3g late FAIL delivery on recovery (rc=$rc) -- $out"
 fi
 
 # ---- T4: fixed defaults + label auto-discovery — empty env must go green ----

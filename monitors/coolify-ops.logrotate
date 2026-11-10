@@ -1,0 +1,9 @@
+/var/log/coolify-healthcheck.log /var/log/coolify-proxy-networks.log /var/log/relay-pg-dns-watchdog.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

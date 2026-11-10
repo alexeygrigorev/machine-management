@@ -43,6 +43,11 @@ State (last status + last alert time per check) lives in `/var/lib/coolify-healt
 so alerts dedupe across runs. Exit `0` = all green, `1` = something failed
 (cron output also lands in `/var/log/coolify-healthcheck.log`).
 
+`coolify-ops.logrotate` rotates the healthcheck, proxy-network, and Relay PG
+watchdog logs daily with `copytruncate`; this preserves the healthcheck tail
+reader while logs rotate. The operator installer keeps a copy of any existing
+`/etc/logrotate.d/coolify-ops` before installing the rule.
+
 ## Secrets (never in git)
 
 Real values live **only** in:
@@ -64,12 +69,18 @@ mode `0600`; create and manage the sender and client through Relay's own
 admin/API/CLI. The Hetzner Maintenance client uses
 `~/.config/datamailer/config.toml` mode `0600`.
 
-The independent checks of Relay require the `alerts` msmtp account in
-`/etc/msmtprc` (root-only `0600`) with From `DTC Alerts
-<alerts@dtcdev.click>` through sandbox SES SMTP `email-smtp.us-east-1.amazonaws.com`.
-Do not use that account for other alert sources. Test Relay delivery with an
-ops-only recipient and isolated state, then restore the normal target and
-state.
+For non-Relay checks, a Relay send failure immediately falls back to the
+independent SES SMTP account. If both transports fail, the monitor retains the
+FAIL in its private state directory and retries it; if the check recovers first,
+the late failure is still sent through SES with `[LATE]` in the subject.
+
+Relay self-checks and the independent F5/B2 fallback paths require the
+`alerts` msmtp account with From `DTC Alerts <alerts@dtcdev.click>` through
+sandbox SES SMTP `email-smtp.us-east-1.amazonaws.com`: Contabo uses root-only
+`/etc/msmtprc` mode `0600`, and Hetzner uses the operator's `~/.msmtprc` mode
+`0600`. The Hetzner 503 digest sends directly to `dev@dtcdev.click`. Test mail
+delivery with an ops-only recipient and isolated state, then restore the
+normal target and state.
 
 ## Enable (once targets exist on Contabo)
 
@@ -84,8 +95,8 @@ state.
 2. On the node, fill `/etc/coolify-healthcheck.env` (real container names,
    DB names, public app URLs from the Drive doc); `chmod 600`.
 3. Configure the Relay client as above; verify its sender `alerts` and test
-   delivery with an ops-only forced failure + recovery. Keep SES SMTP only for
-   checks of Relay itself.
+   delivery with an ops-only forced failure + recovery. SES SMTP remains the
+   independent Relay self-check path and the fallback when Relay delivery fails.
 4. Manual first run: `sudo /usr/local/sbin/coolify-healthcheck.sh` → log ends
    `ALL_OK`, state files appear under `/var/lib/coolify-healthcheck/`.
 5. Confirm cron installed: `cat /etc/cron.d/coolify-healthcheck`; next hour
@@ -360,11 +371,13 @@ pages.
 | `relay-pg-dns-watchdog.env.example` | `/etc/relay-pg-dns-watchdog.env` |
 | `install-relay-pg-dns-watchdog.sh` | scp + cron installer |
 | `tests/test-relay-pg-dns-watchdog.sh` | regression test suite (TCP + stale pool + SQL progress) |
-| `contabo-deadman.sh` | off-Contabo dead-man (Hetzner user cron): node reachability + check freshness + external markers |
-| `contabo-deadman.cron` | `*/5 * * * *` user-crontab template (Hetzner, never Contabo) |
+| `contabo-deadman.sh` | off-Contabo dead-man (Hetzner user cron): node reachability + check freshness + sustained public HTTP 200 probes |
+| `contabo-deadman.cron` | every-minute dead-man plus 08:05 daily 503 digest (Hetzner, never Contabo) |
 | `contabo-deadman.env.example` | `~/.contabo-deadman.env` (optional overrides) |
 | `install-contabo-deadman.sh` | Hetzner-side installer (ssh/msmtp/cron checks, no secrets) |
 | `tests/test-contabo-deadman.sh` | dead-man suite (unreachable/stale/marker/drill/recovery) |
+| `contabo-503-digest.sh` / `.py` | daily direct-mail digest of short Traefik 5xx windows plus a monitoring-gap alert |
+| `tests/test-short-503-digest.sh` / `test_short_503_digest.py` | isolated metrics/mail stubs and parser tests |
 
 SOP: `../contingency/relay-pg-dns-after-coolify-pg-redeploy.md`
 
@@ -373,13 +386,25 @@ Install: `./monitors/install-relay-pg-dns-watchdog.sh contabo-b`
 ## Independent off-Contabo dead-man
 
 Hetzner user cron runs the stable `/usr/local/sbin/contabo-deadman.sh` copy
-every five minutes. It checks both nodes over SSH plus public content from
-outside Contabo. SSH has an overall deadline, including the remote command.
+every minute. It checks both nodes over SSH plus public content from outside
+Contabo. Public endpoints must return HTTP 200 and any configured marker must
+match. A continuous failure is kept pending for 120 seconds before this
+non-LLM path sends a direct mail to `dev@dtcdev.click`; node reachability and
+check freshness failures still page immediately. SSH has an overall deadline,
+including the remote command.
 Freshness is the timestamp of the latest completed `ALL_OK` or `CHECKS_FAILED`
 run, not the log's modification time: repeated lock-skip or partial output
 must not hide a stuck monitor. A completed failing run is fresh; its actual
 findings remain the on-node pager's responsibility. Unaccepted mail delivery
 retains the previous state and retries on the next run, including recovery.
+
+The daily 08:05 Europe/Berlin `contabo-503-digest.sh` queries the two Traefik
+scrape targets and the previous 24 hours of 502/503/504 counters over SSH to
+VictoriaMetrics. It sends one direct SES mail through `msmtp` to
+`dev@dtcdev.click`, listing windows shorter than 120 seconds. Missing or down
+Traefik scrape targets, a failed query, or malformed metrics raise a separate
+direct-mail monitoring-gap alert; recovery is mailed only after the full
+metrics path succeeds.
 
 Install updates with `./monitors/install-contabo-deadman.sh` as the operator
 user on Hetzner. SMTP configuration stays private. `DEADMAN_FORCE_FAIL=1`
@@ -516,5 +541,5 @@ Every alert rule across `monitors/` and `observability/` is classified as:
 - **Grouping.** Checks fold into a service (`http-relay`, `content-relay_health`, `ext-relay_health` -> `relay`; both Contabo nodes -> `contabo`). The first FAIL of any check opens the incident and pages at once (fail-loud). Sibling FAILs are logged as `HOLD`, not mailed. Repeat reminder: `ALERT_REPEAT_MIN`.
 - **Hysteresis.** RECOVERED is mailed once, only after every check of the service has been green for `INCIDENT_GREEN_SEC` (300). A re-FAIL inside that window is the same incident. A new FAIL within `INCIDENT_FLAP_WINDOW_SEC` (900) after RECOVERED is held until it lasts `INCIDENT_FLAP_CONFIRM_SEC` (300), then pages once.
 - **Dev/staging** (`*_dev`, `*-dev`, `*_staging`) never mail: a `DEV-ALERT` log line plus one DataOps task per incident (`dataops tasks create --tags dev-alert`; `INCIDENT_TASK_CMD` overrides).
-- **Who pages what.** coolify-healthcheck (contabo-b) pages service outages. The Hetzner dead-man mails node/stale/SSH failures; its external URL probes mail only when a node check also failed in that run (provider outage). OBS `A1_https_down` stays visible but has no mail receiver (coolify-observability `obs-log` route).
+- **Who pages what.** coolify-healthcheck (contabo-b) pages service outages. The Hetzner dead-man pages sustained public HTTP non-200 failures after 120 seconds even while both nodes pass SSH checks. Its daily direct-mail digest lists short 5xx windows from F4 metrics and pages on a missing/down Traefik metrics path. OBS `A1_https_down` stays visible but has no mail receiver (coolify-observability `obs-log` route).
 - `RECOVER_NOTIFY_MIN_SEC` is gone (replaced by the 5-min green rule).
