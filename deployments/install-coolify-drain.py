@@ -83,7 +83,7 @@ def main():
         ssh(args.primary, 'sudo chmod 600 ' + PROD + '.rolling.tmp && sudo mv ' + PROD + '.rolling.tmp ' + PROD)
     ssh(args.primary, shlex.join(['sudo', 'docker', 'compose', '--project-directory', '/data/coolify/source',
         '--project-name', project, '-f', '/data/coolify/source/docker-compose.yml', '-f', PROD,
-        'up', '-d', '--no-deps', 'coolify']))
+        'up', '-d', '--no-deps', '--force-recreate', 'coolify']))
     print('Installed persistent drain hook; control-plane image pinned to tested version. Public containers preserved.')
 
 

@@ -13,6 +13,24 @@ spec.loader.exec_module(rolling)
 
 
 class RollingTests(unittest.TestCase):
+    def test_conflicting_live_service_probe_settings_are_rejected(self):
+        config = {'app_uuid': 'native', 'ssh_host': 'node'}
+        key = 'traefik.http.services.web.loadbalancer.healthcheck.interval'
+        with patch.object(rolling.subprocess, 'check_output', return_value=json.dumps({key: '2s'}) + '\n'):
+            with self.assertRaisesRegex(ValueError, 'conflicts'):
+                rolling.verify_routing_overlap(config, key + '=5s')
+        with patch.object(rolling.subprocess, 'check_output', return_value=json.dumps({key: '5s'}) + '\n'):
+            rolling.verify_routing_overlap(config, key + '=5s')
+
+    def test_metadata_match_does_not_hide_conflicting_live_routing(self):
+        config = {**self.config, 'guard_routing_overlap': True}
+        def new(config):
+            return 'ghcr.io/org/web:20261110-120000-abcdef0', {'SECRET': 'private'}
+        with patch.object(rolling, 'verify_routing_overlap', side_effect=ValueError('live conflict')):
+            with self.assertRaisesRegex(ValueError, 'live conflict'):
+                rolling.reconcile(config, self.call, new, True)
+        self.assertEqual(self.writes, [])
+
     def setUp(self):
         self.config = {'source_uuid': 'source', 'app_uuid': 'native', 'image': 'ghcr.io/org/web'}
         self.app = {'build_pack': 'dockerimage', 'health_check_enabled': True,

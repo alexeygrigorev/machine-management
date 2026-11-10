@@ -458,3 +458,15 @@ host CPU weights after replacing a database or proxy until its resource
 owner persists them. This script does not upgrade packages or reboot hosts.
 Reboots need a separate maintenance window after the DOCKER-USER-only restore
 has been verified; perform one host at a time and observe public health.
+
+Routing-definition changes require a separate namespace migration. During the
+2026-11-10 website health-gate adoption, old 2s/1s and new 5s/3s checks shared
+three service names. Traefik rejected those definitions at16:39:53Z and served
+42 origin503s until16:40:09Z. The follower now compares desired definitions
+against actual running public-container labels before writes, including when
+Coolify metadata already contains the target configuration. A conflict keeps
+the current release and reports failure; changing `label_namespace` in the
+manifest alone does not migrate existing labels or file-provider origin routes.
+
+The drain-hook installer forces control-plane recreation so persistent PHP
+workers load a changed hook. Public applications and databases remain running.

@@ -29,7 +29,8 @@
         "limits_cpus": "4",
         "limits_memory": "1g",
         "limits_cpu_shares": 4096
-      }
+      },
+      "guard_routing_overlap": true
     },
     {
       "name": "relay",
@@ -50,7 +51,8 @@
         "limits_cpus": "4",
         "limits_memory": "1g",
         "limits_cpu_shares": 4096
-      }
+      },
+      "guard_routing_overlap": true
     },
     {
       "name": "cmp",
@@ -72,7 +74,8 @@
         "limits_cpus": "4",
         "limits_memory": "1g",
         "limits_cpu_shares": 4096
-      }
+      },
+      "guard_routing_overlap": true
     },
     {
       "name": "website",
@@ -117,7 +120,8 @@
         "limits_cpus": "4",
         "limits_memory": "1g",
         "limits_cpu_shares": 4096
-      }
+      },
+      "guard_routing_overlap": true
     }
   ],
   "native_settings": {

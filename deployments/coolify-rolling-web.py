@@ -189,6 +189,34 @@ def source_image_tag_pattern(config):
     return formats[tag_format]
 
 
+def verify_routing_overlap(config, desired_labels):
+    """Traefik rejects duplicate named definitions when properties differ."""
+    uuid = config['app_uuid']
+    if not re.fullmatch('[a-z0-9]+', uuid):
+        raise ValueError('Invalid application identifier')
+    output = subprocess.check_output(['ssh', '-o', 'BatchMode=yes', config['ssh_host'],
+        'sudo docker inspect --format ' + shlex.quote('{{json .Config.Labels}}') +
+        ' $(sudo docker ps -q --filter label=dtc.rolling-web.application=' + uuid + ')'],
+        text=True, stderr=subprocess.DEVNULL, timeout=30)
+
+    def definitions(labels):
+        result = {}
+        for key, value in labels.items():
+            if re.match(r'traefik\.http\.(services|routers|middlewares)\.', key):
+                entity, property = '.'.join(key.split('.')[:4]), '.'.join(key.split('.')[4:])
+                result.setdefault(entity, {})[property] = str(value)
+        return result
+
+    desired = definitions(dict(line.split('=', 1) for line in desired_labels.splitlines() if '=' in line))
+    live_rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+    if not live_rows:
+        raise ValueError('Cannot verify live routing overlap; retain current release')
+    for labels in live_rows:
+        live = definitions(labels)
+        if any(live[name] != desired[name] for name in live.keys() & desired.keys()):
+            raise ValueError('Routing configuration conflicts with live replica; separate namespace migration required')
+
+
 def reconcile(config, call, state=source_state, apply=False):
     image, env = state(config)
     git_mode = config.get('rollout_mode') == 'git-commit'
@@ -252,6 +280,8 @@ def reconcile(config, call, state=source_state, apply=False):
     needs_retry = last.get('status') in ('failed', 'cancelled', 'cancelled-by-user')
     if not changed_env and not changed_image and not changed_labels and not changed_health_check and not changed_limits and not needs_retry:
         return 'in-sync'
+    if config.get('guard_routing_overlap'):
+        verify_routing_overlap(config, base64.b64decode(desired_labels).decode())
     if not apply:
         return 'planned'
     if changed_env:
