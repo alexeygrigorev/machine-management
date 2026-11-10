@@ -32,7 +32,11 @@ credentials doc and on operator machines under `~/.secrets/` (not in git).
 ## Coolify URLs
 
 - Primary UI: http://169.58.119.163:8000
-- Second node: http://169.58.124.141:8000 (long-term: add as **remote server** under primary)
+- Second node is managed as a remote server by the primary. Its empty secondary
+  control plane is retired with `scripts/retire-empty-secondary-coolify.sh` after
+  verifying every application/service/database table is empty and taking an
+  encrypted metadata/database backup. Never bootstrap a second local control
+  plane here. All application containers and existing Docker volumes are retained.
 
 ## Operator SSH model
 
