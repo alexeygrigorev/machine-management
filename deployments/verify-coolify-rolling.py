@@ -53,7 +53,7 @@ def snapshot(app, config):
     return result
 
 
-def probe(url, stop, rows, file):
+def probe(url, stop, rows, file, interval=.3):
     with file.open('x', buffering=1) as output:
         while not stop.is_set():
             started = time.monotonic()
@@ -71,7 +71,7 @@ def probe(url, stop, rows, file):
             row['ms'] = round((time.monotonic() - started) * 1000)
             rows.append(row)
             output.write(json.dumps(row) + '\n')
-            stop.wait(max(0, .3 - (time.monotonic() - started)))
+            stop.wait(max(0, interval - (time.monotonic() - started)))
 
 
 def lifecycle(events, old, new):
@@ -96,7 +96,8 @@ def collect_events(process, events, file):
     with file.open('x', buffering=1) as output:
         for line in process.stdout:
             event = json.loads(line)
-            safe = {key: event.get(key) for key in ('id', 'Action', 'timeNano')}
+            safe = {key: event.get(key) for key in ('Action', 'timeNano')}
+            safe['id'] = event.get('id') or event.get('Actor', {}).get('ID')
             events.append(safe)
             output.write(json.dumps(safe) + '\n')
 
@@ -129,10 +130,11 @@ def verify(args):
         args=(event_process, events, args.output / 'events.jsonl'), daemon=True)
     event_worker.start()
     rows, stop = [], threading.Event()
-    worker = threading.Thread(target=probe, args=(args.url, stop, rows, args.output / 'probes.jsonl'))
+    interval = 5 if app['name'] == 'relay' else .3
+    worker = threading.Thread(target=probe, args=(args.url, stop, rows, args.output / 'probes.jsonl', interval))
     worker.start()
     try:
-        time.sleep(10)
+        time.sleep(max(10, interval * 10))
         if len(rows) < 10 or any(row['status'] != 200 for row in rows):
             raise ValueError('Public readiness baseline failed')
         deployment = api('POST', '/api/v1/deploy?uuid=' + app['app_uuid'])['deployments'][0]['deployment_uuid']
@@ -184,7 +186,7 @@ def verify(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=HERE / 'coolify-rolling-web.json')
-    parser.add_argument('--app', required=True, choices=('website', 'cmp', 'aishl'))
+    parser.add_argument('--app', required=True, choices=('website', 'cmp', 'aishl', 'relay'))
     parser.add_argument('--url', required=True, help='Public readiness endpoint without a query string')
     parser.add_argument('--output', type=Path, required=True, help='New evidence directory')
     parser.add_argument('--deploy', action='store_true', required=True)
