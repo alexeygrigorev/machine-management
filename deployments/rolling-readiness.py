@@ -23,6 +23,7 @@ class Readiness:
         self.url = url
         self.ready = False
         self.failures = 0
+        self.saturated = False
 
     def check_once(self):
         success = False
@@ -32,27 +33,37 @@ class Readiness:
                 response.read()
         except Exception:
             pass
+        self.saturated = not success
         if success:
             self.failures = 0
+            # Readiness is a startup gate. Once the app has answered once,
+            # transient slowness is reported separately and does not eject
+            # the only serving replica.
             self.ready = True
         else:
             self.failures += 1
-            if self.failures >= 3:
-                self.ready = False
 
     def run(self):
         while True:
             self.check_once()
-            time.sleep(1)
+            time.sleep(2)
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        status = 503
-        if self.path == '/ready' and not MARKER.exists() and PROBE is not None and PROBE.ready:
+        if self.path == '/ready':
+            status = 200 if not MARKER.exists() and PROBE is not None and PROBE.ready else 503
+            body = b''
+        elif self.path == '/saturated':
             status = 200
+            body = b'true' if PROBE is not None and PROBE.saturated else b'false'
+        else:
+            status = 404
+            body = b''
         self.send_response(status)
-        self.send_header('Content-Length', '0')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
+        if body:
+            self.wfile.write(body)
 
     def log_message(self, *args):
         pass

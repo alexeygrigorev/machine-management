@@ -64,15 +64,23 @@ class DrainTests(unittest.TestCase):
                         return response.status
                 except urllib.error.HTTPError as error:
                     return error.code
+            def body(url):
+                try:
+                    with urllib.request.urlopen(url, timeout=2) as response:
+                        return response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    return error.code, error.read()
             try:
                 probe = readiness.Readiness(app_url)
                 with patch.object(readiness, 'MARKER', marker), patch.object(readiness, 'PROBE', probe):
                     Application.status = 503
                     probe.check_once()
                     self.assertEqual(status(ready_url), 503)
+                    self.assertEqual(body(ready_url.replace('/ready', '/saturated')), (200, b'true'))
                     Application.status = 200
                     probe.check_once()
                     self.assertEqual(status(ready_url), 200)
+                    self.assertEqual(body(ready_url.replace('/ready', '/saturated')), (200, b'false'))
                     marker.touch()
                     self.assertEqual(status(ready_url), 503)
                     self.assertEqual(status(app_url), 200)
@@ -80,9 +88,10 @@ class DrainTests(unittest.TestCase):
                     Application.status = 503
                     probe.check_once()
                     self.assertEqual(status(ready_url), 200)
+                    self.assertEqual(body(ready_url.replace('/ready', '/saturated')), (200, b'true'))
                     probe.check_once()
                     probe.check_once()
-                    self.assertEqual(status(ready_url), 503)
+                    self.assertEqual(status(ready_url), 200)
             finally:
                 Application.status = 200
                 for server in [ready, app]:
@@ -117,10 +126,12 @@ class DrainTests(unittest.TestCase):
             if args[0] == 'ps':
                 return 'old\nnew\n'
             return json.dumps([old, new])
-        with patch.object(drain, 'docker', docker), patch.object(drain.time, 'sleep'):
+        sleeps = []
+        with patch.object(drain, 'docker', docker), patch.object(drain.time, 'sleep', side_effect=sleeps.append):
             drain.main('web-old')
         self.assertIn(('exec', 'web-old', 'python', '/opt/rolling-readiness.py', 'drain'), calls)
         self.assertFalse(any(c[0] in ('stop', 'kill', 'rm') for c in calls))
+        self.assertEqual(sleeps, [3, 15])
 
 
 if __name__ == '__main__':

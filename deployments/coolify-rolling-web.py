@@ -34,33 +34,90 @@ def verify_asset_bindings(config, call, app_path):
             raise ValueError('Helper binding is stale; keep current public release')
 
 
-def labels_for_web(source_labels, source_uuid, app_uuid, path, health_port=None, application_uuid=None, priority=100):
-    """Independent router identities; preserve HTTPS and origin allow/deny priority."""
+def collapse_duplicate_services(labels):
+    """Point equivalent routers at one backend service and remove duplicates."""
+    properties = {}
+    for key, value in labels.items():
+        match = re.fullmatch(r'traefik\.http\.services\.([^.]+)\.(.+)', key)
+        if match:
+            properties.setdefault(match.group(1), {})[match.group(2)] = value
+    if len(properties) < 2:
+        return
+    fingerprints = list(properties.values())
+    if any(fingerprint != fingerprints[0] for fingerprint in fingerprints[1:]):
+        return
+
+    names = set(properties)
+    canonical = sorted(names)[0]
+    for key in list(labels):
+        match = re.fullmatch(r'traefik\.http\.routers\.([^.]+)\.service', key)
+        if not match:
+            continue
+        router = match.group(1)
+        reference = labels[key]
+        name, separator, provider = reference.partition('@')
+        if name in names:
+            labels[key] = canonical + (separator + provider if separator else '')
+        elif not separator and router in names:
+            labels[key] = canonical
+
+    for key in list(labels):
+        match = re.fullmatch(r'traefik\.http\.services\.([^.]+)\..+', key)
+        if match and match.group(1) in names - {canonical}:
+            del labels[key]
+
+
+def labels_for_web(source_labels, source_uuid, app_uuid, path, health_port=None,
+                   application_uuid=None, priority=None, extra_middlewares=(),
+                   preserve_non_traefik=False, collapse_services=False):
+    """Set resilient proxy labels and collapse identical per-domain backends."""
     labels = {}
     for line in source_labels:
         key, _, value = line.partition('=')
         if key.startswith('traefik.'):
             labels[key.replace(source_uuid, app_uuid)] = value.replace(source_uuid, app_uuid)
+        elif preserve_non_traefik and key:
+            labels[key] = value
     labels['traefik.docker.network'] = 'coolify'
     if application_uuid:
         labels['dtc.rolling-web.application'] = application_uuid
     labels['traefik.http.middlewares.rolling-retry.retry.attempts'] = '3'
     labels['traefik.http.middlewares.rolling-retry.retry.initialinterval'] = '100ms'
+
+    if collapse_services:
+        collapse_duplicate_services(labels)
     for key in list(labels):
         if key.startswith('traefik.http.routers.') and key.endswith('.rule'):
             prefix = key.removesuffix('.rule')
-            labels[prefix + '.priority'] = str(priority)
-            middlewares = labels.get(prefix + '.middlewares', '')
-            if 'redirect-to-https' not in middlewares:
-                labels[prefix + '.middlewares'] = ','.join(filter(None, [middlewares, 'rolling-retry']))
+            if priority is not None or prefix + '.priority' not in labels:
+                labels[prefix + '.priority'] = str(priority if priority is not None else 100)
+            middlewares = []
+            seen = set()
+            for item in labels.get(prefix + '.middlewares', '').split(','):
+                item = item.strip()
+                if not item:
+                    continue
+                identity = 'rolling-retry' if item.split('@', 1)[0] == 'rolling-retry' else item
+                if identity not in seen:
+                    seen.add(identity)
+                    middlewares.append(item)
+            serving_router = not any('redirect-to-https' in item for item in middlewares)
+            additions = ['rolling-retry', *extra_middlewares] if serving_router else []
+            for middleware in additions:
+                identity = 'rolling-retry' if middleware.split('@', 1)[0] == 'rolling-retry' else middleware
+                if identity not in seen:
+                    seen.add(identity)
+                    middlewares.append(middleware)
+            if middlewares:
+                labels[prefix + '.middlewares'] = ','.join(middlewares)
         if key.endswith('.loadbalancer.server.port'):
             prefix = key.removesuffix('.server.port')
             labels[prefix + '.healthcheck.path'] = path
             if health_port:
                 labels[prefix + '.healthcheck.port'] = str(health_port)
             labels[prefix + '.healthcheck.hostname'] = 'localhost'
-            labels[prefix + '.healthcheck.interval'] = '2s'
-            labels[prefix + '.healthcheck.timeout'] = '1s'
+            labels[prefix + '.healthcheck.interval'] = '5s'
+            labels[prefix + '.healthcheck.timeout'] = '3s'
             labels[prefix + '.serverstransport'] = 'rolling-web@file'
     return '\n'.join(k + '=' + str(v) for k, v in sorted(labels.items()))
 
@@ -75,8 +132,11 @@ def rolling_guard(app, allowed_build_packs=('dockerimage',)):
             or not app.get('health_check_enabled')
             or '.loadbalancer.healthcheck.path=/ready' not in labels
             or '.loadbalancer.healthcheck.port=8099' not in labels
+            or '.loadbalancer.healthcheck.interval=5s' not in labels
+            or '.loadbalancer.healthcheck.timeout=3s' not in labels
             or 'dtc.rolling-web.application=' not in labels
-            or '8099/ready' not in (app.get('health_check_command') or '')
+            or '/opt/coolify-healthcheck.py' not in (app.get('health_check_command') or '')
+            or '8099/ready' in (app.get('health_check_command') or '')
             or '/opt/rolling-launch.py' not in (app.get('custom_docker_run_options') or '')):
         raise ValueError('Native application is not eligible for health-gated rolling updates')
 
@@ -122,7 +182,22 @@ def reconcile(config, call, state=source_state, apply=False):
     app_path = '/api/v1/applications/' + config['app_uuid']
     app = call('GET', app_path)
     allowed_build_packs = ('dockerfile',) if git_mode else ('dockerimage',)
-    rolling_guard(app, allowed_build_packs)
+
+    desired_labels = app.get('custom_labels') or ''
+    desired_health_check = app.get('health_check_command')
+    if config.get('manage_labels'):
+        current_label_lines = base64.b64decode(desired_labels).decode().splitlines()
+        label_text = labels_for_web(
+            current_label_lines, config['app_uuid'], config['app_uuid'], '/ready',
+            health_port=8099, application_uuid=config['app_uuid'],
+            extra_middlewares=config.get('proxy_middlewares', ()),
+            preserve_non_traefik=True,
+            collapse_services=config.get('collapse_services', False))
+        desired_labels = base64.b64encode(label_text.encode()).decode()
+        desired_health_check = config.get('health_check_command', desired_health_check)
+    guarded_app = {**app, 'custom_labels': desired_labels,
+                   'health_check_command': desired_health_check}
+    rolling_guard(guarded_app, allowed_build_packs)
     if config.get('asset_hashes'):
         verify_asset_bindings(config, call, app_path)
     queues = call('GET', '/api/v1/deployments/applications/' + config['app_uuid'])
@@ -148,6 +223,8 @@ def reconcile(config, call, state=source_state, apply=False):
         env.pop(key, None)
     build_flags = {e['key']: bool(e.get('is_buildtime')) for e in env_records if not e.get('is_preview')}
     changed_env = {k: v for k, v in env.items() if current_env.get(k) != v}
+    changed_labels = desired_labels != (app.get('custom_labels') or '')
+    changed_health_check = desired_health_check != app.get('health_check_command')
     tag = image.rsplit(':', 1)[1]
     changed_image = app.get('git_commit_sha') != tag if git_mode else (
         app.get('docker_registry_image_tag') != tag or app.get('docker_registry_image_name') != config['image'])
@@ -155,7 +232,7 @@ def reconcile(config, call, state=source_state, apply=False):
     # already has the target tag. Never let a failed rollout look converged.
     last = deployments[0] if deployments else {}
     needs_retry = last.get('status') in ('failed', 'cancelled', 'cancelled-by-user')
-    if not changed_env and not changed_image and not needs_retry:
+    if not changed_env and not changed_image and not changed_labels and not changed_health_check and not needs_retry:
         return 'in-sync'
     if not apply:
         return 'planned'
@@ -163,12 +240,29 @@ def reconcile(config, call, state=source_state, apply=False):
         call('PATCH', app_path + '/envs/bulk', {'data': [
             {'key': k, 'value': v, 'is_literal': True, 'is_runtime': True, 'is_buildtime': build_flags.get(k, False)}
             for k, v in sorted(changed_env.items())]})
+    app_patch = {}
     if changed_image:
-        payload = {'git_commit_sha': tag} if git_mode else {'docker_registry_image_name': config['image'], 'docker_registry_image_tag': tag}
-        call('PATCH', app_path, payload)
+        app_patch.update({'git_commit_sha': tag} if git_mode else {
+            'docker_registry_image_name': config['image'], 'docker_registry_image_tag': tag})
+    if changed_labels:
+        app_patch['custom_labels'] = desired_labels
+    if changed_health_check:
+        app_patch['health_check_command'] = desired_health_check
+    if app_patch:
+        call('PATCH', app_path, app_patch)
     rolling_guard(call('GET', app_path), allowed_build_packs)
     call('POST', '/api/v1/deploy?uuid=' + config['app_uuid'])
     return 'deployed'
+
+
+def active_rollout(config, call):
+    """Return the first active follower application before starting another."""
+    for app in config['applications']:
+        response = call('GET', '/api/v1/deployments/applications/' + app['app_uuid'])
+        deployments = response.get('deployments', []) if isinstance(response, dict) else response
+        if any(d.get('status') in ('queued', 'in_progress') for d in deployments):
+            return app['name']
+    return None
 
 
 class API:
@@ -221,14 +315,24 @@ def main():
     verify_control_plane(config)
     verify_host_assets(config)
     api = API(config['base'], Path(config['token_file']).read_text().strip())
+    active = active_rollout(config, api)
+    if active:
+        print(active + ': busy (another configured rollout is active)', flush=True)
+        return 0
     failed = False
     for app in config['applications']:
         try:
             app = {**app, 'asset_hashes': config['assets']}
-            print(app['name'] + ': ' + reconcile(app, api, apply=args.apply), flush=True)
+            result = reconcile(app, api, apply=args.apply)
+            print(app['name'] + ': ' + result, flush=True)
+            # Promote or mutate one public app per cron run. On the next run,
+            # a queued/in-progress deployment stops the remaining apps too.
+            if result in ('deployed', 'busy'):
+                break
         except Exception as error:
             failed = True
             print(app['name'] + ': failed (' + type(error).__name__ + '); current public container retained.', file=sys.stderr, flush=True)
+            break
     return int(failed)
 
 

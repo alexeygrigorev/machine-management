@@ -84,8 +84,8 @@ def lifecycle(events, old, new):
               'old_drained': first(old, 'exec_start: python /opt/rolling-readiness.py drain'),
               'old_killed': first(old, 'kill')}
     ordered = list(stamps.values())
-    if ordered != sorted(set(ordered)) or (stamps['old_killed'] - stamps['old_drained']) / 1e9 < 6:
-        raise ValueError('Replacement was not healthy before drain and six-second withdrawal')
+    if ordered != sorted(set(ordered)) or (stamps['old_killed'] - stamps['old_drained']) / 1e9 < 15:
+        raise ValueError('Replacement was not healthy before drain and 15-second withdrawal')
     return {key: datetime.datetime.fromtimestamp(value / 1e9, datetime.timezone.utc).isoformat()
             for key, value in stamps.items()}
 

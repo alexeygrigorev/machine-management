@@ -1,0 +1,9 @@
+http:
+  middlewares:
+    aishl-rate-limit:
+      rateLimit:
+        average: 10
+        burst: 40
+    aishl-in-flight:
+      inFlightReq:
+        amount: 128

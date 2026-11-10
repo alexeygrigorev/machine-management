@@ -8,7 +8,7 @@ spec.loader.exec_module(acceptance)
 
 
 class AcceptanceTests(unittest.TestCase):
-    def events(self, healthy=2, drained=3, killed=10):
+    def events(self, healthy=2, drained=3, killed=20):
         return [
             {'id': 'new', 'Action': 'start', 'timeNano': 1_000_000_000},
             {'id': 'new', 'Action': 'health_status: healthy', 'timeNano': healthy * 1_000_000_000},
@@ -27,7 +27,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_insufficient_proxy_withdrawal_cannot_be_accepted(self):
         with self.assertRaises(ValueError):
-            acceptance.lifecycle(self.events(killed=8), 'old', 'new')
+            acceptance.lifecycle(self.events(killed=17), 'old', 'new')
 
     def test_missing_drain_proof_cannot_be_accepted(self):
         events = [e for e in self.events() if not e['Action'].startswith('exec_start')]
