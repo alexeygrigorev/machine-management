@@ -11,13 +11,18 @@ cat > "$TMP/bin/curl" <<'STUB'
 # A sparse success exists in storage but is absent from instant lookback.
 echo query >> "$CURL_LOG"
 if [[ " $* " != *'query=time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[691200s]))'* ]]; then
-  echo '{"status":"success","data":{"result":[]}}'
+  echo '{"status":"success","data":{"resultType":"vector","result":[]}}'
   exit 0
 fi
 case "$FIXTURE" in
-  missing) echo '{"status":"success","data":{"result":[]}}';;
+  transport) exit 7;;
+  http) echo '{"status":"success","data":{"resultType":"vector","result":[]}}'; exit 22;;
+  api) echo '{"status":"error","data":{"resultType":"vector","result":[]}}';;
+  invalid) echo '{"status":"success","data":{}}';;
+  nan) echo '{"status":"success","data":{"resultType":"vector","result":[{"value":[0,"NaN"]}]}}';;
+  missing) echo '{"status":"success","data":{"resultType":"vector","result":[]}}';;
   unreadable) echo 'unreadable';;
-  *) printf '{"status":"success","data":{"result":[{"value":[0,"%s"]}]}}\n' "$FIXTURE";;
+  *) printf '{"status":"success","data":{"resultType":"vector","result":[{"value":[0,"%s"]}]}}\n' "$FIXTURE";;
 esac
 STUB
 cat > "$TMP/bin/msmtp" <<'STUB'
@@ -75,14 +80,27 @@ for age in 45436 604799 648000 691200; do
   rg -q 'OK last_success' "$TMP/output"
   cmp "$TMP/before" "$STATE_DIR/stale.state"
 done
-for fixture in missing unreadable 691201; do
+for fixture in missing 691201; do
   run 1 FIXTURE="$fixture" DRY_RUN=1
   rg -q 'DRY_RUN would alert' "$TMP/output"
   cmp "$TMP/before" "$STATE_DIR/stale.state"
 done
 run 0 FIXTURE=45436 DRY_RUN=1 STATE_DIR="$TMP/absent"
 [[ ! -e "$TMP/absent" && ! -e "$MAIL_LOG" ]]
-echo 'PASS: sparse samples fresh through 8d; missing/stale/unreadable fail; dry-run leaves mail/state untouched'
+echo 'PASS: sparse samples fresh through 8d; missing/stale fail; dry-run leaves mail/state untouched'
+# Query failures must not fabricate missing metrics, send mail, or mutate state.
+for fixture in transport http api invalid nan unreadable; do
+  for status in OK FAIL; do
+    printf 'STATUS=%s\nLAST_ALERT=1\n' "$status" > "$STATE_DIR/stale.state"
+    cp "$STATE_DIR/stale.state" "$TMP/before"
+    run 2 FIXTURE="$fixture" DRY_RUN=0
+    rg -q 'UNKNOWN: VictoriaMetrics query' "$TMP/output"
+    reject_match -q 'no attempts recorded|DRY_RUN would alert|RECOVERED' "$TMP/output"
+    cmp "$TMP/before" "$STATE_DIR/stale.state"
+    [[ ! -e "$MAIL_LOG" ]]
+  done
+done
+echo 'PASS: transport/HTTP/API/malformed/nonfinite responses preserve OK/FAIL state without mail'
 # A real failure uses Relay even when both local MTAs are healthy.
 rm -f "$MAIL_LOG" "$STATE_DIR/stale.state"
 run 1 FIXTURE=missing DRY_RUN=0

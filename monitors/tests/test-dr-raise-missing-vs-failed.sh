@@ -16,9 +16,10 @@ else
   fixture="${FIXTURE_SUCCESS:-missing}"
 fi
 case "$fixture" in
-  missing) echo '{"status":"success","data":{"result":[]}}';;
+  missing) echo '{"status":"success","data":{"resultType":"vector","result":[]}}';;
+  transport) exit 7;;
   unreadable) echo 'not-json';;
-  *) printf '{"status":"success","data":{"result":[{"value":[0,"%s"]}]}}\n' "$fixture";;
+  *) printf '{"status":"success","data":{"resultType":"vector","result":[{"value":[0,"%s"]}]}}\n' "$fixture";;
 esac
 STUB
 cat > "$TMP/bin/datamailer" <<'STUB'
@@ -59,6 +60,15 @@ echo 'PASS: stale success + fresh run -> failing'
 run 1 FIXTURE_SUCCESS=691201 FIXTURE_RUN=missing
 grep -q 'no successful raise within 8 days' "$TMP/output" || { cat "$TMP/output"; echo "stale case message" >&2; exit 1; }
 echo 'PASS: stale success + missing run -> stale window'
+
+# A failed diagnostic probe cannot turn unknown health into missing/failing.
+run 2 FIXTURE_SUCCESS=missing FIXTURE_RUN=transport
+grep -q 'UNKNOWN:' "$TMP/output"
+run 2 FIXTURE_SUCCESS=691201 FIXTURE_RUN=unreadable
+grep -q 'UNKNOWN:' "$TMP/output"
+run 0 FIXTURE_SUCCESS=100 FIXTURE_RUN=transport
+grep -q 'OK last_success' "$TMP/output"
+echo 'PASS: run query errors stay unknown unless fresh success proves health'
 
 # fresh success + anything -> OK
 run 0 FIXTURE_SUCCESS=100 FIXTURE_RUN=missing

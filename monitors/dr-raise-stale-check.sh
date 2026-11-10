@@ -116,7 +116,7 @@ fi
 
 query_vm() {
   local expr="$1"
-  curl -sS -m 10 --get "${VM_URL}/api/v1/query" --data-urlencode "query=${expr}" 2>/dev/null || true
+  curl -fsS -m 10 --get "${VM_URL}/api/v1/query" --data-urlencode "query=${expr}" 2>/dev/null
 }
 
 send_alert() {
@@ -166,23 +166,53 @@ send_alert() {
 # A second probe on last_run_unixtime lets alerts distinguish "no attempts
 # recorded" (metric missing) from "attempts recorded but failing" (run failed).
 parse_vm_age() {
-  python3 - <<'PY' "$1" 2>/dev/null || true
-import json,sys
+  python3 - <<'PY' "$1"
+import json, math, sys
 try:
-  d=json.loads(sys.argv[1])
-  r=d.get("data",{}).get("result") or []
+  d = json.loads(sys.argv[1])
+  if d.get("status") != "success":
+    raise ValueError("query failed")
+  data = d["data"]
+  if data.get("resultType") != "vector" or not isinstance(data["result"], list):
+    raise ValueError("invalid instant vector")
+  r = data["result"]
   if not r:
-    print("MISSING"); raise SystemExit
-  print(r[0]["value"][1])
-except Exception:
-  print("MISSING")
+    print("MISSING")
+  else:
+    if len(r) != 1:
+      raise ValueError("expected aggregated result")
+    age = float(r[0]["value"][1])
+    if not math.isfinite(age):
+      raise ValueError("invalid age")
+    print(age)
+except (ValueError, KeyError, TypeError, IndexError, AttributeError):
+  print("UNKNOWN")
 PY
 }
 
-AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[${STALE_SECONDS}s]))")"
-AGE="$(parse_vm_age "$AGE_JSON")"
-RUN_AGE_JSON="$(query_vm "time() - max(max_over_time(dr_fast_pg_raise_last_run_unixtime[${STALE_SECONDS}s]))")"
-RUN_AGE="$(parse_vm_age "$RUN_AGE_JSON")"
+# Only a successful empty vector proves absence. Network/HTTP/API/parse failures
+# leave health unknown, never page about a failed raise or change dedupe state.
+probe_age() {
+  local response
+  if ! response="$(query_vm "$1")"; then
+    printf 'UNKNOWN'
+    return
+  fi
+  parse_vm_age "$response"
+}
+query_unknown() {
+  log "UNKNOWN: VictoriaMetrics query failed/unreadable at ${VM_URL}; weekly raise health not evaluated (no email/state changes)"
+  exit 2
+}
+AGE="$(probe_age "time() - max(max_over_time(dr_fast_pg_raise_last_success_unixtime[${STALE_SECONDS}s]))")"
+[[ "$AGE" != UNKNOWN ]] || query_unknown
+RUN_AGE="$(probe_age "time() - max(max_over_time(dr_fast_pg_raise_last_run_unixtime[${STALE_SECONDS}s]))")"
+# A valid fresh success proves health even if the diagnostic run probe fails.
+if [[ "$RUN_AGE" == UNKNOWN ]]; then
+  if [[ "$AGE" == MISSING ]] || ! python3 -c 'import sys; sys.exit(not (float(sys.argv[1]) <= float(sys.argv[2])))' "$AGE" "$STALE_SECONDS"; then
+    query_unknown
+  fi
+fi
 run_age_int() {
   if [[ "${RUN_AGE}" == "MISSING" || -z "${RUN_AGE}" ]]; then
     printf 'MISSING'
@@ -194,7 +224,7 @@ run_age_int() {
 if [[ "$AGE" == "MISSING" || -z "$AGE" ]]; then
   RUN_INT="$(run_age_int)"
   if [[ "$RUN_INT" == "MISSING" ]]; then
-    log "FAIL: last_success metric missing/unreadable and no attempts recorded"
+    log "FAIL: last_success metric missing and no attempts recorded"
     send_alert "FAIL stale/missing weekly raise: no attempts recorded" \
       "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}, and dr_fast_pg_raise_last_run_unixtime is also missing: no raise attempts recorded.
 Weekly Contabo→alt-host fast PG raise has no successful run recorded and no attempts recorded.
@@ -204,7 +234,7 @@ Alert destination: ${ALERT_TO}."
   fi
   RUN_DAYS="$(python3 -c "print(round($RUN_INT/86400, 2))" 2>/dev/null || echo "?")"
   if [[ "$RUN_INT" -le "$STALE_SECONDS" ]]; then
-    log "FAIL: last_success missing/unreadable but last run ${RUN_INT}s ago — attempts failing"
+    log "FAIL: last_success missing but last run ${RUN_INT}s ago — attempts failing"
     send_alert "FAIL weekly raise failing: recent attempts but no success" \
       "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}, but dr_fast_pg_raise_last_run_unixtime is ${RUN_INT}s old (~${RUN_DAYS} days): raise attempts are recorded and failing (or never passing).
 Weekly Contabo→alt-host fast PG raise runs but has no successful run recorded.
@@ -213,7 +243,7 @@ vmui: ${VM_URL}/vmui
 Alert destination: ${ALERT_TO}."
     exit 1
   fi
-  log "FAIL: last_success metric missing/unreadable (last attempt ${RUN_INT}s ago, also stale)"
+  log "FAIL: last_success metric missing (last attempt ${RUN_INT}s ago, also stale)"
   send_alert "FAIL stale/missing weekly raise" \
     "dr_fast_pg_raise_last_success_unixtime missing in VictoriaMetrics at ${VM_URL}.
 Weekly Contabo→alt-host fast PG raise has no successful run recorded (last attempt ${RUN_INT}s ago, also stale).
