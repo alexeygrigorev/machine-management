@@ -42,6 +42,8 @@ fail() { log "ERROR: $*"; exit 1; }
 
 # ---- config (overridable via env file) ----
 CP_HOST_ID="${CP_HOST_ID:-unknown-host}"
+CP_ROLE="${CP_ROLE:-control-plane}"
+[[ "$CP_ROLE" == control-plane || "$CP_ROLE" == remote-node ]] || fail 'invalid CP_ROLE'
 DUMP_DIR="${DUMP_DIR:-/var/backups/coolify-cp}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/coolify-cp-backup.lock}"
 LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-7}"
@@ -97,6 +99,12 @@ s3_put() {
 FAILED=0
 
 # ---- 1) coolify-db dump ----
+if [[ "$CP_ROLE" == remote-node ]]; then
+  if docker inspect "$CP_DB_CONTAINER" >/dev/null 2>&1; then
+    fail 'remote-node mode refuses to skip an existing control-plane database'
+  fi
+  log "dump not applicable: retired secondary control plane host=${CP_HOST_ID}; preserving host reconstruction bundle"
+else
 DB_OUT="${DUMP_DIR}/coolify-db-${CP_HOST_ID}-${STAMP}.dump.gz"
 log "dump start coolify-db host=${CP_HOST_ID}"
 if docker exec "$CP_DB_CONTAINER" pg_dump -U "$CP_DB_USER" -Fc -d "$CP_DB_NAME" 2>"${DB_OUT}.err" \
@@ -116,12 +124,13 @@ if docker exec "$CP_DB_CONTAINER" pg_dump -U "$CP_DB_USER" -Fc -d "$CP_DB_NAME" 
 else
   log "ERROR: pg_dump failed coolify-db host=${CP_HOST_ID}: $(tail -3 "${DB_OUT}.err" 2>/dev/null)"; rm -f "$DB_OUT"; FAILED=1
 fi
+fi
 
 # ---- 2) deploy-inputs manifest (sanitized: fingerprints, never secrets) ----
 MANIFEST_OUT="${DUMP_DIR}/coolify-deploy-inputs-${CP_HOST_ID}-${STAMP}.json"
 log "manifest start host=${CP_HOST_ID}"
 if [[ -x "$MANIFEST_GEN" ]]; then
-  if CP_HOST_ID="$CP_HOST_ID" STAMP="$STAMP" "$MANIFEST_GEN" "$MANIFEST_OUT" >>"$DUMP_DIR/manifest-gen.log" 2>&1; then
+  if CP_HOST_ID="$CP_HOST_ID" CP_ROLE="$CP_ROLE" STAMP="$STAMP" "$MANIFEST_GEN" "$MANIFEST_OUT" >>"$DUMP_DIR/manifest-gen.log" 2>&1; then
     MANIFEST_KEY="${S3_PREFIX}/${CP_HOST_ID}/${DAY_PATH}/coolify-deploy-inputs-${CP_HOST_ID}-${STAMP}.json"
     if s3_put "$MANIFEST_OUT" "$MANIFEST_KEY"; then
       log "manifest ok host=${CP_HOST_ID} s3=s3://${S3_BUCKET}/${MANIFEST_KEY}"

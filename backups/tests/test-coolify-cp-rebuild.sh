@@ -90,6 +90,23 @@ if grep -niE 'password|secret|token|BEGIN.*PRIVATE' "$SHIM/manifest.json" >/dev/
   fail "T4b shim manifest leak"; else pass "T4b shim manifest leak-free"; fi
 
 # ---- T5: restore helper guards ----
+cat >"$SHIM/forbid-psql" <<EOF
+#!/usr/bin/env bash
+touch "$SHIM/unexpected-db-query"
+exit 1
+EOF
+chmod +x "$SHIM/forbid-psql"
+if CP_ROLE=remote-node CP_HOST_ID=shim-remote STAMP=shim-stamp \
+    CP_PSQL_CMD="$SHIM/forbid-psql" CP_DOCKER_CMD="$SHIM/docker-stub" \
+    WG_DIR="$SHIM/no-wg" PROXY_DIR="$SHIM/no-proxy" \
+    bash "$BU/coolify-deploy-inputs.sh" "$SHIM/remote.json" >/dev/null 2>&1 \
+    && [[ ! -e "$SHIM/unexpected-db-query" ]] \
+    && python3 -c "import json;d=json.load(open('$SHIM/remote.json'));assert d['role']=='remote-node' and not d['applications'] and 'not-applicable' in d['counts']"; then
+  pass "T4c remote-node manifest preserves explicit role without querying retired DB"
+else
+  fail "T4c remote-node queried retired DB or misrepresented role"
+fi
+
 if bash "$CONT/coolify-cp-restore.sh" --help >/dev/null 2>&1; then pass "T5a restore --help"; else fail "T5a restore --help"; fi
 mkdir -p "$SHIM/guardbin"
 cat >"$SHIM/guardbin/docker" <<'EOF'
