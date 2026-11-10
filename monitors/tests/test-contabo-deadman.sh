@@ -61,22 +61,25 @@ cat > "$TMP/stubbin/curl" <<'EOF'
 # Stub curl: honors -o <file>, prints "code ttfb total" (latency) or code.
 # URL = last arg. -L flag ignored (redirect-follow is a no-op in stub).
 out=""; url=""
+latency=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o) out="$2"; shift 2;;
-    -w|--connect-timeout|--max-time) shift 2;;
+    -w) [[ "$2" == *time_starttransfer* ]] && latency=1; shift 2;;
+    --connect-timeout|--max-time) shift 2;;
     -L) shift;;
     -*) shift;;
     *) url="$1"; shift;;
   esac
 done
 case "$url" in
-  *slow*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 5.00 5.20"; exit 0;;
-  *fast*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 0.20 0.30"; exit 0;;
-  *good*) printf '{ "STATUS": "OK" }' > "$out"; echo "200 0.20 0.30"; exit 0;;
-  *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; echo "200 0.20 0.30"; exit 0;;
-  *wrong*) printf '<html>edge default backend</html>' > "$out"; echo "200 0.20 0.30"; exit 0;;
-  *dash*) printf 'all-ok' > "$out"; echo "200 0.20 0.30"; exit 0;;
+  *slow*) printf '{ "STATUS": "OK" }' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 5.00 5.20"; else echo 200; fi; exit 0;;
+  *fast*) printf '{ "STATUS": "OK" }' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 0.20 0.30"; else echo 200; fi; exit 0;;
+  *good*) printf '{ "STATUS": "OK" }' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 0.20 0.30"; else echo 200; fi; exit 0;;
+  *large*) python3 -c 'print("x" * 200000 + "\\n{\"STATUS\":\"OK\"}\\n" + "x" * 200000)' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 0.20 0.30"; else echo 200; fi; exit 0;;
+  *redirect*) printf 'redirect' > "$out"; echo 302; exit 0;;
+  *wrong*) printf '<html>edge default backend</html>' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 0.20 0.30"; else echo 200; fi; exit 0;;
+  *dash*) printf 'all-ok' > "$out"; if [[ "$latency" == 1 ]]; then echo "200 0.20 0.30"; else echo 200; fi; exit 0;;
   *down*) echo "curl: (7) connect failed" >&2; echo ""; exit 7;;
   *) echo "stub curl: unknown url $url" >&2; exit 99;;
 esac
@@ -103,13 +106,14 @@ for s in ssh curl sendmail msmtp; do
   [[ -x "$TMP/stubbin/$s" ]] || { echo "ABORT: stub '$s' missing from stubbin" >&2; exit 1; }
 done
 
-run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1)
+run_dm() { # $1=hosts $2=urls $3=state-dir $4=force-fail(0/1) $5=page-threshold-sec
   CONTABO_DEADMAN_ENV_FILE="/nonexistent" \
   STATE_DIR="$3" \
   LOCK_FILE="$3.lock" \
   DEADMAN_HOSTS="$1" \
   DEADMAN_URLS="$2" \
   DEADMAN_FORCE_FAIL="$4" \
+  DEADMAN_URL_FAILURE_SEC="${5-120}" \
   LATENCY_PROBES="" \
   LATENCY_PUSH_ENABLED=0 \
   ALERT_TO="$T_ALARM,$T_OPS" \
@@ -147,8 +151,9 @@ else
 fi
 
 # D4: marker absent on 200 -> FAIL ext (wrong-content from outside)
-out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/wrong::"status":"ok"' "$(mktemp -d -p "$TMP")" 0)"; rc=$?; set -e
-if [[ $rc -ne 0 && "$out" == *'FAIL check=ext-svc'* && "$out" == *"marker"* ]]; then
+SD4="$(mktemp -d -p "$TMP")"
+out=""; set +e; out="$(run_dm 'node-a' 'svc=https://example.test/wrong::"status":"ok"' "$SD4" 0 0)"; rc=$?; set -e
+if [[ $rc -ne 0 && "$out" == *'FAIL check=ext-svc'* ]] && grep -q 'FAIL.*ext-svc' "$SD4/mail/sent.tsv"; then
   pass "D4 wrong-content 200 FAILs external marker"
 else
   fail "D4 marker miss (rc=$rc) -- $out"
@@ -387,7 +392,7 @@ fi
 
 # ---- D22: real check RECOVERED routes to ops-only (never alexey@ / T_ALARM) (t1885u) ----
 SD22="$(mktemp -d -p "$TMP")"
-out=""; set +e; out="$(STUB_DM_SSH_FAIL=node-b run_dm 'node-a node-b' 'svc=https://example.test/bad::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
+out=""; set +e; out="$(STUB_DM_SSH_FAIL=node-b run_dm 'node-a node-b' 'svc=https://example.test/bad::"status":"ok"' "$SD22" 0 0)"; rc=$?; set -e
 row22_fail="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
 out=""; set +e; out="$(INCIDENT_GREEN_SEC=0 run_dm 'node-a node-b' 'svc=https://example.test/good::"status":"ok"' "$SD22" 0)"; rc=$?; set -e
 row22_rec="$(tail -n 1 "$SD22/mail/sent.tsv" 2>/dev/null || true)"
@@ -408,23 +413,40 @@ else
 fi
 
 
-# ---- D23: one incident = one mail (t2813u/t2814u) ----
+# ---- D23: public URL pages only after sustained failure (B2) ----
 SD23="$(mktemp -d -p "$TMP")"
 out="$(run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD23" 0 || true)"
-if [[ ! -s "$SD23/mail/sent.tsv" ]] && grep -q 'HOLD check=ext-svc' <<<"$out"; then
-  pass "D23 external URL FAIL with healthy nodes sends no deadman mail (healthcheck owns the page)"
+if [[ ! -s "$SD23/mail/sent.tsv" ]] && grep -q 'page threshold=120s' <<<"$out" \
+  && grep -q '^STATUS=PENDING$' "$SD23/ext-svc.state"; then
+  pass "D23 short external failure stays pending without a human page"
 else
-  fail "D23 ext FAIL with healthy nodes mailed or not held -- $out"
+  fail "D23 short external failure -- $out"
+fi
+printf 'STATUS=PENDING\nLAST_ALERT=0\nFAIL_SINCE=%s\n' "$(date -u -d '125 seconds ago' +%s)" > "$SD23/ext-svc.state"
+out="$(run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD23" 0 || true)"
+if grep -q 'FAIL check=ext-svc' <<<"$out" && grep -q 'FAIL.*ext-svc' "$SD23/mail/sent.tsv"; then
+  pass "D23 sustained public failure pages directly after two minutes"
+else
+  fail "D23 sustained external failure not paged -- $out"
 fi
 SD24="$(mktemp -d -p "$TMP")"
-out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 || true)"
+out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 0 || true)"
 n24a="$(wc -l < "$SD24/mail/sent.tsv")"
-out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 || true)"
+out="$(STUB_DM_SSH_FAIL=node-a run_dm 'node-a' 'svc=https://example.test/bad::"status":"ok"' "$SD24" 0 0 || true)"
 n24b="$(wc -l < "$SD24/mail/sent.tsv")"
 if [[ "$n24a" -eq 2 && "$n24b" -eq 2 ]]; then
   pass "D24 provider outage: node FAIL + URL FAIL page once each, repeat runs add no mail"
 else
   fail "D24 counts first=$n24a second=$n24b"
+fi
+
+# ---- D25: a redirect is not a healthy public HTTP 200 ----
+SD25="$(mktemp -d -p "$TMP")"
+out="$(run_dm 'node-a' 'svc=https://example.test/redirect' "$SD25" 0 0 || true)"
+if grep -q 'FAIL check=ext-svc' <<<"$out" && grep -q 'FAIL.*ext-svc' "$SD25/mail/sent.tsv"; then
+  pass "D25 public redirects count as non-200 probe failures"
+else
+  fail "D25 redirect was treated as healthy -- $out"
 fi
 
 echo "---- $PASS passed, $FAILN failed ----"

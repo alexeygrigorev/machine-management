@@ -12,10 +12,9 @@
 #      unreachable or its checks stopped advancing (stale/missing log).
 #      A node that is alive but reporting FAIL stays the on-node healthcheck's
 #      job — the dead-man does not double-page its content.
-#   2. External content probes (DEADMAN_URLS, name=url::marker triples, same
-#      match semantics as coolify-healthcheck.sh CONTENT_CHECKS): 2xx/3xx AND
-#      a verbatim body marker, fetched from THIS box — an off-Contabo vantage
-#      no Contabo outage can silence.
+#   2. External public probes (DEADMAN_URLS, name=url[::marker] entries):
+#      non-200 or missing marker pages after a sustained 2-minute failure,
+#      fetched from THIS box — an off-Contabo vantage no Contabo outage can silence.
 #
 # Fault drill (safe, no production impact): run once with
 #   DEADMAN_FORCE_FAIL=1 ./monitors/contabo-deadman.sh
@@ -39,7 +38,7 @@ log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 # http://[::1]/health::ok must split before the marker's '::', not inside
 # [::1] (8138f287: the old first-'::' split probed url "http://[").
 split_url_rest() {
-  # $1=rest; sets __split_url and __split_marker ("" when no separator found)
+  # $1=rest; sets __split_url, __split_marker, and __split_found.
   local rest="$1" i n cut=-1 bracket=0
   n=${#rest}
   for ((i = 0; i < n - 1; i++)); do
@@ -52,9 +51,11 @@ split_url_rest() {
   if [[ "$cut" -ge 0 ]]; then
     __split_url="${rest:0:cut}"
     __split_marker="${rest:cut+2}"
+    __split_found=1
   else
     __split_url="$rest"
     __split_marker=""
+    __split_found=0
   fi
 }
 
@@ -70,11 +71,13 @@ DEADMAN_REMOTE_LOG="${DEADMAN_REMOTE_LOG:-/var/log/coolify-healthcheck.log}"
 # Alert if no completed run falls within this long (5-min on-node
 # cadence + skew margin).
 DEADMAN_MAX_LOG_AGE_SEC="${DEADMAN_MAX_LOG_AGE_SEC:-600}"
-# External content probes, name=url::marker (lowercase, no whitespace;
+# External public probes, name=url[::marker] (marker is optional; if present,
 # body is lowercased + whitespace-stripped before fixed-string match).
-DEADMAN_URLS="${DEADMAN_URLS:-courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\" website_ready=https://prod.datatalks.club/health/ready::\"status\":\"ready\" relay_health=https://relay.datatalks.club/health/::\"service\":\"relay\"}"
+DEADMAN_URLS="${DEADMAN_URLS:-courses_api=https://courses.datatalks.club/api/health/::\"status\":\"ok\" website_ready=https://prod.datatalks.club/health/ready::\"status\":\"ready\" relay_health=https://relay.datatalks.club/health/::\"service\":\"relay\" aishl_ping=https://aishippinglabs.com/ping}"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-15}"
-DEADMAN_HTTP_RETRIES="${DEADMAN_HTTP_RETRIES:-2}"
+DEADMAN_HTTP_TIMEOUT="${DEADMAN_HTTP_TIMEOUT:-8}"
+DEADMAN_HTTP_RETRIES="${DEADMAN_HTTP_RETRIES:-0}"
+DEADMAN_URL_FAILURE_SEC="${DEADMAN_URL_FAILURE_SEC:-120}"
 DEADMAN_HTTP_RETRY_SLEEP_SEC="${DEADMAN_HTTP_RETRY_SLEEP_SEC:-0}"
 DEADMAN_FORCE_FAIL="${DEADMAN_FORCE_FAIL:-0}"
 
@@ -94,6 +97,11 @@ LATENCY_TTFB_WARN_SEC="${LATENCY_TTFB_WARN_SEC:-3}"
 LATENCY_TTFB_RECOVER_SEC="${LATENCY_TTFB_RECOVER_SEC:-2.5}"
 LATENCY_SUSTAIN_SEC="${LATENCY_SUSTAIN_SEC:-600}"
 LATENCY_ALERT_TO="${LATENCY_ALERT_TO:-dev@dtcdev.click}"
+
+[[ "$DEADMAN_URL_FAILURE_SEC" =~ ^[0-9]+$ ]] || {
+  log "ERROR: DEADMAN_URL_FAILURE_SEC must be a non-negative integer"
+  exit 2
+}
 
 ALERT_TO="${ALERT_TO:-dev@dtcdev.click}"
 # Drills (DEADMAN_FORCE_FAIL) page ops only — never Alexey (t1273u/t1274u).
@@ -142,10 +150,9 @@ flock -n 9 || { log "WARN: another dead-man run is in progress (lock: $LOCK_FILE
 
 FAILED=0
 NOW="$(date +%s)"
-# Nodes that failed their reachability/freshness check in THIS run. External URL
-# probes page only when this is > 0 (provider/node outage, where on-node checks
-# and OBS cannot speak). With both nodes healthy, coolify-healthcheck owns the
-# service page, so an app outage is one incident, not one per monitor.
+# Nodes that failed their reachability/freshness check in THIS run; used to
+# diagnose provider outages. Public URL probes page independently after their
+# configured sustained-failure window, even when both nodes pass SSH checks.
 DEADMAN_NODE_BAD=0
 # shellcheck source=incident-gate.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/incident-gate.sh"
@@ -175,12 +182,6 @@ send_alert() {
   if [[ "$is_recovery" -eq 0 && -z "$to_override" && "$name" != latency-* ]]; then
     if [[ "$(incident_class "$name")" == dev ]]; then
       incident_dev_note "$name" "$subject" "$body"
-      printf 'STATUS=FAIL\nLAST_ALERT=%s\n' "$NOW" > "$state_file"
-      SEND_ALERT_DELIVERED=1
-      return 0
-    fi
-    if [[ "$name" == ext-* && "$DEADMAN_NODE_BAD" -eq 0 ]]; then
-      log "HOLD check=${name}: both Contabo nodes healthy; coolify-healthcheck owns this service's page (no deadman mail)"
       printf 'STATUS=FAIL\nLAST_ALERT=%s\n' "$NOW" > "$state_file"
       SEND_ALERT_DELIVERED=1
       return 0
@@ -351,8 +352,8 @@ check_url() {
   body_file="$(mktemp)" || { log "FAIL check=${name}: mktemp failed"; FAILED=1; return; }
   while true; do
     attempt=$(( attempt + 1 ))
-    code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time "$HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
-    if [[ "$rc" -eq 0 && "$code" =~ ^[23] ]]; then
+    code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 3 --max-time "$DEADMAN_HTTP_TIMEOUT" "$url" 2>&1)" && rc=0 || rc=$?
+    if [[ "$rc" -eq 0 && "$code" == 200 ]]; then
       break
     fi
     if [[ "$attempt" -gt "$DEADMAN_HTTP_RETRIES" ]]; then
@@ -361,24 +362,49 @@ check_url() {
     [[ "${DEADMAN_HTTP_RETRY_SLEEP_SEC:-0}" != "0" ]] && sleep "$DEADMAN_HTTP_RETRY_SLEEP_SEC"
   done
   if [[ "$rc" -ne 0 ]]; then
-    log "FAIL check=${name}: curl ${url}: rc=${rc} detail='$(echo "$code" | head -c 160)'"
-    send_alert "$name" "FAIL" "External probe failed for '${1}' (${url}): curl rc=${rc}. Neither Contabo node could be confirmed from outside — possible provider/network outage."
-    FAILED=1; rm -f "$body_file"; return
+    record_url_failure "$name" "External probe for '${1}' (${url}) failed: curl rc=${rc}."
+    rm -f "$body_file"; return
   fi
-  if [[ ! "$code" =~ ^[23] ]]; then
-    log "FAIL check=${name}: ${url} returned HTTP ${code} (want 2xx/3xx)"
-    send_alert "$name" "FAIL" "External probe for '${1}' (${url}) returned status ${code}."
-    FAILED=1; rm -f "$body_file"; return
+  if [[ "$code" != 200 ]]; then
+    record_url_failure "$name" "External probe for '${1}' (${url}) returned HTTP ${code}."
+    rm -f "$body_file"; return
   fi
-  if tr '[:upper:]' '[:lower:]' < "$body_file" | tr -d '[:space:]' | grep -F -- "$marker" >/dev/null; then
+  if [[ -z "$marker" ]] || tr '[:upper:]' '[:lower:]' < "$body_file" | tr -d '[:space:]' | grep -F -- "$marker" >/dev/null; then
     log "OK check=${name}: ${url} -> ${code} marker='${marker}'"
     mark_ok "$name"
   else
-    log "FAIL check=${name}: ${url} -> ${code} but marker '${marker}' absent"
-    send_alert "$name" "FAIL" "External probe for '${1}' (${url}) returned HTTP ${code} but the body lacks marker '${marker}'."
-    FAILED=1
+    record_url_failure "$name" "External probe for '${1}' (${url}) returned HTTP ${code} but the expected marker was absent."
   fi
   rm -f "$body_file"
+}
+
+record_url_failure() {
+  # $1=check name $2=diagnostic. The off-Contabo cron runs every minute; a
+  # public endpoint must remain bad for DEADMAN_URL_FAILURE_SEC before paging.
+  local name="$1" detail="$2" state_file="${STATE_DIR}/${1}.state"
+  local previous_status="" fail_since=0 duration=0
+  if [[ -f "$state_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$state_file" || true
+    previous_status="${STATUS:-}"
+    fail_since="${FAIL_SINCE:-0}"
+  fi
+  if [[ "$previous_status" == "FAIL" ]]; then
+    # A page already went out; let send_alert's repeat timer control repeats.
+    fail_since=$(( NOW - DEADMAN_URL_FAILURE_SEC ))
+  elif [[ ! "$fail_since" =~ ^[0-9]+$ || "$fail_since" -eq 0 ]]; then
+    fail_since="$NOW"
+  fi
+  duration=$(( NOW - fail_since ))
+  if [[ "$duration" -lt "$DEADMAN_URL_FAILURE_SEC" ]]; then
+    printf 'STATUS=PENDING\nLAST_ALERT=0\nFAIL_SINCE=%s\n' "$fail_since" > "$state_file"
+    log "WARN check=${name}: public probe still failing (${duration}s; page threshold=${DEADMAN_URL_FAILURE_SEC}s)"
+    FAILED=1
+    return 0
+  fi
+  log "FAIL check=${name}: public probe failed continuously for ${duration}s"
+  send_alert "$name" "FAIL" "$detail Public probe has failed continuously for ${duration}s (threshold ${DEADMAN_URL_FAILURE_SEC}s)."
+  FAILED=1
 }
 
 send_latency_alert() {
@@ -533,8 +559,8 @@ if [[ -n "${DEADMAN_URLS:-}" ]]; then
   for entry in $DEADMAN_URLS; do
     app="${entry%%=*}"; rest="${entry#*=}"
     split_url_rest "$rest"; url="$__split_url"; marker="$__split_marker"
-    if [[ -z "$app" || -z "$url" || -z "$marker" || "$url" == "$rest" || "$marker" == "$rest" ]]; then
-      log "WARN: skipping malformed DEADMAN_URLS entry: ${entry} (want name=url::marker)"
+    if [[ -z "$app" || -z "$url" || "$entry" == "$rest" || ( "$__split_found" -eq 1 && -z "$marker" ) ]]; then
+      log "WARN: skipping malformed DEADMAN_URLS entry: ${entry} (want name=url or name=url::marker)"
       continue
     fi
     check_url "$app" "$url" "$marker"

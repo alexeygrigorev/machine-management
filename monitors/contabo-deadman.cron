@@ -5,10 +5,11 @@
 #   ./monitors/install-contabo-deadman.sh
 # which appends the line below to your crontab if missing.
 #
-# Cadence: EVERY 5 MINUTES. Do NOT run this on contabo-a/contabo-b.
+# Cadence: EVERY MINUTE. Do NOT run this on contabo-a/contabo-b.
 # The cron entry points at the STABLE installed copy
 # (/usr/local/sbin/contabo-deadman.sh) — never at a worktree path, so pager
 # survives worktree retirement. Re-run install-contabo-deadman.sh after
 # pulling script updates.
 
-# */5 * * * * /usr/local/sbin/contabo-deadman.sh >> /home/alexey/.local/state/contabo-deadman/cron.log 2>&1
+# * * * * * /usr/local/sbin/contabo-deadman.sh >> /home/alexey/.local/state/contabo-deadman/cron.log 2>&1
+# 5 8 * * * /usr/local/sbin/contabo-503-digest.sh >> /home/alexey/.local/state/contabo-deadman/503-digest.log 2>&1

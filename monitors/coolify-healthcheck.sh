@@ -21,7 +21,9 @@
 #      stop still pages (a3348a3e/t1862u).
 #
 # Alerting: on failure, sends email to ALERT_TO (default dev@dtcdev.click).
-# Relay checks use direct SES SMTP; all other checks use Relay's `alerts` sender.
+# Relay checks use direct SES SMTP; other checks use Relay's `alerts` sender,
+# then direct SES as an independent same-run fallback. Undelivered FAILs persist
+# and are sent with a LATE marker if the check recovers before retry succeeds.
 # Dedupe/rate-limit: an alert fires once
 # per failing check, then repeats at most every ALERT_REPEAT_MIN minutes
 # while still failing; a RECOVERED notice goes out on transition back to OK.
@@ -210,6 +212,92 @@ enqueue_digest() {
       "$DIGEST_SCRIPT" --enqueue "coolify-healthcheck" "$chk" "$lvl" "$msg" 2>/dev/null || true
   fi
 }
+
+direct_ses_send() {
+  # $1=recipient CSV $2=subject $3=body. Never logs message contents.
+  local to_csv="${1// /,}" subject="$2" body="$3"
+  local to_header envelope_from from_header sendmail_bin
+  local -a to_args=() msmtp_args=() sendmail_args=()
+  DIRECT_SES_TRANSPORT=""
+  IFS=',' read -r -a to_args <<< "$to_csv"
+  to_header="${to_csv//,/, }"
+  local from_pat='<([^>]+)>'
+  if [[ "$ALERT_FROM" =~ $from_pat ]]; then
+    envelope_from="${BASH_REMATCH[1]}"
+    from_header="$ALERT_FROM"
+  elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
+    envelope_from="$ALERT_FROM"
+    from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
+  else
+    envelope_from="$ALERT_FROM"
+    from_header="$ALERT_FROM"
+  fi
+  [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+  [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
+  if command -v msmtp >/dev/null 2>&1; then
+    if {
+      printf 'From: %s\nTo: %s\nSubject: %s\n\n' "$from_header" "$to_header" "$subject"
+      printf '%s\n' "$body"
+    } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
+      DIRECT_SES_TRANSPORT=msmtp
+      return 0
+    fi
+  elif command -v sendmail >/dev/null 2>&1; then
+    sendmail_args=(-t)
+    sendmail_bin="$(command -v sendmail)"
+    if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
+      [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
+    fi
+    [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
+    if {
+      printf 'From: %s\nTo: %s\nSubject: %s\n\n' "$from_header" "$to_header" "$subject"
+      printf '%s\n' "$body"
+    } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
+      DIRECT_SES_TRANSPORT=sendmail
+      return 0
+    fi
+  fi
+  return 1
+}
+
+queue_pending_alert() {
+  # Durable fallback for a FAIL that both Relay and SES could not deliver.
+  local name="$1" recipients="$2" subject="$3" body="$4"
+  local destination="${STATE_DIR}/${name}.pending" temporary
+  temporary="$(mktemp "${destination}.XXXXXX")" || return 1
+  {
+    printf '%s\n' "$recipients"
+    printf '%s\n' "$subject"
+    printf '%s\n' "$body"
+  } > "$temporary"
+  chmod 600 "$temporary"
+  mv -f -- "$temporary" "$destination"
+}
+
+retry_pending_alert() {
+  # $1=check-name $2=late flag. A recovered check's retained FAIL is sent
+  # with an explicit LATE marker so operators can distinguish it from current.
+  local name="$1" late="${2:-0}"
+  local pending="${STATE_DIR}/${name}.pending" recipients subject body
+  [[ -f "$pending" ]] || return 0
+  IFS= read -r recipients < "$pending" || return 1
+  subject="$(sed -n '2p' "$pending")"
+  body="$(tail -n +3 "$pending")"
+  if [[ "$late" == 1 ]]; then
+    subject="${subject} [LATE]"
+    body="LATE delivery: the check recovered before transport succeeded.
+
+${body}"
+  fi
+  if direct_ses_send "$recipients" "$subject" "$body"; then
+    rm -f -- "$pending"
+    printf 'STATUS=FAIL\nLAST_ALERT=%s\nFAIL_SINCE=%s\n' "$NOW" "$NOW" > "${STATE_DIR}/${name}.state"
+    log "ALERT check=${name} subject='${subject}' via=ses-${DIRECT_SES_TRANSPORT} to=${recipients}"
+    return 0
+  fi
+  log "WARN: retained alert delivery failed for ${name}; pending message kept"
+  return 1
+}
 # When 1, skip APP_URLS + CONTENT_CHECKS that hit public hostnames (dedupe:
 # only one Contabo node should page for the same public URL). Keep local
 # checks (127.0.0.1 / 10.100.0.x). Set on contabo-a; leave 0 on contabo-b.
@@ -241,6 +329,7 @@ LATENCY_STATE_SUFFIX="${LATENCY_STATE_SUFFIX:-latency}"
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
 command -v flock >/dev/null 2>&1 || { log "ERROR: missing required binary: flock"; exit 1; }
 
+umask 077
 mkdir -p "$STATE_DIR"
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "WARN: another healthcheck run is in progress (lock: $LOCK_FILE); skipping"; exit 0; }
@@ -253,6 +342,7 @@ send_alert() {
   local name="$1" subject="$2" body="$3"
   SEND_ALERT_DELIVERED=0
   local state_file="${STATE_DIR}/${name}.state"
+  retry_pending_alert "$name" 0 || true
   local last_alert=0 last_status=""
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
@@ -311,55 +401,8 @@ ${body}"
   local to_csv="${effective_to// /,}"
   if [[ "${name,,}" == *relay* ]]; then
     # Relay self-checks must stay independent of Relay for outage paging.
-    local to_header="${to_csv//,/, }"
-    local -a to_args=()
-    IFS=',' read -r -a to_args <<< "$to_csv"
-    local envelope_from from_header
-    local from_pat='<([^>]+)>'
-    if [[ "$ALERT_FROM" =~ $from_pat ]]; then
-      envelope_from="${BASH_REMATCH[1]}"
-      from_header="$ALERT_FROM"
-    elif [[ -n "${ALERT_FROM_NAME:-}" ]]; then
-      envelope_from="$ALERT_FROM"
-      from_header="${ALERT_FROM_NAME} <${ALERT_FROM}>"
-    else
-      envelope_from="$ALERT_FROM"
-      from_header="$ALERT_FROM"
-    fi
-    local msmtp_args=()
-    [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && msmtp_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-    [[ -n "$envelope_from" ]] && msmtp_args+=("-f" "$envelope_from")
-    if command -v msmtp >/dev/null 2>&1; then
-      if {
-        echo "From: ${from_header}"
-        echo "To: ${to_header}"
-        echo "Subject: ${full_subject}"
-        echo ""
-        printf '%s\n' "$body"
-      } | msmtp "${msmtp_args[@]}" -- "${to_args[@]}" 2>/dev/null; then
-        sent="msmtp"
-      else
-        log "WARN: direct SES mail failed for Relay check ${name}"
-      fi
-    elif command -v sendmail >/dev/null 2>&1; then
-      local sendmail_args=(-t)
-      local sendmail_bin
-      sendmail_bin="$(command -v sendmail)"
-      if [[ "$(readlink -f "$sendmail_bin" 2>/dev/null || echo "$sendmail_bin")" == *msmtp* ]]; then
-        [[ -n "${ALERT_MSMTP_ACCOUNT:-}" ]] && sendmail_args+=("-a" "$ALERT_MSMTP_ACCOUNT")
-      fi
-      [[ -n "$envelope_from" ]] && sendmail_args+=("-f" "$envelope_from")
-      if {
-        echo "From: ${from_header}"
-        echo "To: ${to_header}"
-        echo "Subject: ${full_subject}"
-        echo ""
-        printf '%s\n' "$body"
-      } | sendmail "${sendmail_args[@]}" 2>/dev/null; then
-        sent="sendmail"
-      else
-        log "WARN: direct SES mail failed for Relay check ${name}"
-      fi
+    if direct_ses_send "$to_csv" "$full_subject" "$body"; then
+      sent="ses-${DIRECT_SES_TRANSPORT}"
     else
       log "WARN: no MTA (sendmail/msmtp) for Relay self-monitor ${name}"
     fi
@@ -367,13 +410,23 @@ ${body}"
     sent="relay"
   else
     log "WARN: Relay delivery failed for ${name}"
+    if direct_ses_send "$to_csv" "$full_subject" "$body"; then
+      sent="ses-${DIRECT_SES_TRANSPORT}"
+    else
+      log "WARN: direct SES fallback failed for ${name}"
+    fi
   fi
   log "ALERT check=${name} subject='${full_subject}' via=${sent} to=${to_csv}"
   if [[ "$sent" == "no" ]]; then
     log "FAIL check=mail-${name}: delivery failed; retaining state for retry"
+    if [[ "$is_recovery" -eq 0 ]]; then
+      queue_pending_alert "$name" "$to_csv" "$full_subject" "$body" || \
+        log "ERROR: failed to retain undelivered alert for ${name}"
+    fi
     FAILED=1
     return 0
   fi
+  rm -f -- "${STATE_DIR}/${name}.pending"
   SEND_ALERT_DELIVERED=1
   if [[ "$is_recovery" -eq 1 ]]; then
     printf 'STATUS=OK\nLAST_ALERT=0\nFAIL_SINCE=0\n' > "$state_file"
@@ -392,6 +445,7 @@ mark_ok() {
   # continuous green across every check of that service (incident-gate.sh).
   local name="$1"
   local state_file="${STATE_DIR}/${name}.state"
+  retry_pending_alert "$name" 1 || FAILED=1
   local last_status="" fail_since=0
   if [[ -f "$state_file" ]]; then
     # shellcheck disable=SC1090
