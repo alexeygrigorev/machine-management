@@ -159,16 +159,21 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 MaxStartups 10:30:100
+X11Forwarding no
+MaxAuthTries 3
 PubkeyAuthentication yes
 EOF
 
 cat > /etc/ssh/sshd_config.d/harden.conf <<'EOF'
 PermitRootLogin prohibit-password
 MaxStartups 10:30:100
+X11Forwarding no
+MaxAuthTries 3
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
 
+sshd -t
 if systemctl list-unit-files | grep -q '^ssh\.service'; then
   systemctl reload ssh
 else
