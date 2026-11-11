@@ -439,6 +439,10 @@ References: [Coolify rolling updates](https://coolify.io/docs/applications/deplo
 Run `bash deployments/install-rolling-follower.sh` from a merged revision. It backs
 up the installed manifest and crontab, removes the legacy follower cron, and
 installs versioned code under `~/.local/lib/coolify-rolling-web/<commit>`.
+An existing installed manifest is preserved: host overrides may belong to
+another active resource owner. For a deliberate manifest update, compare the
+installed file against the repository first, then pass `--update-config`.
+First-time installation creates the manifest from the repository.
 The API uses `http://127.0.0.1:18000` through the supervised SSH tunnel to
 contabo-a loopback port 8000. No API credentials cross public HTTP.
 After accepting each public app separately, start
@@ -539,3 +543,12 @@ for this pre-write failure, and permit one deployment per run after recovery.
 The regression reproduces the 02:59 ordering, checks no writes during source
 failure, then checks one healthy promotion and subsequent no-write convergence.
 Do not redeploy a retained healthy container solely to clear an alert.
+
+During the 02:11 UTC follower upgrade, the previous installer replaced an
+installed AISHL 3 GiB override with the repository's 1 GiB default. The 02:12
+run requested an unnecessary same-image rollout. The installed manifest and
+Coolify metadata were restored to 3 GiB; the new healthy container's memory
+and swap limits were restored to the previous 3/6 GiB without restarting it.
+Website remained on its existing healthy container. The installer now preserves
+an existing manifest by default; its regression exercises first install,
+upgrade with the AISHL override, backup, and explicit configuration update.
