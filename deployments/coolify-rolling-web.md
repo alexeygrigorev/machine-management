@@ -478,3 +478,24 @@ backs up/removes only its old cron, and installs `cmp-release-poller.timer`.
 It preserves the existing release-selection and migration authority. Verify one
 service run, then start the timer. Its failure notification uses the installed
 sanitized direct-SES follower notification. Existing credentials remain private.
+
+### Audited PostgreSQL budgets
+
+`postgres-budgets.py --token-file <private-token> --backup-dir <private-dir>`
+plans limits for the two production PostgreSQL 16 containers on contabo-b.
+Add `--apply` to persist 8 GiB memory/memory+swap ceilings and CPU shares 4096
+in Coolify, then update the running cgroups without restarting PostgreSQL.
+The tool refuses unhealthy/unexpected containers, usage above 4 GiB, or an
+existing limit above 8 GiB. It snapshots only budget settings (no credentials)
+and restores those settings on apply/verification failure. Run it through the
+existing local API tunnel and verify database health, public routes and alerts
+before proceeding to any other host. This does not size other services or add
+host swap.
+
+For CMP poller upgrades, set `POLLER_HOME=/home/alexey` when invoking the
+installer from an engine with an isolated home. `CMP_REVISION` may pin a merged
+app revision; the installer refuses revisions outside `origin/main`, preserves
+previous script/units, and refuses to overwrite a different script at an
+existing immutable revision. Verify the app-owned hold-file path with unreadable
+credential paths before resuming the timer. Its systemd service continues using
+the supervised `127.0.0.1:18000` API tunnel and existing secret locations.
