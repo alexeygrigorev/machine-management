@@ -48,3 +48,9 @@ verified for all three (`psql -h 127.0.0.1`).
   (its staged 8 GB conf never ran and was scaled down to fit 2g shm); see
   `~/tmp/agent-reports/dr-p1-pg-shm-apply-t1143u-2026-10-22.md`. No other Relay changes.
 - No DNS / CloudFront changes, no AWS RDS changes, no Coolify reinstall/session work.
+
+Read-only Fable follow-up (2026-11-11): PG17 `dtc-postgres` still has only
+`postgres` and `dtc` as non-template databases, each about 7.7 MB. Its activity
+snapshot had no application client connection. This establishes current contents
+and observed activity, but does not establish ownership or authorize retirement.
+The PostgreSQL 16 shared/Relay primaries remain the active application stores.
