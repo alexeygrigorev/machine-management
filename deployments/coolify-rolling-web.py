@@ -22,6 +22,11 @@ ASSET_TARGETS = {'rolling-healthcheck.py': '/opt/coolify-healthcheck.py',
 class SourceUnavailable(ValueError):
     """The private release has no healthy web container to promote."""
 
+    def __init__(self, message, *, reason=None):
+        super().__init__(message)
+        # Only fixed codes may reach logs; never expose container/API text.
+        self.reason = reason if reason in ('no-running-container', 'no-healthy-container') else None
+
 
 def failure_reason(error):
     """Identify the failing operation without exposing exception text or values."""
@@ -32,7 +37,10 @@ def failure_reason(error):
             frames.append(traceback.tb_frame.f_code.co_name)
         traceback = traceback.tb_next
     operation = frames[-1] if frames else 'unknown'
-    return type(error).__name__ + '; operation=' + operation
+    result = type(error).__name__ + '; operation=' + operation
+    if isinstance(error, SourceUnavailable) and error.reason:
+        result += '; source=' + error.reason
+    return result
 
 
 def asset_path(uuid, filename, digest):
@@ -170,7 +178,7 @@ def source_state(config):
             raise ValueError('Invalid source container prefix')
         ids = subprocess.check_output(ssh + ['sudo docker ps -q --filter name=' + shlex.quote(prefix)], text=True, timeout=30).split()
         if not ids or not all(re.fullmatch('[a-f0-9]{12,64}', item) for item in ids):
-            raise SourceUnavailable('No running source web container')
+            raise SourceUnavailable('No running source web container', reason='no-running-container')
         cmd = 'sudo docker inspect ' + ' '.join(ids)
     else:
         cmd = 'sudo docker inspect ' + shlex.quote('web-' + uuid)
@@ -178,7 +186,8 @@ def source_state(config):
         check=True, capture_output=True, text=True, timeout=30)
     healthy = [c for c in json.loads(result.stdout) if c['State'].get('Health', {}).get('Status') == 'healthy']
     if not healthy:
-        raise SourceUnavailable('Source web is not healthy; keeping public application')
+        raise SourceUnavailable('Source web is not healthy; keeping public application',
+                                reason='no-healthy-container')
     container = max(healthy, key=lambda c: c.get('Created', ''))
     env = dict(item.split('=', 1) for item in container['Config']['Env'])
     # Deployment metadata belongs to the new application, not the source stack.
