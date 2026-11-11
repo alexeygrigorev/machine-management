@@ -256,7 +256,7 @@ class RollingTests(unittest.TestCase):
                 rolling.reconcile(config, self.call, rolling.source_state, True)
             except rolling.SourceUnavailable as error:
                 self.assertEqual(rolling.failure_reason(error),
-                                 'SourceUnavailable; operation=source_state')
+                                 'SourceUnavailable; operation=source_state; source=no-healthy-container')
             else:
                 self.fail('Unhealthy source was accepted')
         self.assertEqual(self.writes, [])
@@ -331,6 +331,56 @@ class RollingTests(unittest.TestCase):
                     self.assertIn('website: ' + website_result, stdout.getvalue())
                 else:
                     self.assertEqual(stdout.getvalue(), '')
+
+    def test_0259_source_failure_retains_apps_then_resumes_validated_release(self):
+        config = {'applications': [{**self.config, 'name': name}
+                                   for name in ('aishl', 'relay', 'cmp', 'website')],
+                  'assets': {}, 'base': 'local', 'token_file': 'private'}
+        original_reconcile = rolling.reconcile
+        unavailable = True
+        image = self.state(self.config)[0]
+
+        def state(app):
+            if unavailable and app['name'] == 'aishl':
+                raise rolling.SourceUnavailable('private diagnostic value', reason='no-healthy-container')
+            return image, {'SECRET': 'private'}
+
+        def reconcile(app, api, apply):
+            return original_reconcile(app, api, state, apply)
+
+        def run():
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(rolling.sys, 'argv', ['follower', '--config', 'config', '--apply']), \
+                    patch.object(rolling.Path, 'read_text', side_effect=[json.dumps(config), 'token']), \
+                    patch.object(rolling, 'verify_control_plane'), \
+                    patch.object(rolling, 'verify_host_assets'), \
+                    patch.object(rolling, 'API', return_value=self.call), \
+                    patch.object(rolling, 'reconcile', side_effect=reconcile), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                result = rolling.main()
+            return result, stdout.getvalue(), stderr.getvalue()
+
+        result, stdout, stderr = run()
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout, 'relay: in-sync\ncmp: in-sync\nwebsite: in-sync\n')
+        self.assertIn('aishl: failed (SourceUnavailable;', stderr)
+        self.assertIn('source=no-healthy-container', stderr)
+        self.assertNotIn('private diagnostic value', stderr)
+        self.assertEqual(self.writes, [])
+
+        unavailable = False
+        image = 'ghcr.io/org/web:20261111-015939-abcdef0'
+        self.assertEqual(run(), (0, 'aishl: deployed\n', ''))
+        self.assertEqual(sum(method == 'POST' for method, _, _ in self.writes), 1)
+        self.writes.clear()
+        self.assertEqual(run(), (0, 'aishl: in-sync\nrelay: in-sync\ncmp: in-sync\nwebsite: in-sync\n', ''))
+        self.assertEqual(self.writes, [])
+
+    def test_source_reason_rejects_arbitrary_diagnostic_values(self):
+        error = rolling.SourceUnavailable('secret body', reason='secret reason')
+        self.assertEqual(rolling.failure_reason(error), 'SourceUnavailable; operation=unknown')
+        self.assertEqual(rolling.failure_reason(rolling.SourceUnavailable('private', reason='no-running-container')),
+                         'SourceUnavailable; operation=unknown; source=no-running-container')
 
     def test_failed_release_is_retried_instead_of_false_convergence(self):
         self.deployments = [{'status': 'failed'}]

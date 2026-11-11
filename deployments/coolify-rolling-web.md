@@ -499,3 +499,43 @@ previous script/units, and refuses to overwrite a different script at an
 existing immutable revision. Verify the app-owned hold-file path with unreadable
 credential paths before resuming the timer. Its systemd service continues using
 the supervised `127.0.0.1:18000` API tunnel and existing secret locations.
+
+### Website source failure and the 2026-11-11 02:59 alert
+
+Intake `91f3c6a7-3ea8-4716-b8f1-18c9d2f4fd7b` covers two distinct runs.
+Times below are UTC; 01:59 UTC is 02:59 Europe/Berlin on November 11.
+
+- The original website failure at November 10 17:43:15 followed private
+  deployment `uvty3ibjziz73z0tcaupebmu`, which failed unhealthy at 17:42:28
+  on `3c3474a2bef5685926373153ae5039011dd9b363`. That is the merge commit of
+  [website PR #484](https://github.com/DataTalksClub/website/pull/484), merged
+  at 17:27:36. Replaying an unhealthy source inspection against follower
+  `74f404e1` raises `ValueError` in `source_state`, before API writes. The
+  recorded public guard, helper bindings and required environment checks
+  passed. The nearby worker restart and storage POST do not establish a
+  storage-binding cause. The earlier 16:40 origin 503 was a separate routing
+  definition conflict described above; it preceded the PR merge and source
+  deployment.
+- Source deployment `qgrbkecsof6ryvblbermid2w` recovered on
+  `26125bf1271af30c0f8e552dadcfabc0f450d252` at 18:55:37. The follower then
+  promoted that commit through native deployment `tny792b4veucnu75onsmao8o`
+  (18:56:50–18:59:42). The same healthy website container was still serving
+  during this intake's November 11 verification.
+- Alert `15013b0a` at November 11 01:59:06 was an **AISHL source failure**:
+  01:58:54 `SourceUnavailable; operation=source_state`, followed by Relay,
+  CMP and website in sync, then exit 1 at 01:59:05. Installed code was
+  `35a9497`, which continues independent applications after a pre-write
+  source failure. The failed run must not be attributed to website merely
+  because the earlier intake named website. AISHL subsequently completed
+  native deployments at 02:01:17 and 02:03:32; the 02:04:31 run was green
+  for all four applications. Recovery required no manual public replacement.
+
+`dc63cb7` classified the original source refusal and `35a9497` prevented an
+unavailable source from starving later applications. Source failures now also
+log an allowlisted `source=no-running-container` or
+`source=no-healthy-container` reason, without exception values. They remain
+failures: retain the serving release, continue independent applications only
+for this pre-write failure, and permit one deployment per run after recovery.
+The regression reproduces the 02:59 ordering, checks no writes during source
+failure, then checks one healthy promotion and subsequent no-write convergence.
+Do not redeploy a retained healthy container solely to clear an alert.
