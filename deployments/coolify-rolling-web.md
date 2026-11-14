@@ -69,7 +69,14 @@ promotion remain the release authority. Relay dev is outside this mapping.
 Each minute the follower:
 
 1. Inspects the source container over SSH. If it is absent/unhealthy, public
-   web stays on its current release.
+   web stays on its current release. Each private release deployment
+   force-recreates its source web, so the follower reports `waiting` (exit 0)
+   for up to 15 minutes from the first unavailable poll, tracked in
+   `~/.local/state/coolify-rolling-web-source.json`. A missing `web-<uuid>`
+   (`docker inspect` prints `[]` and "no such object") counts as unavailable.
+   An outage not observed for 5 minutes starts a new window. A source that
+   stays unavailable longer fails the unit and alerts. Other failures,
+   including SSH errors, alert at once.
 2. Requires an immutable tag in the expected image repository. AISHL's
    `deploy-dev.yml` tags include the GitHub run ID, attempt, and full commit
    SHA; Relay and CMP use dated tags. For the website, require the healthy
@@ -93,6 +100,13 @@ runs migrations. All releases must use backward-compatible migrations.
 The follower preserves native-only variables; source variable removal does
 not delete credentials. Explicit credential retirement is a separate task.
 Failures produce only a name and exception class, never API bodies or values.
+
+`coolify-rolling-web.service` and `cmp-release-poller.service` each have their
+own `OnFailure` unit. The CMP poller alerts as "[infra] CMP release poller
+failed" and names its own journal; it must not reuse the follower's alert
+(on 2026-11-14 its GitHub API 403s paged as follower failures every five
+minutes while the follower was green). `install-rolling-follower.sh` and
+`install-cmp-release-poller.sh` both install `cmp-release-poller-failure.service`.
 
 The website's `destination_environment` also protects its production database
 URL, expected migration database/role, transactional dry-run policy, Relay configuration, settings module, and

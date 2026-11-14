@@ -6,5 +6,5 @@ OnFailure=coolify-rolling-web-failure.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/flock -n %h/.local/state/coolify-rolling-web.lock /usr/bin/python3 %h/.local/lib/coolify-rolling-web/current/coolify-rolling-web.py --config %h/.config/coolify-rolling-web.json --apply
+ExecStart=/usr/bin/flock -n %h/.local/state/coolify-rolling-web.lock /usr/bin/python3 %h/.local/lib/coolify-rolling-web/current/coolify-rolling-web.py --config %h/.config/coolify-rolling-web.json --state %h/.local/state/coolify-rolling-web-source.json --apply
 TimeoutStartSec=180
