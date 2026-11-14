@@ -35,7 +35,7 @@ else
 fi
 ln -s "$revision" "$operator_home/.local/lib/cmp-release-poller/current.$stamp"
 mv -Tf "$operator_home/.local/lib/cmp-release-poller/current.$stamp" "$operator_home/.local/lib/cmp-release-poller/current"
-for unit in cmp-release-poller.service cmp-release-poller.timer; do
+for unit in cmp-release-poller.service cmp-release-poller.timer cmp-release-poller-failure.service; do
   install -m 0644 "$here/$unit" "$operator_home/.config/systemd/user/$unit"
 done
 crontab -l > "$operator_home/.local/state/crontab.pre-cmp-poller-$stamp"

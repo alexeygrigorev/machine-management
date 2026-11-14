@@ -12,7 +12,15 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
+
+# Private release deployments force-recreate their source web container, which
+# is briefly absent or unhealthy while it migrates and boots. Within this window
+# the follower waits (public web retained, exit 0); a source that stays
+# unavailable longer is a failed release and alerts as before.
+SOURCE_UNAVAILABLE_GRACE_SECONDS = 900
 
 ASSET_TARGETS = {'rolling-healthcheck.py': '/opt/coolify-healthcheck.py',
                  'rolling-readiness.py': '/opt/rolling-readiness.py',
@@ -379,10 +387,41 @@ def verify_host_assets(config):
             raise ValueError('Host helper content does not match manifest; keep current public release')
 
 
+def load_unavailable_since(path):
+    """Return {app name: first epoch seen unavailable}; unreadable state starts fresh."""
+    if path is None:
+        return {}
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def save_unavailable_since(path, since):
+    if path is None:
+        return
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name + '.')
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(since, handle, sort_keys=True)
+        os.replace(temporary, path)
+    except BaseException:
+        os.unlink(temporary)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--state', type=Path,
+                        help='Track first-unavailable times so a source replacement in progress is not a failure.')
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     verify_control_plane(config)
@@ -393,23 +432,42 @@ def main():
         print(active + ': busy (another configured rollout is active)', flush=True)
         return 0
     failed = False
-    for app in config['applications']:
-        try:
-            app = {**app, 'asset_hashes': config['assets']}
-            result = reconcile(app, api, apply=args.apply)
-            print(app['name'] + ': ' + result, flush=True)
-            # Promote or mutate one public app per cron run. On the next run,
-            # a queued/in-progress deployment stops the remaining apps too.
-            if result in ('deployed', 'busy'):
+    unavailable_since = load_unavailable_since(args.state)
+    tracked = dict(unavailable_since)
+    now = time.time()
+    try:
+        for app in config['applications']:
+            name = app['name']
+            try:
+                app = {**app, 'asset_hashes': config['assets']}
+                result = reconcile(app, api, apply=args.apply)
+                unavailable_since.pop(name, None)
+                print(name + ': ' + result, flush=True)
+                # Promote or mutate one public app per cron run. On the next run,
+                # a queued/in-progress deployment stops the remaining apps too.
+                if result in ('deployed', 'busy'):
+                    break
+            except SourceUnavailable as error:
+                # Raised before any promotion writes. A broken private release
+                # must not starve later independent applications.
+                since = unavailable_since.get(name, now)
+                if since > now:  # clock moved backwards; restart the window
+                    since = now
+                unavailable_since[name] = since
+                if args.state is not None and 0 <= now - since < SOURCE_UNAVAILABLE_GRACE_SECONDS:
+                    print(name + ': waiting (' + failure_reason(error) + '; source replacement in progress); current public container retained.', flush=True)
+                    continue
+                failed = True
+                print(name + ': failed (' + failure_reason(error) + '); current public container retained.', file=sys.stderr, flush=True)
+            except Exception as error:
+                unavailable_since.pop(name, None)
+                failed = True
+                print(name + ': failed (' + failure_reason(error) + '); current public container retained.', file=sys.stderr, flush=True)
+                # Other failures may follow a partial write, so stop on those.
                 break
-        except Exception as error:
-            failed = True
-            print(app['name'] + ': failed (' + failure_reason(error) + '); current public container retained.', file=sys.stderr, flush=True)
-            # SourceUnavailable is raised before any promotion writes. A broken
-            # private release must not starve later independent applications.
-            # Other failures may follow a partial write, so stop on those.
-            if not isinstance(error, SourceUnavailable):
-                break
+    finally:
+        if unavailable_since != tracked:
+            save_unavailable_since(args.state, unavailable_since)
     return int(failed)
 
 

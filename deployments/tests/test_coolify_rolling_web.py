@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import json
 import io
+import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -375,6 +376,99 @@ class RollingTests(unittest.TestCase):
         self.writes.clear()
         self.assertEqual(run(), (0, 'aishl: in-sync\nrelay: in-sync\ncmp: in-sync\nwebsite: in-sync\n', ''))
         self.assertEqual(self.writes, [])
+
+    def run_with_state(self, config, state_path, reconcile, now):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(rolling.sys, 'argv', ['follower', '--config', 'config', '--apply',
+                                                '--state', str(state_path)]), \
+                patch.object(rolling.Path, 'read_text', side_effect=[json.dumps(config), 'token']), \
+                patch.object(rolling, 'verify_control_plane'), \
+                patch.object(rolling, 'verify_host_assets'), \
+                patch.object(rolling, 'API', return_value=self.call), \
+                patch.object(rolling, 'reconcile', side_effect=reconcile), \
+                patch.object(rolling.time, 'time', return_value=now), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            result = rolling.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
+    def test_20261114_source_replacement_waits_then_alerts_only_if_it_persists(self):
+        # 2026-11-14 08:13Z: AISL's own deploy force-recreated its private
+        # source web; one follower poll saw no healthy container and paged
+        # "production release follower failed" although the release then
+        # promoted two minutes later. A replacement in progress must wait.
+        config = {'applications': [{**self.config, 'name': name} for name in ('aishl', 'relay')],
+                  'assets': {}, 'base': 'local', 'token_file': 'private'}
+        original_reconcile = rolling.reconcile
+        unavailable = True
+        image = self.state(self.config)[0]
+
+        def state(app):
+            if unavailable and app['name'] == 'aishl':
+                raise rolling.SourceUnavailable('private diagnostic value', reason='no-healthy-container')
+            return image, {'SECRET': 'private'}
+
+        def reconcile(app, api, apply):
+            return original_reconcile(app, api, state, apply)
+
+        grace = rolling.SOURCE_UNAVAILABLE_GRACE_SECONDS
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.json'
+            result, stdout, stderr = self.run_with_state(config, path, reconcile, 1000.0)
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, '')
+            self.assertIn('aishl: waiting (SourceUnavailable; operation=reconcile; '
+                          'source=no-healthy-container; source replacement in progress); '
+                          'current public container retained.', stdout)
+            self.assertIn('relay: in-sync', stdout)
+            self.assertNotIn('private diagnostic value', stdout)
+            self.assertEqual(json.loads(path.read_text()), {'aishl': 1000.0})
+            # Still inside the window: the first-seen time is not reset.
+            result, stdout, _ = self.run_with_state(config, path, reconcile, 1000.0 + grace - 1)
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(path.read_text()), {'aishl': 1000.0})
+            # A source that stays unavailable is a failed release and alerts.
+            result, stdout, stderr = self.run_with_state(config, path, reconcile, 1000.0 + grace)
+            self.assertEqual(result, 1)
+            self.assertIn('aishl: failed (SourceUnavailable;', stderr)
+            self.assertIn('relay: in-sync', stdout)
+            self.assertEqual(self.writes, [])
+            # Recovery promotes the new release and clears the tracked outage.
+            unavailable = False
+            image = 'ghcr.io/org/web:20261114-081533-abcdef0'
+            result, stdout, stderr = self.run_with_state(config, path, reconcile, 1000.0 + grace + 60)
+            self.assertEqual((result, stdout, stderr), (0, 'aishl: deployed\n', ''))
+            self.assertEqual(json.loads(path.read_text()), {})
+            # A later replacement gets a fresh window.
+            unavailable = True
+            result, stdout, _ = self.run_with_state(config, path, reconcile, 5000.0)
+            self.assertEqual(result, 0)
+            self.assertIn('aishl: waiting (', stdout)
+
+    def test_source_grace_state_is_robust_and_other_failures_still_alert(self):
+        config = {'applications': [{'name': 'aishl', 'app_uuid': 'native'}, {'name': 'relay', 'app_uuid': 'native'}],
+                  'assets': {}, 'base': 'local', 'token_file': 'private'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.json'
+            for corrupt in ('not json', '[1, 2]', '{"aishl": "soon", "relay": true}'):
+                with self.subTest(corrupt=corrupt):
+                    path.write_text(corrupt)
+                    unavailable = rolling.SourceUnavailable('private', reason='no-running-container')
+                    result, stdout, _ = self.run_with_state(config, path, [unavailable, 'in-sync'], 50.0)
+                    self.assertEqual(result, 0)
+                    self.assertIn('aishl: waiting (', stdout)
+                    self.assertEqual(json.loads(path.read_text()), {'aishl': 50.0})
+            # A first-seen time in the future (clock moved back) restarts the window.
+            path.write_text(json.dumps({'aishl': 10_000.0}))
+            unavailable = rolling.SourceUnavailable('private', reason='no-running-container')
+            result, _, _ = self.run_with_state(config, path, [unavailable, 'in-sync'], 50.0)
+            self.assertEqual((result, json.loads(path.read_text())), (0, {'aishl': 50.0}))
+            # Non-source failures are never deferred, and stop later apps.
+            result, stdout, stderr = self.run_with_state(config, path, [ValueError('secret API body'), 'in-sync'], 60.0)
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout, '')
+            self.assertIn('aishl: failed (ValueError;', stderr)
+            self.assertNotIn('secret API body', stderr)
+            self.assertEqual(json.loads(path.read_text()), {})
 
     def test_source_reason_rejects_arbitrary_diagnostic_values(self):
         error = rolling.SourceUnavailable('secret body', reason='secret reason')

@@ -2,7 +2,7 @@
 Description=Follow validated CMP release images through private Coolify API
 Requires=coolify-api-tunnel.service
 After=coolify-api-tunnel.service
-OnFailure=coolify-rolling-web-failure.service
+OnFailure=cmp-release-poller-failure.service
 
 [Service]
 Type=oneshot

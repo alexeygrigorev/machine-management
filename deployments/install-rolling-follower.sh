@@ -28,7 +28,7 @@ else
   echo 'Preserved existing follower manifest; use --update-config after reviewing configuration changes.'
 fi
 ln -sfn "$revision" "$HOME/.local/lib/coolify-rolling-web/current"
-for unit in coolify-api-tunnel.service coolify-rolling-web.service coolify-rolling-web.timer coolify-rolling-web-failure.service; do
+for unit in coolify-api-tunnel.service coolify-rolling-web.service coolify-rolling-web.timer coolify-rolling-web-failure.service cmp-release-poller-failure.service; do
   install -m 0644 "$here/$unit" "$HOME/.config/systemd/user/$unit"
 done
 crontab -l > "$HOME/.local/state/crontab.pre-follower-$stamp"
