@@ -237,7 +237,7 @@ class RollingTests(unittest.TestCase):
                       container('2', 'starting', 'dtc-website:' + 'b' * 40)]
         config = {'source_uuid': 'source', 'source_container_prefix': 'web-source-', 'ssh_host': 'node'}
         with patch.object(rolling.subprocess, 'check_output', return_value='a' * 12 + '\n' + 'b' * 12), \
-                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(containers))):
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(containers))):
             image, env = rolling.source_state(config)
         self.assertEqual(image, 'dtc-website:' + 'a' * 40)
         self.assertEqual(json.loads(env['ROLLING_ORIGINAL_COMMAND']), ['web'])
@@ -252,7 +252,7 @@ class RollingTests(unittest.TestCase):
                      'Config': {'Image': 'dtc-website:' + 'b' * 40,
                                 'Env': ['SECRET=private'], 'Cmd': ['web']}}
         with patch.object(rolling.subprocess, 'check_output', return_value='b' * 12), \
-                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([container]))):
             try:
                 rolling.reconcile(config, self.call, rolling.source_state, True)
             except rolling.SourceUnavailable as error:
@@ -263,7 +263,7 @@ class RollingTests(unittest.TestCase):
         self.assertEqual(self.writes, [])
         container['State']['Health']['Status'] = 'healthy'
         with patch.object(rolling.subprocess, 'check_output', return_value='b' * 12), \
-                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+                patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([container]))):
             self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'deployed')
             self.writes.clear()
             self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'in-sync')
@@ -298,12 +298,12 @@ class RollingTests(unittest.TestCase):
         container = {'State': {'Status': 'restarting', 'Health': {'Status': 'unhealthy'}},
                      'Config': {'Image': 'ghcr.io/org/web:20261110-190327-71b75d6',
                                 'Env': ['SECRET=private']}}
-        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([container]))):
             with self.assertRaises(rolling.SourceUnavailable):
                 rolling.reconcile(config, self.call, rolling.source_state, True)
         self.assertEqual(self.writes, [])
         container['State'] = {'Status': 'running', 'Health': {'Status': 'healthy'}}
-        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps([container]))):
+        with patch.object(rolling.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stderr='', stdout=json.dumps([container]))):
             self.assertEqual(rolling.reconcile(config, self.call, rolling.source_state, True), 'deployed')
         self.assertEqual(self.writes[-1][1], '/api/v1/deploy?uuid=native')
 
@@ -421,11 +421,12 @@ class RollingTests(unittest.TestCase):
                           'current public container retained.', stdout)
             self.assertIn('relay: in-sync', stdout)
             self.assertNotIn('private diagnostic value', stdout)
-            self.assertEqual(json.loads(path.read_text()), {'aishl': 1000.0})
-            # Still inside the window: the first-seen time is not reset.
-            result, stdout, _ = self.run_with_state(config, path, reconcile, 1000.0 + grace - 1)
-            self.assertEqual(result, 0)
-            self.assertEqual(json.loads(path.read_text()), {'aishl': 1000.0})
+            self.assertEqual(json.loads(path.read_text()), {'aishl': {'since': 1000.0, 'seen': 1000.0}})
+            # Still inside the window (polled each minute): first-seen is kept.
+            for minute in range(1, grace // 60):
+                result, stdout, _ = self.run_with_state(config, path, reconcile, 1000.0 + 60 * minute)
+                self.assertEqual(result, 0)
+            self.assertEqual(json.loads(path.read_text())['aishl']['since'], 1000.0)
             # A source that stays unavailable is a failed release and alerts.
             result, stdout, stderr = self.run_with_state(config, path, reconcile, 1000.0 + grace)
             self.assertEqual(result, 1)
@@ -456,12 +457,21 @@ class RollingTests(unittest.TestCase):
                     result, stdout, _ = self.run_with_state(config, path, [unavailable, 'in-sync'], 50.0)
                     self.assertEqual(result, 0)
                     self.assertIn('aishl: waiting (', stdout)
-                    self.assertEqual(json.loads(path.read_text()), {'aishl': 50.0})
+                    self.assertEqual(json.loads(path.read_text()), {'aishl': {'since': 50.0, 'seen': 50.0}})
             # A first-seen time in the future (clock moved back) restarts the window.
-            path.write_text(json.dumps({'aishl': 10_000.0}))
+            path.write_text(json.dumps({'aishl': {'since': 10_000.0, 'seen': 10_000.0}}))
             unavailable = rolling.SourceUnavailable('private', reason='no-running-container')
             result, _, _ = self.run_with_state(config, path, [unavailable, 'in-sync'], 50.0)
-            self.assertEqual((result, json.loads(path.read_text())), (0, {'aishl': 50.0}))
+            self.assertEqual((result, json.loads(path.read_text())), (0, {'aishl': {'since': 50.0, 'seen': 50.0}}))
+            # A stale outage (not observed for longer than the episode gap, e.g.
+            # the loop stopped early on another app) must not alert immediately.
+            gap = rolling.SOURCE_UNAVAILABLE_EPISODE_GAP_SECONDS
+            path.write_text(json.dumps({'aishl': {'since': 0.0, 'seen': 10.0}}))
+            now = 10.0 + gap + 1 + rolling.SOURCE_UNAVAILABLE_GRACE_SECONDS
+            result, stdout, _ = self.run_with_state(config, path, [unavailable, 'in-sync'], now)
+            self.assertEqual(result, 0)
+            self.assertIn('aishl: waiting (', stdout)
+            self.assertEqual(json.loads(path.read_text()), {'aishl': {'since': now, 'seen': now}})
             # Non-source failures are never deferred, and stop later apps.
             result, stdout, stderr = self.run_with_state(config, path, [ValueError('secret API body'), 'in-sync'], 60.0)
             self.assertEqual(result, 1)
@@ -469,6 +479,22 @@ class RollingTests(unittest.TestCase):
             self.assertIn('aishl: failed (ValueError;', stderr)
             self.assertNotIn('secret API body', stderr)
             self.assertEqual(json.loads(path.read_text()), {})
+
+    def test_source_removed_during_force_recreate_is_unavailable_not_an_error(self):
+        config = {**self.config, 'ssh_host': 'node'}
+        # Exact output of `sudo docker inspect web-<missing>` on contabo-b, 2026-11-14.
+        for stderr in ('error: no such object: web-source\n', 'Error: No such object: web-source\n'):
+            absent = SimpleNamespace(returncode=1, stdout='[]\n', stderr=stderr)
+            with patch.object(rolling.subprocess, 'run', return_value=absent):
+                with self.assertRaises(rolling.SourceUnavailable) as raised:
+                    rolling.source_state(config)
+            self.assertEqual(raised.exception.reason, 'no-running-container')
+        broken = SimpleNamespace(returncode=255, stdout='', stderr='ssh: connect to host node: private detail')
+        with patch.object(rolling.subprocess, 'run', return_value=broken):
+            with self.assertRaises(rolling.subprocess.CalledProcessError) as raised:
+                rolling.source_state(config)
+        self.assertNotIn('private detail', str(raised.exception))
+        self.assertEqual(self.writes, [])
 
     def test_source_reason_rejects_arbitrary_diagnostic_values(self):
         error = rolling.SourceUnavailable('secret body', reason='secret reason')

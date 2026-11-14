@@ -6,6 +6,7 @@ No secret values or API bodies are logged. See coolify-rolling-web.md.
 import argparse
 import base64
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,9 @@ import urllib.request
 # the follower waits (public web retained, exit 0); a source that stays
 # unavailable longer is a failed release and alerts as before.
 SOURCE_UNAVAILABLE_GRACE_SECONDS = 900
+# An outage not observed for this long (the loop stopped early on another
+# app, or the source recovered between runs) starts a new window.
+SOURCE_UNAVAILABLE_EPISODE_GAP_SECONDS = 300
 
 ASSET_TARGETS = {'rolling-healthcheck.py': '/opt/coolify-healthcheck.py',
                  'rolling-readiness.py': '/opt/rolling-readiness.py',
@@ -191,7 +195,14 @@ def source_state(config):
     else:
         cmd = 'sudo docker inspect ' + shlex.quote('web-' + uuid)
     result = subprocess.run(ssh + [cmd],
-        check=True, capture_output=True, text=True, timeout=30)
+        check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        # Compose force-recreate removes web-<uuid> before creating it again.
+        # docker inspect then prints [] and "no such object"; treat that like
+        # an unhealthy source. Any other SSH/docker error stays a failure.
+        if result.stdout.strip() == '[]' and 'no such object' in result.stderr.lower():
+            raise SourceUnavailable('No running source web container', reason='no-running-container')
+        raise subprocess.CalledProcessError(result.returncode, 'docker inspect')
     healthy = [c for c in json.loads(result.stdout) if c['State'].get('Health', {}).get('Status') == 'healthy']
     if not healthy:
         raise SourceUnavailable('Source web is not healthy; keeping public application',
@@ -388,7 +399,7 @@ def verify_host_assets(config):
 
 
 def load_unavailable_since(path):
-    """Return {app name: first epoch seen unavailable}; unreadable state starts fresh."""
+    """Return {app: {'since': first epoch, 'seen': last epoch}}; unreadable state starts fresh."""
     if path is None:
         return {}
     try:
@@ -398,8 +409,12 @@ def load_unavailable_since(path):
         return {}
     if not isinstance(data, dict):
         return {}
-    return {k: float(v) for k, v in data.items()
-            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    return {k: {'since': float(v['since']), 'seen': float(v['seen'])} for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, dict) and number(v.get('since')) and number(v.get('seen'))}
 
 
 def save_unavailable_since(path, since):
@@ -450,10 +465,14 @@ def main():
             except SourceUnavailable as error:
                 # Raised before any promotion writes. A broken private release
                 # must not starve later independent applications.
-                since = unavailable_since.get(name, now)
-                if since > now:  # clock moved backwards; restart the window
-                    since = now
-                unavailable_since[name] = since
+                entry = unavailable_since.get(name)
+                # New outage, a gap since it was last observed, or a clock that
+                # moved backwards: restart the window.
+                if (entry is None or entry['since'] > now or entry['seen'] > now
+                        or now - entry['seen'] > SOURCE_UNAVAILABLE_EPISODE_GAP_SECONDS):
+                    entry = {'since': now, 'seen': now}
+                since = entry['since']
+                unavailable_since[name] = {'since': since, 'seen': now}
                 if args.state is not None and 0 <= now - since < SOURCE_UNAVAILABLE_GRACE_SECONDS:
                     print(name + ': waiting (' + failure_reason(error) + '; source replacement in progress); current public container retained.', flush=True)
                     continue

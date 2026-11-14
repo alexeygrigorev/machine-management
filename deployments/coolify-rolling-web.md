@@ -72,8 +72,11 @@ Each minute the follower:
    web stays on its current release. Each private release deployment
    force-recreates its source web, so the follower reports `waiting` (exit 0)
    for up to 15 minutes from the first unavailable poll, tracked in
-   `~/.local/state/coolify-rolling-web-source.json`. A source that stays
-   unavailable longer fails the unit and alerts. Other failures alert at once.
+   `~/.local/state/coolify-rolling-web-source.json`. A missing `web-<uuid>`
+   (`docker inspect` prints `[]` and "no such object") counts as unavailable.
+   An outage not observed for 5 minutes starts a new window. A source that
+   stays unavailable longer fails the unit and alerts. Other failures,
+   including SSH errors, alert at once.
 2. Requires an immutable tag in the expected image repository. AISHL's
    `deploy-dev.yml` tags include the GitHub run ID, attempt, and full commit
    SHA; Relay and CMP use dated tags. For the website, require the healthy
