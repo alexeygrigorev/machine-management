@@ -35,6 +35,15 @@ relay_send_alert() {
       bin=/home/alexey/.local/bin/datamailer
     elif [[ -x "${HOME}/.local/bin/datamailer" ]]; then
       bin="${HOME}/.local/bin/datamailer"
+    elif [[ -x /usr/local/bin/relay ]]; then
+      # The Relay client CLI was renamed from `datamailer` to `relay` (same
+      # `send --from/--to/--subject` flags and DATAMAILER_CONFIG). Without this
+      # fallback RMTHZ monitors logged via=no and sent nothing (intake 19fefe6f).
+      bin=/usr/local/bin/relay
+    elif [[ -x /home/alexey/.local/bin/relay ]]; then
+      bin=/home/alexey/.local/bin/relay
+    elif [[ -x "${HOME}/.local/bin/relay" ]]; then
+      bin="${HOME}/.local/bin/relay"
     else
       bin="$(command -v datamailer 2>/dev/null || true)"
     fi
