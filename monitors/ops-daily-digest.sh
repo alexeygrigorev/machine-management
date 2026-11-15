@@ -41,7 +41,7 @@ sanitize_digest_recipients() {
   for tok in "${parts[@]}"; do
     [[ -n "$tok" ]] || continue
     case "${tok,,}" in
-      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      alexey@*|*alexey.s.grigoriev@*|orin@*) continue ;;
       *) kept+=("$tok") ;;
     esac
   done

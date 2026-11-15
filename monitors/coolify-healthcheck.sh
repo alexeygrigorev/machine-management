@@ -193,7 +193,7 @@ strip_personal_recipients() {
   for tok in "${parts[@]}"; do
     [[ -n "$tok" ]] || continue
     case "${tok,,}" in
-      alexey@*|*alexey.s.grigoriev@*) continue ;;
+      alexey@*|*alexey.s.grigoriev@*|orin@*) continue ;;
       *) kept+=("$tok") ;;
     esac
   done
@@ -324,6 +324,35 @@ LATENCY_TTFB_WARN_SEC="${LATENCY_TTFB_WARN_SEC:-3}"
 LATENCY_TTFB_RECOVER_SEC="${LATENCY_TTFB_RECOVER_SEC:-2.5}"
 LATENCY_SUSTAIN_SEC="${LATENCY_SUSTAIN_SEC:-600}"
 LATENCY_ALERT_TO="${LATENCY_ALERT_TO:-dev@dtcdev.click}"
+
+# Infra alerts go ONLY to dev@dtcdev.click (intake 19fefe6f). Remove personal
+# (alexey@*, alexey.s.grigoriev@*) and orin@* recipients from every configured
+# recipient list once, up front, so no env override or alert level can page a
+# personal inbox. Lists without such addresses are left byte-identical.
+dev_only_recipients() {
+  local raw="${1// /,}" tok
+  local -a kept=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    [[ -n "$tok" ]] || continue
+    case "${tok,,}" in
+      alexey@*|*alexey.s.grigoriev@*|orin@*) continue ;;
+      *) kept+=("$tok") ;;
+    esac
+  done
+  if [[ "${#kept[@]}" -eq 0 ]]; then
+    echo "dev@dtcdev.click"
+  else
+    local IFS=','
+    echo "${kept[*]}"
+  fi
+}
+for _dev_only_var in ALERT_TO ALERT_OPS_TO LATENCY_ALERT_TO; do
+  if [[ "${!_dev_only_var:-}" =~ ([Aa][Ll][Ee][Xx][Ee][Yy]@|[Aa][Ll][Ee][Xx][Ee][Yy]\.[Ss]\.[Gg][Rr][Ii][Gg][Oo][Rr][Ii][Ee][Vv]@|[Oo][Rr][Ii][Nn]@) ]]; then
+    printf -v "$_dev_only_var" '%s' "$(dev_only_recipients "${!_dev_only_var}")"
+  fi
+done
+unset _dev_only_var
 LATENCY_STATE_SUFFIX="${LATENCY_STATE_SUFFIX:-latency}"
 
 command -v curl >/dev/null 2>&1 || { log "ERROR: missing required binary: curl"; exit 1; }
