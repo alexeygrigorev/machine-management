@@ -110,11 +110,11 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T4 stale exits nonzero"
 fi
-if grep -q '^RELAY_ARGS: send --from alerts --to alexey@invalid.test --subject ' "$MAILBOX" \
+if ! grep -q 'alexey@' "$MAILBOX" \
   && grep -q '^RELAY_ARGS: send --from alerts --to dev@invalid.test --subject ' "$MAILBOX"; then
-  pass "T4 stale pages both prod recipients through Relay"
+  pass "T4 stale pages dev only through Relay; alexey@ stripped (intake 19fefe6f)"
 else
-  fail "T4 stale pages both prod recipients"; cat "$MAILBOX" 2>/dev/null
+  fail "T4 stale pages dev only"; cat "$MAILBOX" 2>/dev/null
 fi
 
 # ---- T5: DRY_RUN would-alert but sends nothing ----
@@ -161,9 +161,9 @@ if STORAGEBOX_ROOT="$TMP/sb" LAST_SYNC_FILE="$TMP/sb/s3/.last-sync" STATE_DIR="$
 else
   pass "T8 missing exits nonzero"
 fi
-if grep -q '^RELAY_ARGS: send --from alerts --to alexey@invalid.test --subject ' "$MAILBOX" \
-  && grep -q "missing" "$MAILBOX"; then
-  pass "T8 missing pages prod through Relay"
+if grep -q '^RELAY_ARGS: send --from alerts --to dev@invalid.test --subject ' "$MAILBOX" \
+  && ! grep -q 'alexey@' "$MAILBOX" && grep -q "missing" "$MAILBOX"; then
+  pass "T8 missing pages dev only through Relay"
 else
   fail "T8 missing pages prod"; cat "$MAILBOX" 2>/dev/null
 fi

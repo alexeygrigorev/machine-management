@@ -471,19 +471,38 @@ if [[ "$rc" -eq 0 && "$out" == *ALL_OK* ]] && grep -q 'RECOVERED' "$MAILBOX" && 
 else
   fail "T14c recovery routing (rc=$rc) -- $out / mail: $(cat "$MAILBOX")"
 fi
-# 14d: CRIT (5% free) requires 2 consecutive runs (DISK_BREACH_RUNS=2) before paging alexey@
+# 14d/14e: CRIT pages dev@ only. alexey@ in ALERT_TO is stripped up front
+# (intake 19fefe6f: infra alerts go ONLY to dev@dtcdev.click), so even a
+# sustained breach never pages a personal inbox.
 write_vals "/|ext4|$((100*GB))|$((5*GB))|29097984|20604622|/dev/nvme0n1p3"
 : > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
-if grep -q 'dev@dtcdev.click' "$MAILBOX" && ! grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'PENDING_BREACH' "$LAST_OUT"; then
-  pass "T14d CRIT run 1/2 holds personal PAGE (PENDING_BREACH)"
+if grep -q 'dev@dtcdev.click' "$MAILBOX" && ! grep -q 'alexey@datatalks.club' "$MAILBOX"; then
+  pass "T14d CRIT run 1/2 pages dev@ only, never alexey@"
 else
   fail "T14d CRIT run 1/2 -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
 fi
 : > "$MAILBOX"; run_iso "$ST14" "$TMP/envT14"
-if grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'dev@dtcdev.click' "$MAILBOX"; then
-  pass "T14e CRIT run 2/2 (sustained breach) pages alexey@ + dev@"
+if ! grep -q 'alexey@datatalks.club' "$MAILBOX" && grep -q 'CHECKS_FAILED' "$LAST_OUT"; then
+  pass "T14e CRIT run 2/2 (sustained breach) never escalates to alexey@"
 else
   fail "T14e CRIT run 2/2 -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
+fi
+
+echo "---- T14f: personal and orin@ recipients are stripped from ALERT_TO/ALERT_OPS_TO (intake 19fefe6f) ----"
+ST14F="$(mkstate)"
+cat > "$TMP/envT14f" <<EOF
+DISK_MOUNTS="/"
+ALERT_TO=alexey.s.grigoriev@gmail.com,orin@dtcdev.click,Alexey@DataTalks.Club
+ALERT_OPS_TO=orin@dtcdev.click
+RECOVER_NOTIFY_MIN_SEC=0
+DISK_BREACH_RUNS=1
+EOF
+write_vals "/|ext4|$((100*GB))|$((5*GB))|29097984|20604622|/dev/nvme0n1p3"
+: > "$MAILBOX"; run_iso "$ST14F" "$TMP/envT14f"
+if grep -q 'dev@dtcdev.click' "$MAILBOX" && ! grep -qi -E 'alexey|grigoriev|orin@' "$MAILBOX"; then
+  pass "T14f CRIT with only personal/orin recipients configured pages dev@dtcdev.click only"
+else
+  fail "T14f personal/orin strip -- $(cat "$LAST_OUT") / mail: $(cat "$MAILBOX")"
 fi
 
 echo "---- T15: retain seven days of five-minute disk samples ----"

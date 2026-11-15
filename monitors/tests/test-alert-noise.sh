@@ -104,60 +104,62 @@ require grep -q 'OK check=content-wg' "$TMP/a/log"
 pass 'contabo-a skips public HTTP and content, retains loopback/WG checks'
 
 # One incident = one FAIL mail: http-aishl + content-aishl_home are the same
-# service, so the first page goes to both recipients once and the sibling is held.
+# service, so the first page goes out once and the sibling is held. The
+# alexey@ address in ALERT_TO is stripped up front (intake 19fefe6f: infra
+# alerts go ONLY to dev@), so the page reaches dev only.
 run_check "$TMP/b" fail 1000000 0
-require test "$(mail_count "$TMP/b")" -eq 2
-require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (http-aishl)$' "$TMP/b/mail")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 1
+require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (http-aishl)$' "$TMP/b/mail")" -eq 1
 require test "$(grep -c 'content-aishl_home' "$TMP/b/mail")" -eq 0
-require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/b/mail")" -eq 1
+require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/b/mail")" -eq 0
 require test "$(grep -c '^RELAY_TO: dev@invalid.test$' "$TMP/b/mail")" -eq 1
-require test "$(grep -c '^RELAY_FROM: alerts$' "$TMP/b/mail")" -eq 2
+require test "$(grep -c '^RELAY_FROM: alerts$' "$TMP/b/mail")" -eq 1
 require grep -q 'HOLD check=content-aishl_home' "$TMP/b/log"
-pass 'AISHL outage (http + content failing) pages immediately: ONE FAIL mail per recipient, sibling held'
+pass 'AISHL outage (http + content failing) pages immediately: ONE FAIL mail to dev only, sibling held'
 
 run_check "$TMP/b" fail 1000300 0
-require test "$(mail_count "$TMP/b")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 1
 pass 'repeated failures during the incident stay deduped'
 
 # Green for under 5 min: no RECOVERED yet; a re-FAIL inside the window is the SAME incident.
 run_check "$TMP/b" good 1000400 0
-require test "$(mail_count "$TMP/b")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 1
 run_check "$TMP/b" fail 1000500 0
-require test "$(mail_count "$TMP/b")" -eq 2
+require test "$(mail_count "$TMP/b")" -eq 1
 pass 'flap inside the 5-min green window: no RECOVERED, no new FAIL'
 
 run_check "$TMP/b" good 1000600 0
 run_check "$TMP/b" good 1000900 0
-require test "$(mail_count "$TMP/b")" -eq 3
+require test "$(mail_count "$TMP/b")" -eq 2
 require test "$(grep -c '^RELAY_SUBJECT: .* RECOVERED (svc-aisl)$' "$TMP/b/mail")" -eq 1
 require test "$(grep -c '^RELAY_TO: dev@invalid.test$' "$TMP/b/mail")" -eq 2
-require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/b/mail")" -eq 1
+require test "$(grep -c '^RELAY_TO: alexey@example.invalid.test$' "$TMP/b/mail")" -eq 0
 pass 'RECOVERED only after 5 min continuous green, exactly once, to dev@ only'
 run_check "$TMP/b" good 1001200 0
-require test "$(mail_count "$TMP/b")" -eq 3
+require test "$(mail_count "$TMP/b")" -eq 2
 pass 'continued green does not repeat recovery mail'
 
 # Flapping right after RECOVERED (within 15 min): held until it persists 5 min, then ONE page.
 run_check "$TMP/b" fail 1001300 0
-require test "$(mail_count "$TMP/b")" -eq 3
+require test "$(mail_count "$TMP/b")" -eq 2
 run_check "$TMP/b" good 1001400 0
-require test "$(mail_count "$TMP/b")" -eq 3
+require test "$(mail_count "$TMP/b")" -eq 2
 run_check "$TMP/b" fail 1001500 0
 run_check "$TMP/b" fail 1001800 0
-require test "$(mail_count "$TMP/b")" -eq 5
+require test "$(mail_count "$TMP/b")" -eq 3
 pass 'post-recovery flap within 15 min is held; a sustained re-failure pages once after 5 min'
 
 run_check "$TMP/long" fail 1000000 0
 run_check "$TMP/long" fail 1003600 0
-require test "$(mail_count "$TMP/long")" -eq 4
+require test "$(mail_count "$TMP/long")" -eq 2
 run_check "$TMP/long" good 1003601 0
 run_check "$TMP/long" good 1003901 0
-require test "$(mail_count "$TMP/long")" -eq 5
+require test "$(mail_count "$TMP/long")" -eq 3
 require grep -q 'incident lasted 3901s' "$TMP/long/mail"
 pass 'hourly repeat reminder during a long incident; single RECOVERED reports total duration'
 
 run_check "$TMP/marker" wrong 1000000 0
-require test "$(mail_count "$TMP/marker")" -eq 2
+require test "$(mail_count "$TMP/marker")" -eq 1
 require grep -q '^RELAY_SUBJECT: .* FAIL (content-aishl_home)$' "$TMP/marker/mail"
 pass 'AISHL content mismatch with HTTP 200 still pages immediately'
 
@@ -172,11 +174,11 @@ for to in "$@"; do printf 'RELAY_SUBJECT: %s\nRELAY_TO: %s\n---\n' "$subj" "$to"
 SES
 chmod +x "$TMP/sesbin/msmtp"
 EXTRA_PATH="$TMP/sesbin" STUB_RELAY=fail run_check "$TMP/r2" good 1000000 0
-require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (http-relay)$' "$TMP/r2/mail")" -eq 2
+require test "$(grep -c '^RELAY_SUBJECT: .* FAIL (http-relay)$' "$TMP/r2/mail")" -eq 1
 require test "$(grep -c 'content-relay_health\|relay_dev' "$TMP/r2/mail")" -eq 0
 require grep -q 'DEV-ALERT check=http-relay_dev level=FAIL' "$TMP/r2/log"
 require grep -q 'HOLD check=content-relay_health' "$TMP/r2/log"
-pass 'relay prod 503: one FAIL (2 recipients) across http+content; dev env logs only, no mail'
+pass 'relay prod 503: one FAIL (dev only) across http+content; dev env logs only, no mail'
 
 # Stale check pruning (t1342u): checks no longer in config (e.g. content-relay_dtcdev)
 # have their .state files pruned automatically.
