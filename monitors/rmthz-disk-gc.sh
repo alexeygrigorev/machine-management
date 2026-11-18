@@ -295,7 +295,7 @@ worktree_lock_state() {
     current=""
     while IFS= read -r line; do
       case "$line" in
-        'worktree '*) current=$(realpath "${line#worktree }"); REGISTERED_WORKTREES["$current"]=1 ;;
+        'worktree '*) current=$(realpath -m "${line#worktree }" 2>/dev/null || true); [[ -n "$current" ]] && REGISTERED_WORKTREES["$current"]=1 ;;
         locked*) [[ -n "$current" ]] && LOCKED_WORKTREES["$current"]=1 ;;
         '') current="" ;;
       esac
