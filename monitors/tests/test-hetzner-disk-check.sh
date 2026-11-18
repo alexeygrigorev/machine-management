@@ -528,5 +528,12 @@ else
   fail "T15 sample retention count=$sample_count first=$sample_first last=$sample_last now=$now"
 fi
 
+echo "---- T16: root WARN and CRIT both trigger rmthz-disk-gc.service ----"
+if grep -q 'level" == "WARN" || "$level" == "CRIT"' "$SCRIPT"; then
+  pass "T16 root WARN and CRIT trigger rmthz-disk-gc.service"
+else
+  fail "T16 root CRIT missing from rmthz-disk-gc.service trigger condition"
+fi
+
 echo "---- $PASS passed, $FAILN failed ----"
 [[ "$FAILN" -eq 0 ]]

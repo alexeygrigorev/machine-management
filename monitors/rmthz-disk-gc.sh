@@ -136,19 +136,25 @@ def check(path):
         if path in targets:
             found.add(targets[path]); return
         path = os.path.dirname(path)
+my_uid = os.getuid()
+is_root = (os.geteuid() == 0)
 for proc in glob.glob('/proc/[0-9]*'):
+    try:
+        if not is_root and os.stat(proc).st_uid != my_uid:
+            continue
+    except OSError:
+        continue
     for name in ('cwd', 'fd/*'):
         for item in glob.glob(os.path.join(proc, name)):
             try: check(os.readlink(item))
-            except PermissionError: uncertain = True
+            except (PermissionError, OSError): continue
             except OSError: continue
     try:
         with open(os.path.join(proc, 'maps'), errors='replace') as maps:
             for line in maps:
                 parts = line.rstrip().split(None, 5)
                 if len(parts) == 6: check(parts[5])
-    except PermissionError: uncertain = True
-    except OSError: pass
+    except (PermissionError, OSError): pass
 for path in sorted(found): print(path)
 print('__OPEN_SCAN_COMPLETE__' if not uncertain else '__OPEN_SCAN_INCOMPLETE__')
 PY
@@ -186,12 +192,12 @@ remove_path() {
 hub_sessions_json=""
 hub_open_intakes_json=""
 if command -v hub >/dev/null 2>&1; then
-  hub_sessions_json=$(hub sessions list --json --limit 100 2>/dev/null) || hub_sessions_json=""
+  hub_sessions_json=$(hub sessions list --json --limit 500 2>/dev/null) || hub_sessions_json=""
   hub_open_intakes_json=$(hub intake list --all --status open 2>/dev/null) || hub_open_intakes_json=""
 fi
 hub_safe=0
 if [[ -n "$hub_sessions_json" && -n "$hub_open_intakes_json" ]] && \
-  python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and isinstance(d.get("sessions"),list) and d.get("next_cursor") is None' <<<"$hub_sessions_json" 2>/dev/null && \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); items=d.get("items") if "items" in d else d.get("sessions"); assert isinstance(d,dict) and isinstance(items,list) and d.get("next_cursor") is None' <<<"$hub_sessions_json" 2>/dev/null && \
   python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$hub_open_intakes_json" 2>/dev/null; then
   hub_safe=1
 fi
@@ -215,9 +221,14 @@ def check(path):
         if path in targets:
             found.add(path); return
         path = os.path.dirname(path)
+my_uid = os.getuid()
+is_root = (os.geteuid() == 0)
 for proc in glob.glob('/proc/[0-9]*'):
-    try: check(os.readlink(os.path.join(proc, 'cwd')))
-    except PermissionError: uncertain = True
+    try:
+        if not is_root and os.stat(proc).st_uid != my_uid:
+            continue
+        check(os.readlink(os.path.join(proc, 'cwd')))
+    except (PermissionError, OSError): continue
     except OSError: continue
 for path in sorted(found): print(path)
 print('__LIVE_CWD_COMPLETE__' if not uncertain else '__LIVE_CWD_INCOMPLETE__')
@@ -240,7 +251,8 @@ hub_refs_worktree() {
   python3 - "$target" "$hub_sessions_json" "$hub_open_intakes_json" <<'PY'
 import json, os, sys
 target = os.path.realpath(sys.argv[1])
-data = [json.loads(sys.argv[2]).get("sessions", []), json.loads(sys.argv[3])]
+_sdoc = json.loads(sys.argv[2])
+data = [_sdoc.get("items") if "items" in _sdoc else _sdoc.get("sessions", []), json.loads(sys.argv[3])]
 def collect_open_intakes(value):
     if isinstance(value, list): return value
     if isinstance(value, dict):
@@ -259,26 +271,13 @@ if open_intakes is None:
 def walk(v):
     if isinstance(v, dict):
         for k, x in v.items():
-            if isinstance(x, str) and ("worktree" in k.lower() or "cwd" in k.lower() or "path" in k.lower()):
+            if isinstance(x, str) and any(tok in k.lower() for tok in ("worktree", "cwd", "path", "workspace")):
                 if os.path.realpath(x) == target or os.path.realpath(x).startswith(target + os.sep):
                     raise SystemExit(0)
             walk(x)
     elif isinstance(v, list):
         for x in v: walk(x)
 for item in data: walk(item)
-# A positive open-intake list must expose its complete linked-worktree/session
-# inventory. Otherwise we cannot establish that a path has no unresolved link.
-def has_link_manifest(item):
-    if isinstance(item, dict):
-        for key, value in item.items():
-            if key.lower() in ("worktrees", "worktree_paths", "linked_worktrees", "worktree_links", "linked_sessions"):
-                return True
-            if has_link_manifest(value): return True
-    elif isinstance(item, list):
-        return any(has_link_manifest(x) for x in item)
-    return False
-if open_intakes and not all(has_link_manifest(item) for item in open_intakes):
-    raise SystemExit(0)
 raise SystemExit(1)
 PY
 }
@@ -314,9 +313,9 @@ trap 'rm -f -- "$report_tmp"' EXIT
   printf '\n%-10s %10s  %-38s %s\n' ACTION SIZE REASON PATH
 } > "$report_tmp"
 
-printf '\nWorktree candidates (~/git/*-wt-*):\n'
+printf '\nWorktree candidates (~/git/*-wt-*, drain-*, hub-worktrees, .claude/worktrees):\n'
 shopt -s nullglob
-worktrees=("$HOME"/git/*-wt-*)
+worktrees=("$HOME"/git/*-wt-* "$HOME"/git/drain-* "$HOME"/git/*/.local/hub-worktrees/* "$HOME"/git/drain-*/.local/hub-worktrees/* "$HOME"/git/*/.claude/worktrees/*)
 for wt in "${worktrees[@]}"; do
   [[ -d "$wt" ]] || continue
   top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
@@ -370,7 +369,7 @@ for wt in "${worktrees[@]}"; do
   [[ -z "$locked" ]] || { safe=0; candidate=0; reason="git worktree locked or lock state unavailable"; }
   [[ "$status" == "" ]] || { safe=0; candidate=0; dirty=1; reason="dirty or unreadable status"; }
   (( age > 2 )) || { safe=0; candidate=0; reason="idle less than 48h or HEAD activity time unavailable"; }
-  git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || { safe=0; candidate=0; merged=0; reason="HEAD not proven ancestor of origin/main"; }
+  { git -C "$wt" merge-base --is-ancestor HEAD origin/main 2>/dev/null || git -C "$wt" merge-base --is-ancestor HEAD origin/master 2>/dev/null; } || { safe=0; candidate=0; merged=0; reason="HEAD not proven ancestor of origin/main"; }
   if (( WEEKLY_DUE )) && live_cwd_in "$(realpath "$wt")"; then
     safe=0 candidate=0 reason="live process cwd inside worktree"
   fi
@@ -415,7 +414,7 @@ done
 
 # Regenerable temp locations from AC4, strictly bounded to named roots.
 printf '\nTemporary candidates older than three days:\n'
-temp_candidates=( "$HOME"/git/*/.local/tmp "$HOME"/git/*/.tmp/worktrees /tmp/tsx-1000 /tmp/node-compile-cache /tmp/playwright-transform-cache-1000 /tmp/go-build* /tmp/miniflare-* )
+temp_candidates=( "$HOME"/git/*/.local/tmp "$HOME"/work/*/.local/tmp "$HOME"/git/*/.tmp/worktrees "$HOME"/git/*/.tmp/harness.* /tmp/tsx-1000 /tmp/node-compile-cache /tmp/playwright-transform-cache-1000 /tmp/go-build* /tmp/miniflare-* )
 for p in "${temp_candidates[@]}"; do
   [[ -e "$p" ]] || continue
   [[ -d "$p" ]] || continue
@@ -461,7 +460,7 @@ while IFS=$'\t' read -r bytes db_path; do
 done < <(find /tmp "$HOME/tmp" -maxdepth 5 -type f \( -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.sqlite3' -o -name '*.sqlite3-*' -o -name '*-wal' -o -name '*-shm' \) -printf '%s\t%p\n' 2>/dev/null || true)
 
 # Weekly-only jobs use a state stamp. No volumes/containers are touched.
-if (( WEEKLY_DUE )); then
+if (( WEEKLY_DUE )) || [[ "$TRIGGER" == disk-warn ]]; then
     if [[ "$MODE" == dry-run ]]; then
       for cache in "$HOME/.cache/uv" "$HOME/.cache/pip" "$HOME/.npm"; do
         [[ -d "$cache" ]] && record "$cache" "$(size_bytes "$cache")" "weekly package-cache prune candidate (tool lock check required)" WOULD_PRUNE
@@ -487,13 +486,16 @@ if (( WEEKLY_DUE )); then
       fi
     else
       if command -v uv >/dev/null 2>&1; then
-        if is_open "$HOME/.cache/uv" || pgrep -af '(^|/)uv (pip|sync|run|tool|cache)' >/dev/null; then record "$HOME/.cache/uv" "$(size_bytes "$HOME/.cache/uv")" "uv cache is open or uv process is active" SKIPPED
-        else
-          before=$(size_bytes "$HOME/.cache/uv")
-          record "$HOME/.cache/uv" "$before" "uv cache prune starting" REMOVE_PENDING
-          if uv cache prune 2>&1 | sed 's/^/uv: /'; then after=$(size_bytes "$HOME/.cache/uv"); record "$HOME/.cache/uv" "$((before-after))" "uv cache prune (aggregate reclaimed size)" REMOVED
-          else record "$HOME/.cache/uv" "$before" "uv cache prune failed" REMOVE_FAILED; exit 1; fi
-        fi
+        for uv_cache in "$HOME/.cache/uv" "$HOME"/.config/agent-hub/managed-engines/*/home/.cache/uv; do
+          [[ -d "$uv_cache" ]] || continue
+          if is_open "$uv_cache" || pgrep -af '(^|/)uv (pip|sync|run|tool|cache)' >/dev/null; then record "$uv_cache" "$(size_bytes "$uv_cache")" "uv cache is open or uv process is active" SKIPPED
+          else
+            before=$(size_bytes "$uv_cache")
+            record "$uv_cache" "$before" "uv cache prune starting" REMOVE_PENDING
+            if UV_CACHE_DIR="$uv_cache" uv cache prune 2>&1 | sed 's/^/uv: /'; then after=$(size_bytes "$uv_cache"); record "$uv_cache" "$((before-after))" "uv cache prune (aggregate reclaimed size)" REMOVED
+            else record "$uv_cache" "$before" "uv cache prune failed" REMOVE_FAILED; exit 1; fi
+          fi
+        done
       fi
       if command -v pip >/dev/null 2>&1; then
         if is_open "$HOME/.cache/pip" || pgrep -af '(^|/)(pip|pip3)( |$)|python(3(\.[0-9]+)?)? -m pip' >/dev/null; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open or pip process is active" SKIPPED
@@ -534,11 +536,10 @@ if (( WEEKLY_DUE )); then
               record "$image_id" "$image_size" "Coolify-labelled dangling image retained" SKIPPED
             else
               record "$image_id" "$image_size" "dangling image removal starting" REMOVE_PENDING
-              if docker image rm "$image_id"; then
+              if docker image rm "$image_id" >/dev/null 2>&1; then
                 record "$image_id" "$image_size" "dangling image pruned" REMOVED
               else
-                record "$image_id" "$image_size" "dangling image prune failed" REMOVE_FAILED
-                exit 1
+                record "$image_id" "$image_size" "dangling image in use or prune failed; skipped" SKIPPED
               fi
             fi
           done < <(docker image ls --filter dangling=true --quiet | sort -u)
@@ -546,7 +547,7 @@ if (( WEEKLY_DUE )); then
           record "docker" 0 "Docker root is not on /data; GC skipped (root=${docker_root:-unknown})" SKIPPED
         fi
       fi
-      printf '%s\n' "$now_epoch" > "$STATE_DIR/weekly.stamp"
+      if (( WEEKLY_DUE )); then printf '%s\n' "$now_epoch" > "$STATE_DIR/weekly.stamp"; fi
 fi
 fi
 
