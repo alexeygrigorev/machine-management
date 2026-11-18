@@ -516,7 +516,7 @@ check_mount() {
     send_alert "$name" "$subj" "Disk ${level} on $(hostname) mount ${mp}: free ${free_pct}% (${avail_gb} of ${size_gb}), inode ${inode_txt}. ${reason}. Trend window ${FILL_WINDOW_H}h, fill threshold ${FILL_CRIT_H}h." "$level" "$crit_streak"
     # The root WARN is the single trigger for the RMTHZ disk GC. The user
     # service owns dry-run/apply mode and its lock; a missing service is benign.
-    if [[ "$mp" == "/" && "$level" == "WARN" ]] && command -v systemctl >/dev/null 2>&1; then
+    if [[ "$mp" == "/" && ( "$level" == "WARN" || "$level" == "CRIT" ) ]] && command -v systemctl >/dev/null 2>&1; then
       local gc_stamp="$STATE_DIR/rmthz-disk-gc-last-warn-start"
       local gc_last=0 gc_now="$(date +%s)" gc_interval="${RMTHZ_GC_WARN_INTERVAL_SEC:-21600}"
       [[ -f "$gc_stamp" ]] && read -r gc_last < "$gc_stamp" || true
@@ -532,7 +532,7 @@ check_mount() {
           systemctl --user start rmthz-disk-gc.service >/dev/null 2>&1; then
           printf '%s\n' "$gc_now" > "$gc_stamp"
         else
-          log "INFO: root disk WARN; rmthz-disk-gc.service unavailable (GC not started)"
+          log "INFO: root disk ${level}; rmthz-disk-gc.service unavailable (GC not started)"
         fi
       fi
     fi
