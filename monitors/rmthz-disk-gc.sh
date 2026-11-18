@@ -497,7 +497,7 @@ if (( WEEKLY_DUE )) || [[ "$TRIGGER" == disk-warn ]]; then
           fi
         done
       fi
-      if command -v pip >/dev/null 2>&1; then
+      if [[ -d "$HOME/.cache/pip" ]] && command -v pip >/dev/null 2>&1; then
         if is_open "$HOME/.cache/pip" || pgrep -af '(^|/)(pip|pip3)( |$)|python(3(\.[0-9]+)?)? -m pip' >/dev/null; then record "$HOME/.cache/pip" "$(size_bytes "$HOME/.cache/pip")" "pip cache is open or pip process is active" SKIPPED
         else
           before=$(size_bytes "$HOME/.cache/pip")
@@ -506,7 +506,7 @@ if (( WEEKLY_DUE )) || [[ "$TRIGGER" == disk-warn ]]; then
           else record "$HOME/.cache/pip" "$before" "pip cache purge failed" REMOVE_FAILED; exit 1; fi
         fi
       fi
-      if command -v npm >/dev/null 2>&1; then
+      if [[ -d "$HOME/.npm" ]] && command -v npm >/dev/null 2>&1; then
         if ! is_open "$HOME/.npm" && ! pgrep -af '(^|/)npm( |$)' >/dev/null && [[ ! -e "$HOME/.npm/_locks" ]] && [[ ! -e "$HOME/.npm/_cacache/tmp" ]]; then
           before=$(size_bytes "$HOME/.npm")
           record "$HOME/.npm" "$before" "npm cache clean starting after process and lock checks" REMOVE_PENDING
