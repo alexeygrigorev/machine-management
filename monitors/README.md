@@ -118,6 +118,10 @@ once Relay delivery + log volume look healthy.
 | `coolify-proxy-networks.cron` | `*/5 * * * *` Europe/Berlin entry (pager; self-heal is the 2-min edge keeper) |
 | `coolify-proxy-networks.env.example` | placeholders for `/etc/coolify-proxy-networks.env` (dev@ only) |
 | `install-coolify-proxy-networks.sh` | operator-box installer (backups + cron, migrates old shipped env defaults) |
+| `gha-runner-monitor.sh` | **self-hosted GHA runner monitor + auto-recovery (2026-11-23)**: checks `contabo-ci` + Hetzner systemd units (auto-restarts stopped/failed units), GitHub API repo-level runner status, queue wait >15m, and disk >85%; deduped alerts + RECOVERED to `dev@dtcdev.click` via Relay/msmtp |
+| `install-gha-runner-monitor.sh` | installs `/usr/local/sbin/gha-runner-monitor.sh` and `*/5 * * * *` user cron on Hetzner |
+| `gha-runner-cleanup.sh` | disk/memory/resilience guard for runner hosts: enforces `20-resilience.conf` (`Restart=always`, `RestartSec=10`, `MemoryHigh`/`MemoryMax`, `enabled`) and cleans idle `_work`/`_diag` + Docker prune when disk is high |
+| `install-gha-runner-hardening.sh` | installs `gha-runner-cleanup.sh` + 6h systemd timer and applies runner drop-ins locally (Hetzner) or remotely (`contabo-ci`) |
 | `hetzner-disk-check.sh` | **Hetzner host-local disk pager (t1493u)**: every real mount (`/ /boot /data`; tmpfs/overlay/squashfs excluded; sshfs storagebox report-only, never paged) with free% (WARN <15 / CRIT <8), inode free% (WARN <10 / CRIT <5) and fills-within-24h linear trend (6h samples); prod `ALERT_TO`, drills `ALERT_OPS_TO` (dev@) only, 4h dedupe, one RECOVERED |
 | `hetzner-disk-check.cron` | user-crontab `*/5 * * * *` entry pointing at the stable `/usr/local/sbin` copy |
 | `hetzner-disk-check.env.example` | placeholders for `~/.hetzner-disk-check.env` (defaults are the prod values) |
