@@ -209,9 +209,9 @@ run_on_host() {
   # $1=host ("hetzner" | "contabo-ci") $2=cmd
   local host="$1" cmd="$2"
   if [[ "$host" == "hetzner" ]]; then
-    bash -c "$cmd"
+    bash -c "$cmd" </dev/null
   else
-    timeout "$SSH_TIMEOUT" "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 "$RUNNER_CONTABO_HOST" "$cmd"
+    timeout "$SSH_TIMEOUT" "$SSH_BIN" -n -o BatchMode=yes -o ConnectTimeout=10 "$RUNNER_CONTABO_HOST" "$cmd"
   fi
 }
 
