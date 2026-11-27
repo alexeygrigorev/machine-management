@@ -8,11 +8,11 @@
 
 1. Takes **fresh** `pg_dump -Fc` from live Contabo Coolify Postgres (`pg-shared`: cmp/aisl/website, `pg-relay`: relay) via `sudo docker exec`.
 2. SCPs dumps to Hetzner, stages as `~/tmp/pg-fast-raise-weekly/dumps/<db>.dump`.
-3. Runs timed `contingency/fast-pg-raise.sh` on **loopback only** (`127.0.0.1:55439`, container `pg-fast-raise-weekly`, `Restart=no`).
+3. Runs timed `contingency/fast-pg-raise.sh` with a **local socket and no published port** (container `pg-fast-raise-weekly`, `Restart=no`).
 4. Pushes metrics via `contingency/push-dr-raise-metrics.sh`: **direct** POST to Hetzner-local VM (`$VM_URL`, default `http://127.0.0.1:8428`, 400d retention) **plus** SSH relay to contabo-a for its obs VMUI. The 2026-10-29 false stale alert came from the checker querying Contabo's ~2d VM before the mirror was in place; the weekly push was correctly formatted (HTTP 204). The authoritative stale-check now runs on Hetzner against the 400d source VM. `VM_SSH=""` skips the remote leg (tests/local-only, no Contabo contact).
 5. Tears down the throwaway container/volume (`TEARDOWN=1` default).
 
-**Hard guards:** no CF/DNS flip, no Coolify prod restart, no RDS touch. Distinct port from one-shot drills (`:55437` t1037u, `:55438` t1118u).
+**Hard guards:** no CF/DNS flip, no Coolify prod restart, no RDS touch. The weekly container uses its local socket through `docker exec`.
 
 ## Scripts
 

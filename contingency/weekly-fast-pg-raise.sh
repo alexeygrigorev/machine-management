@@ -5,12 +5,12 @@
 # Flow:
 #   1) Fresh pg_dump -Fc from live Contabo Coolify PG (pg-shared + pg-relay)
 #   2) SCP to Hetzner staging dir
-#   3) Timed contingency/fast-pg-raise.sh (loopback only; no CF/DNS/RDS)
+#   3) Timed contingency/fast-pg-raise.sh (local socket; no CF/DNS/RDS)
 #   4) Push VictoriaMetrics metrics via push-dr-raise-metrics.sh
 #   5) Tear down throwaway container/volume (default TEARDOWN=1)
 #
-# Does NOT flip prod. Does NOT touch RDS. Distinct container/port from
-# one-shot drills (t1037u :55437, t1118u :55438) — weekly uses :55439.
+# Does NOT flip prod. Does NOT touch RDS. The weekly drill uses docker exec
+# for all queries, so it publishes no host port by default.
 #
 # Locking: THIS script is the single lock owner ($LOCK, default
 # /tmp/weekly-fast-pg-raise.lock). Do not wrap it in an outer `flock`
@@ -29,7 +29,7 @@ LOGDIR="$STAGE/logs"
 mkdir -p "$RAW" "$DUMPS" "$LOGDIR" "$STAGE"
 
 CONTAINER="${CONTAINER:-pg-fast-raise-weekly}"
-PORT="${PORT:-55439}"
+PORT="${PORT:-}"
 JOBS="${JOBS:-4}"
 DBS="${DBS:-cmp aisl website relay}"
 TEARDOWN="${TEARDOWN:-1}"
@@ -73,7 +73,7 @@ teardown_resources() {
 }
 trap teardown_resources EXIT
 
-log "start stamp=${STAMP} container=${CONTAINER} port=${PORT}"
+log "start stamp=${STAMP} container=${CONTAINER} port=${PORT:-unpublished}"
 
 mapfile -t _pgc < <(ssh_b 'sudo -n docker ps --filter label=coolify.resourceName=pg-shared --format "{{.Names}}"; sudo -n docker ps --filter label=coolify.resourceName=pg-relay --format "{{.Names}}"')
 PG_SHARED_C="${_pgc[0]:-}"

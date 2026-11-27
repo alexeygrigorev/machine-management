@@ -67,6 +67,7 @@ chmod +x "$SHIM"/ssh "$SHIM"/scp "$SHIM"/docker
 RAISE_STUB="$T/raise-stub.sh"
 cat >"$RAISE_STUB" <<'EOF'
 #!/usr/bin/env bash
+[[ ${PORT-unset} == '' ]] || { echo "STUB: weekly drill must not publish a port" >&2; exit 2; }
 ls "$DUMPS_DIR"/*.dump >/dev/null || { echo "STUB: dumps missing" >&2; exit 2; }
 printf 'raise-stub ran container=%s dumps=%s\n' "$CONTAINER" "$DUMPS_DIR" >"$STUB_DIR/raise-stub-ran"
 echo "STUB RAISE ok"

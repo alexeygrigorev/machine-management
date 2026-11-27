@@ -14,7 +14,7 @@
 #
 # Env overrides:
 #   CONTAINER   (default pg-fast-raise-t1037u)
-#   PORT        (default 55437)
+#   PORT        (default 55437, empty for a socket-only drill)
 #   IMAGE       (default postgres:16.15-alpine)
 #   PGUSER      (default drill_admin)
 #   PGPW_FILE   (default $HOME/tmp/secrets/pg-fast-raise-t1037u.pw; generated if missing)
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-pg-fast-raise-t1037u}"
-PORT="${PORT:-55437}"
+PORT="${PORT-55437}"
 IMAGE="${IMAGE:-postgres:16.15-alpine}"
 PGUSER="${PGUSER:-drill_admin}"
 PGPW_FILE="${PGPW_FILE:-$HOME/tmp/secrets/pg-fast-raise-t1037u.pw}"
@@ -70,13 +70,19 @@ if [[ -n "${AGENT_SESSION_ID:-}" ]]; then
   LABEL_ARGS+=(--label "agent.session=${AGENT_SESSION_ID}")
 fi
 
-log "starting $CONTAINER on 127.0.0.1:$PORT"
+if [[ -n "$PORT" ]]; then
+  NETWORK_ARGS=(-p "127.0.0.1:$PORT:5432")
+  log "starting $CONTAINER on 127.0.0.1:$PORT"
+else
+  NETWORK_ARGS=(--network none)
+  log "starting $CONTAINER with a local socket only"
+fi
 docker run -d --rm "${LABEL_ARGS[@]}" --name "$CONTAINER" --restart=no \
   -e POSTGRES_USER="$PGUSER" \
   -e POSTGRES_PASSWORD="$PGPASSWORD" \
   -e POSTGRES_DB=postgres \
   -v "${CONTAINER}-data:/var/lib/postgresql/data" \
-  -p "127.0.0.1:$PORT:5432" \
+  "${NETWORK_ARGS[@]}" \
   "$IMAGE" >/dev/null
 
 log "waiting for pg_isready"
