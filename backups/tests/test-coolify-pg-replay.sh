@@ -3,8 +3,11 @@
 #
 # Covers the t1143u P1 AC: gzipped S3 archive segments are consumed (never
 # silently skipped), explicit recovery targets are validated, and
-# missing/corrupt/gapped WAL fails loudly. Docker-dependent stages use stub
-# binaries on PATH; no production, no network, no real Postgres.
+# missing/corrupt/gapped WAL fails loudly — within one PostgreSQL log and
+# across a log boundary. Docker-dependent stages use stub binaries on PATH
+# (the stub `docker` answers the script's read-only `pg_controldata` probe
+# with the PG default 16MB segment size); no production, no network, no real
+# Postgres.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,10 +28,20 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/docker" <<'EOF'
 #!/usr/bin/env bash
-# chown helper: succeed; real `docker run -d`: announce then fail so tests
-# observe everything up to container start without needing a daemon.
+# Read-only pg_controldata probe (WAL segment size for the chain check):
+# answer like a real PG16 cluster, or fail on demand. chown helper: succeed.
+# Real `docker run -d`: announce then fail so tests observe everything up to
+# container start without needing a daemon. Any other `run` is unhandled —
+# fail loudly rather than masquerade as a container start.
+if [[ "${1:-}" == "run" && "$*" == *"pg_controldata"* ]]; then
+  [[ -z "${STUB_PG_CONTROLDATA_FAIL:-}" ]] || exit 1
+  printf 'pg_control version number:            1300\n'
+  printf 'Bytes per WAL segment:                16777216\n'
+  exit 0
+fi
 if [[ "${1:-}" == "run" && "$*" == *"/bin/chown"* ]]; then exit 0; fi
-if [[ "${1:-}" == "run" ]]; then echo "STUB-RUN-REACHED" >&2; exit 1; fi
+if [[ "${1:-}" == "run" && " $* " == *" -d "* ]]; then echo "STUB-RUN-REACHED" >&2; exit 1; fi
+if [[ "${1:-}" == "run" ]]; then echo "STUB-DOCKER-UNHANDLED" >&2; exit 1; fi
 exit 0
 EOF
 for b in psql pg_restore pg_isready aws tar gzip; do
@@ -41,14 +54,14 @@ chmod +x "$TMP/bin/docker"
 export PATH="$TMP/bin:$PATH"
 
 # ---- fixture: minimal base tar with backup_label (START seg ...026) + pg_wal tar ----
-mkbase() { # $1=dir -> prints "base pgwal"
-  local d="$1"
+mkbase() { # $1=dir [$2=START segment, default ...026] -> prints "base pgwal"
+  local d="$1" start="${2:-000000010000000000000026}"
   local pd="$d/pgdata"
   mkdir -p "$pd/pg_wal"
-  printf 'START WAL LOCATION: 0/26000028 (file 000000010000000000000026)\nCHECKPOINT LOCATION: 0/26000028\n' > "$pd/backup_label"
+  printf 'START WAL LOCATION: 0/26000028 (file %s)\nCHECKPOINT LOCATION: 0/26000028\n' "$start" > "$pd/backup_label"
   printf 'V1' > "$pd/PG_VERSION"
   tar -czf "$d/base.tar.gz" -C "$pd" backup_label PG_VERSION
-  (cd "$pd/pg_wal" && printf 'x%.0s' $(seq 1 100) > 000000010000000000000026 && tar -czf "$d/pgwal.tar.gz" 000000010000000000000026)
+  (cd "$pd/pg_wal" && printf 'x%.0s' $(seq 1 100) > "$start" && tar -czf "$d/pgwal.tar.gz" "$start")
   printf '%s %s' "$d/base.tar.gz" "$d/pgwal.tar.gz"
 }
 mkwal() { # $1=waldir $2...=suffixes (last-8-hex) -> gzipped segments
@@ -56,6 +69,13 @@ mkwal() { # $1=waldir $2...=suffixes (last-8-hex) -> gzipped segments
   local s
   for s in "$@"; do
     printf 'wal-%s' "$s" | gzip -c > "$wd/0000000100000000$s.gz"
+  done
+}
+mkfull() { # $1=waldir $2...=full 24-hex segment names -> gzipped segments
+  local wd="$1"; shift; mkdir -p "$wd"
+  local s
+  for s in "$@"; do
+    printf 'wal-%s' "$s" | gzip -c > "$wd/$s.gz"
   done
 }
 
@@ -155,6 +175,39 @@ mkdir -p "$D8b/wal"; mkwal "$D8b/wal" 00000024 00000025
 if run_replay --base "$BASE8B" --base-wal "$PGW8B" --wal-dir "$D8b/wal" | grep -q 'START segment .* not present'; then
   pass "T8b START nowhere in chain fails loudly"
 else fail "T8b START nowhere in chain fails loudly"; fi
+
+# ---- T9: the same guarantees across a PostgreSQL log boundary ----
+# The script derives segments-per-log from pg_control (stub: 16MB => 256 per
+# log), so log 0001 index FF is followed by log 0002 index 00 — not "FF+1".
+B9="$TMP/t9"; read -r BASE9 PGW9 <<< "$(mkbase "$B9" 0000000100000001000000FF)"
+D9="$TMP/t9a"; mkfull "$D9" 0000000100000001000000FF 000000010000000200000000 000000010000000200000001
+if run_replay --base "$BASE9" --base-wal "$PGW9" --wal-dir "$D9" | grep -q 'WAL chain continuous: 0000000100000001000000FF .. 000000010000000200000001'; then
+  pass "T9a gz chain continuous across log boundary"
+else fail "T9a gz chain continuous across log boundary"; fi
+D9b="$TMP/t9b"; mkfull "$D9b" 0000000100000001000000FF 000000010000000200000001
+if run_replay --base "$BASE9" --base-wal "$PGW9" --wal-dir "$D9b" | grep -q 'WAL GAP: after 0000000100000001000000FF expected 000000010000000200000000 but chain has 000000010000000200000001'; then
+  pass "T9b gap across log boundary fails loudly"
+else fail "T9b gap across log boundary fails loudly"; fi
+D9c="$TMP/t9c"; mkfull "$D9c" 000000010000000200000000 000000010000000200000001
+if run_replay --base "$BASE9" --base-wal "$PGW9" --wal-dir "$D9c" | grep -q 'WAL GAP: staged chain starts at 000000010000000200000000 but base needs 0000000100000001000000FF'; then
+  pass "T9c START (last of previous log) missing fails loudly"
+else fail "T9c START (last of previous log) missing fails loudly"; fi
+D9d="$TMP/t9d"; mkfull "$D9d" 0000000100000001000000FE 0000000100000001000000FF 000000010000000200000000
+printf 'label' | gzip -c > "$D9d/0000000100000001000000FF.00000002.backup.gz"
+OUT9="$(run_replay --base "$BASE9" --base-wal "$PGW9" --wal-dir "$D9d" || true)"
+if printf '%s' "$OUT9" | grep -q 'staged 4 WAL file(s)' && \
+   printf '%s' "$OUT9" | grep -q 'WAL chain continuous: 0000000100000001000000FF .. 000000010000000200000000'; then
+  pass "T9d older leading segment + .backup skipped across log boundary"
+else fail "T9d older leading segment + .backup skipped across log boundary"; fi
+
+# ---- T10: unreadable pg_control must not skip the chain check ----
+# The segment size is what makes the boundary arithmetic exact; without it
+# even a continuous chain (D9) is refused before any container start.
+OUT10="$(STUB_PG_CONTROLDATA_FAIL=1 run_replay --base "$BASE9" --base-wal "$PGW9" --wal-dir "$D9" || true)"
+if printf '%s' "$OUT10" | grep -q 'cannot read WAL segment size from pg_control' && \
+   ! printf '%s' "$OUT10" | grep -q -e 'WAL chain continuous' -e 'STUB-RUN-REACHED'; then
+  pass "T10 unreadable pg_control fails loudly before chain check/container start"
+else fail "T10 unreadable pg_control fails loudly before chain check/container start"; fi
 
 echo "----"
 echo "PASS=$PASS FAIL=$FAILN"
