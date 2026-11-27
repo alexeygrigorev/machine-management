@@ -14,6 +14,8 @@
 
 **Hard guards:** no CF/DNS flip, no Coolify prod restart, no RDS touch. The weekly container uses its local socket through `docker exec`.
 
+The installer also provides `/usr/local/lib/dr-fast-pg-raise/backups/coolify-pg-replay.sh` for physical recovery. It reads the WAL segment size from the base backup, checks continuity on one timeline, and decompresses archived segments on demand. `REPLAY_TIMEOUT` defaults to 1,800 seconds. Set `WORKDIR` to a dedicated empty scratch directory with room for the extracted base and compressed WAL.
+
 ## Scripts
 
 | Path | Role |

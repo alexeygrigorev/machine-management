@@ -17,7 +17,7 @@
 # --wal-dir holds archived segments after it (--base-wal end). Segments may be
 # bare (`0000000100000000000000AB`) or gzipped (`...AB.gz`, as produced by
 # coolify-wal-shipper.sh S3 layout); .gz files are integrity-checked
-# (gzip -t) and decompressed — never silently skipped. Known pg_basebackup
+# (gzip -t) and decompressed on demand during recovery. Known pg_basebackup
 # artifacts (`<seg>.backup[gz]`) are staged, not replayed. Any other file, a
 # corrupt archive, or a gap in the segment sequence FAILS LOUDLY.
 # --recovery-target pins the replay end: 'YYYY-MM-DD HH:MM:SS+TZ' (validated
@@ -25,7 +25,7 @@
 # Continuity is verified from the base backup_label START segment through the
 # staged tip, so a missing leading/trailing segment cannot replay silently.
 #
-# Both modes: start a THROWAWAY postgres (pinned image, 127.0.0.1 only),
+# Both modes start a THROWAWAY postgres (pinned image, socket-only for PITR),
 # restore/replay, run a per-table row census, compare with --expect-counts
 # when given, print wall-clock TIMING + PASS/FAIL, then destroy the container
 # and volume (unless --keep). Exit 0 only on census match (or, without
@@ -39,8 +39,8 @@
 #       printf '%s %s\n' "$t" "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM $t;")"
 #     done | sort > source-census.txt
 #
-# Safety: never touches prod (no --prod flag exists by design); bind is
-# forced to 127.0.0.1; image defaults to pinned postgres:16.15-alpine
+# Safety: never touches prod (no --prod flag exists by design); the dump
+# restore binds to loopback only. The image defaults to postgres:16.15-alpine
 # (matches prod PG16) — never :latest.
 set -euo pipefail
 
@@ -48,6 +48,7 @@ MODE="dump"; STACK=""; DB=""; DUMP=""; FETCH_S3=""; EXPECT=""; KEEP=0
 BASE=""; BASEWAL=""; WALDIR=""; DBUSER="postgres"
 RECOVERY_TARGET="latest"; RECOVERY_TARGET_ACTION="promote"
 PG_IMAGE="${PG_IMAGE:-postgres:16.15-alpine}"
+REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-1800}"
 WORKDIR="${WORKDIR:-$(mktemp -d /tmp/pg-replay-XXXXXX)}"
 
 while [[ $# -gt 0 ]]; do
@@ -79,6 +80,7 @@ fail() { log "ERROR: $*"; exit 1; }
 # Accepted: 'latest' (replay to tip), timestamptz, LSN (X/X hex), or XID.
 RECOVERY_KIND=""
 if [[ "$MODE" == "pitr" ]]; then
+  [[ "$REPLAY_TIMEOUT" =~ ^[1-9][0-9]{0,5}$ ]] || fail "REPLAY_TIMEOUT must be a positive number of seconds"
   case "$RECOVERY_TARGET_ACTION" in
     promote|pause|shutdown) ;;
     *) fail "--recovery-target-action must be promote|pause|shutdown (got: $RECOVERY_TARGET_ACTION)" ;;
@@ -121,12 +123,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Free 127.0.0.1 port in the drill range.
-PORT=0
-for p in $(shuf -i 55440-55540 -n 20); do
-  (exec 3<>"/dev/tcp/127.0.0.1/$p") >/dev/null 2>&1 || { PORT=$p; break; }
-done
-[[ "$PORT" -ne 0 ]] || fail "no free drill port found"
+if [[ "$MODE" == "dump" ]]; then
+  PORT=0
+  for p in $(shuf -i 55440-55540 -n 20); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") >/dev/null 2>&1 || { PORT=$p; break; }
+  done
+  [[ "$PORT" -ne 0 ]] || fail "no free drill port found"
+fi
 PW="$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 24)"
 
 census_of() {
@@ -190,7 +193,7 @@ else
   if [[ -n "$WALDIR" ]]; then [[ -d "$WALDIR" ]] || fail "--wal-dir missing: $WALDIR"; fi
   command -v tar >/dev/null 2>&1 || fail "missing binary: tar"
   PGDATA="$WORKDIR/pgdata"; mkdir -p "$PGDATA"
-  chmod 755 "$WORKDIR"   # container postgres uid must traverse the bind mount
+  chmod 711 "$WORKDIR"   # allow traversal without listing the private scratch directory
   log "extracting base ..."
   if [[ "$BASE" == *.gz ]]; then tar -xzf "$BASE" -C "$PGDATA"; else tar -xf "$BASE" -C "$PGDATA"; fi
   if [[ -n "$BASEWAL" ]]; then
@@ -207,9 +210,9 @@ else
   if [[ -f "$PGDATA/backup_label" ]]; then
     STARTSEG="$(grep -a -o '(file [0-9A-F]\{24\})' "$PGDATA/backup_label" | head -1 | grep -a -o '[0-9A-F]\{24\}')"
   fi
-  printf "restore_command = 'cp /wal/%%f %%p'\n" > "$PGDATA/postgresql.auto.conf.restore"
-  cat "$PGDATA/postgresql.auto.conf.restore" >> "$PGDATA/postgresql.auto.conf"
-  rm -f "$PGDATA/postgresql.auto.conf.restore"
+  cat >> "$PGDATA/postgresql.auto.conf" <<'RECOVERY'
+restore_command = 'if [ -f "/wal/%f" ]; then cp "/wal/%f" "%p"; elif [ -f "/wal/%f.gz" ]; then gzip -dc "/wal/%f.gz" > "%p"; else exit 1; fi'
+RECOVERY
   if [[ "$RECOVERY_KIND" == "time" ]]; then
     printf "recovery_target_time = '%s'\nrecovery_target_action = '%s'\n" \
       "$RECOVERY_TARGET" "$RECOVERY_TARGET_ACTION" >> "$PGDATA/postgresql.auto.conf"
@@ -221,43 +224,27 @@ else
       "$RECOVERY_TARGET" "$RECOVERY_TARGET_ACTION" >> "$PGDATA/postgresql.auto.conf"
   fi
   touch "$PGDATA/recovery.signal"
-  # Files extract as our uid; the container runs postgres as its own uid, so
-  # hand ownership over from INSIDE the image (container root has CAP_CHOWN —
-  # a non-root operator cannot chown to another uid on the host).
-  docker run --rm --entrypoint /bin/chown -v "$PGDATA:/w/pgdata" "$PG_IMAGE" \
-    -R postgres:postgres /w/pgdata >/dev/null || fail "chown of staged pgdata failed"
-  # Stage a world-readable WAL copy (inputs may be 600; never mutate caller's dir).
-  # .gz segments (coolify-wal-shipper.sh S3 layout) are integrity-checked and
-  # decompressed to bare names; anything else FAILS LOUDLY — never skipped.
+  # Keep verified compressed files compressed. Recovery expands one segment
+  # at a time. Never change permissions or contents in the caller's archive.
   # Empty --wal-dir, or a --wal-dir with zero usable segments, fails: an
   # explicit dir that stages nothing is almost certainly a mistake, and a
   # silent base-only replay would masquerade as PITR.
   WALCOPY="$WORKDIR/wal"; mkdir -p "$WALCOPY"
   if [[ -n "$WALDIR" ]]; then
     STAGED=0
+    SEGMENTS=()
     while IFS= read -r -d '' SRC; do
       FN="$(basename "$SRC")"
+      BARE="${FN%.gz}"
+      [[ "$BARE" =~ ^[0-9A-F]{24}$ || "$BARE" =~ ^[0-9A-F]{8}\.history$ || \
+         "$BARE" =~ ^[0-9A-F]{24}(\.[0-9A-F]{8})?\.backup$ ]] \
+        || fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
       if [[ "$FN" == *.gz ]]; then
-        BARE="${FN%.gz}"
-        if [[ "$BARE" =~ ^[0-9A-F]{24}$ ]]; then
-          gzip -t "$SRC" || fail "WAL segment is CORRUPT (gzip -t failed): $FN"
-          gzip -dc "$SRC" > "$WALCOPY/$BARE" \
-            || fail "WAL segment decompress failed: $FN"
-          STAGED=$((STAGED + 1))
-        elif [[ "$BARE" =~ ^[0-9A-F]{24}(\.[0-9A-F]{8})?\.backup$ ]]; then
-          gzip -t "$SRC" || fail "WAL .backup file is CORRUPT (gzip -t failed): $FN"
-          gzip -dc "$SRC" > "$WALCOPY/$BARE" \
-            || fail "WAL .backup decompress failed: $FN"
-          STAGED=$((STAGED + 1))
-        else
-          fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
-        fi
-      elif [[ "$FN" =~ ^[0-9A-F]{24}$ || "$FN" =~ ^[0-9A-F]{8}\.history$ || "$FN" =~ ^[0-9A-F]{24}(\.[0-9A-F]{8})?\.backup$ ]]; then
-        cp "$SRC" "$WALCOPY/$FN" || fail "WAL stage copy failed: $FN"
-        STAGED=$((STAGED + 1))
-      else
-        fail "WAL input has unexpected name (want 24-hex segment [+ .gz]): $FN"
+        gzip -t "$SRC" || fail "WAL input is CORRUPT (gzip -t failed): $FN"
       fi
+      if [[ "$BARE" =~ ^[0-9A-F]{24}$ ]]; then SEGMENTS+=("$BARE"); fi
+      install -m 0600 "$SRC" "$WALCOPY/$FN" || fail "WAL stage copy failed: $FN"
+      STAGED=$((STAGED + 1))
     done < <(find "$WALDIR" -maxdepth 1 -type f -print0)
     [[ "$STAGED" -gt 0 ]] \
       || fail "--wal-dir holds zero usable WAL segments: $WALDIR"
@@ -265,10 +252,14 @@ else
     # Continuity check: sequence must include the base backup_label START
     # segment and increment by 1 with no gaps (same timeline). A gap means
     # replay would stop mid-chain and promote a partial timeline — fail now.
-    # (STARTSEG was captured before the chown handoff; pgdata is no longer
-    # readable by our uid here.)
     [[ -n "$STARTSEG" ]] \
       || fail "base backup_label missing START segment — cannot verify WAL continuity"
+    CONTROL=$(docker run --rm --network none -e LC_ALL=C --entrypoint pg_controldata \
+      -v "$PGDATA:/w/pgdata:ro" "$PG_IMAGE" /w/pgdata) || fail "cannot read WAL segment size from pg_control"
+    SEG_BYTES=$(awk -F: '/^Bytes per WAL segment:/ {gsub(/[[:space:]]/, "", $2); print $2}' <<< "$CONTROL")
+    [[ "$SEG_BYTES" =~ ^[1-9][0-9]{6,9}$ ]] && (( SEG_BYTES >= 1048576 && SEG_BYTES <= 1073741824 && (SEG_BYTES & (SEG_BYTES - 1)) == 0 )) \
+      || fail "invalid WAL segment size in pg_control: $SEG_BYTES"
+    SEGMENTS_PER_LOG=$(( 0x100000000 / SEG_BYTES ))
     log "base START segment: $STARTSEG"
     PREV=""
     BEGUN=0
@@ -281,32 +272,33 @@ else
           || fail "WAL GAP: staged chain starts at $SEG but base needs $STARTSEG"
         BEGUN=1
       else
-        if [[ "${SEG:0:16}" != "${PREV:0:16}" ]]; then
+        if [[ "${SEG:0:8}" != "${PREV:0:8}" ]]; then
           fail "WAL TIMELINE CHANGE unsupported ($PREV -> $SEG) — investigate, refusing silent replay"
         fi
-        WANT="$(printf '%08X' $((16#${PREV:16:8} + 1)))"
-        [[ "${SEG:16:8}" == "$WANT" ]] \
-          || fail "WAL GAP: after $PREV expected ${PREV:0:16}${WANT} but chain has $SEG"
+        NEXT_INDEX=$((16#${PREV:16:8} + 1))
+        NEXT_LOG=$((16#${PREV:8:8} + NEXT_INDEX / SEGMENTS_PER_LOG))
+        printf -v WANT '%s%08X%08X' "${PREV:0:8}" "$NEXT_LOG" "$((NEXT_INDEX % SEGMENTS_PER_LOG))"
+        [[ "$SEG" == "$WANT" ]] || fail "WAL GAP: after $PREV expected $WANT but chain has $SEG"
       fi
+      (( 16#${SEG:16:8} < SEGMENTS_PER_LOG )) || fail "WAL segment index out of range: $SEG"
       PREV="$SEG"
-    done < <(ls "$WALCOPY" | grep -E '^[0-9A-F]{24}$' | sort)
+    done < <(printf '%s\n' "${SEGMENTS[@]}" | LC_ALL=C sort -u | sed '/^$/d')
     [[ "$BEGUN" -eq 1 ]] \
       || fail "WAL GAP: base START segment $STARTSEG not present in staged WAL"
     log "WAL chain continuous: $STARTSEG .. $PREV"
-    chmod -R a+rX "$WALCOPY"
   fi
-  log "starting throwaway $PG_IMAGE on 127.0.0.1:$PORT for WAL replay (stack=${STACK:-?}) ..."
-  docker run -d --name "$RUN_ID" --restart=no \
+  chmod 700 "$PGDATA" "$WALCOPY"
+  docker run --rm --network none --entrypoint /bin/chown \
+    -v "$PGDATA:/w/pgdata" -v "$WALCOPY:/w/wal" "$PG_IMAGE" \
+    -R postgres:postgres /w/pgdata /w/wal >/dev/null || fail "chown of replay inputs failed"
+  log "starting socket-only throwaway $PG_IMAGE for WAL replay (stack=${STACK:-?}) ..."
+  docker run -d --name "$RUN_ID" --restart=no --network none \
     -e POSTGRES_PASSWORD="$PW" \
     -v "$PGDATA:/var/lib/postgresql/data" \
     -v "$WALCOPY:/wal:ro" \
-    -p "127.0.0.1:${PORT}:5432" "$PG_IMAGE" >/dev/null || fail "docker run failed"
+    "$PG_IMAGE" -c archive_mode=off >/dev/null || fail "docker run failed"
   T1=$T0
   TARGET_DB="${DB:-postgres}"
-  for _ in $(seq 1 60); do
-    PGPASSWORD="$PW" pg_isready -h 127.0.0.1 -p "$PORT" >/dev/null 2>&1 && break
-    sleep 2
-  done
   # Wait for recovery to finish (replay to tip of available WAL, or to the
   # explicit --recovery-target). A torn/missing tail segment makes Postgres
   # retry restore_command forever — the loop below times out and fails LOUDLY
@@ -314,15 +306,25 @@ else
   # NOTE: local-socket exec as the image superuser — the restored instance
   # keeps its ORIGINAL password, which we do not know (and never ask for).
   # TARGET_DB must exist in the restored cluster (it does — same DBs as prod).
-  for _ in $(seq 1 60); do
+  DEADLINE=$((SECONDS + REPLAY_TIMEOUT))
+  while :; do
     INREC="$(docker exec "$RUN_ID" psql -U "$DBUSER" -d "$TARGET_DB" -tAc 'SELECT pg_is_in_recovery();' 2>/dev/null || echo "?")"
     [[ "$INREC" == "f" ]] && break
+    (( SECONDS < DEADLINE )) || break
+    [[ "$(docker inspect --format '{{.State.Running}}' "$RUN_ID")" == "true" ]] || break
     sleep 2
   done
   if [[ "$INREC" != "f" ]]; then
     log "ERROR: recovery log tail (why replay is stuck):"
     docker logs "$RUN_ID" 2>&1 | grep -a -E 'FATAL|ERROR|WARNING|restore|recovery|WAL|target' | tail -20 || true
-    fail "instance still in recovery after 120s (WAL gap, torn tail, or unreachable target) — refusing to promote"
+    fail "replay did not complete (timeout ${REPLAY_TIMEOUT}s, PostgreSQL failure, or unreachable target)"
+  fi
+  if [[ "$RECOVERY_KIND" == "latest" && -n "$WALDIR" ]]; then
+    printf -v TIP_LSN '%X/%08X' "$((16#${PREV:8:8}))" "$((16#${PREV:16:8} * SEG_BYTES))"
+    AT_TIP="$(docker exec "$RUN_ID" psql -U "$DBUSER" -d "$TARGET_DB" -tAc \
+      "SELECT pg_last_wal_replay_lsn() >= '$TIP_LSN'::pg_lsn;")"
+    [[ "$AT_TIP" == "t" ]] || fail "replay ended before the last staged WAL segment ($PREV)"
+    log "replay reached the last staged WAL segment: $PREV"
   fi
   # pitr census uses the image's postgres superuser via local socket (trust).
   CENSUS_TMP="$WORKDIR/census.txt"; : > "$CENSUS_TMP"; PTOTAL=0
